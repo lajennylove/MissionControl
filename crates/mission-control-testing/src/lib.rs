@@ -36,7 +36,7 @@ pub const DATABASE_URL_VAR: &str = "MC_TEST_DATABASE_URL";
 /// that reference others come first, so PostgreSQL drops them without `CASCADE`. Add each new
 /// core table here, above the tables it references; a test in `mission-control-core` checks that
 /// this list matches what the migrations create.
-pub const CORE_TABLES: &[&str] = &["options"];
+pub const CORE_TABLES: &[&str] = &["posts", "options"];
 
 /// The table the migrator records applied migrations in. Shared with Ignite and any other Orbit
 /// app on the database, so only the core migrations' rows are removed from it.

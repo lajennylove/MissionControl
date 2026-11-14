@@ -747,11 +747,13 @@ version = "0.1.0"
 name = "mission-control-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dotenvy",
  "fs4",
  "mission-control-testing",
  "orbit-orm",
  "serde",
+ "sqlx",
  "tokio",
 ]
 
@@ -781,11 +783,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "orbit-macros"
+version = "0.1.0"
+source = "git+https://github.com/lajennylove/Orbit?rev=c2ee11f#c2ee11fc4a60b4fc3690b7bc36f0a114666fa45a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "orbit-orm"
 version = "0.1.0"
 source = "git+https://github.com/lajennylove/Orbit?rev=c2ee11f#c2ee11fc4a60b4fc3690b7bc36f0a114666fa45a"
 dependencies = [
  "chrono",
+ "orbit-macros",
  "sqlx",
  "thiserror",
  "tokio",

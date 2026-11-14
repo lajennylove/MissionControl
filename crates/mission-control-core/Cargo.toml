@@ -7,10 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 fs4 = "1.1.0"
 orbit-orm.workspace = true
 serde = { version = "1", features = ["derive"] }
+# The `Decode` and `Type` traits, so `PostStatus` reads from a row. Orbit's own sqlx version.
+sqlx = { version = "0.9", default-features = false }
 
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }

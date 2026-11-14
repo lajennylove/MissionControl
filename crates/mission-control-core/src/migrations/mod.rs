@@ -11,6 +11,7 @@
 use orbit_orm::{Error, Migrator};
 
 mod m20261114000000_create_options_table;
+mod m20261114000100_create_posts_table;
 
 /// Every core migration, in order. `run` applies the pending ones as one batch, and `rollback`
 /// reverts the last batch.
@@ -19,5 +20,8 @@ mod m20261114000000_create_options_table;
 ///
 /// Fails when two migrations share a timestamp or a name lacks one, which a test catches.
 pub fn migrator() -> Result<Migrator, Error> {
-    Migrator::new(vec![m20261114000000_create_options_table::migration()])
+    Migrator::new(vec![
+        m20261114000000_create_options_table::migration(),
+        m20261114000100_create_posts_table::migration(),
+    ])
 }
