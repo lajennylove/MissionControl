@@ -759,6 +759,7 @@ dependencies = [
 name = "mission-control-testing"
 version = "0.1.0"
 dependencies = [
+ "mission-control-core",
  "orbit-orm",
  "tempfile",
  "tokio",
