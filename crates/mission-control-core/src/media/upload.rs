@@ -437,6 +437,11 @@ impl From<StorageError> for UploadError {
 /// An upload that passed [`validate`], ready for [`store`].
 #[derive(Debug, Clone)]
 pub struct ValidatedUpload<'a> {
+    /// The client's file name as sent, for example `My Photo.jpg`: only its
+    /// last component after `/` or `\`, otherwise uncleaned. It gives an
+    /// attachment its default title, as WordPress's `media_handle_upload`
+    /// takes it from `$_FILES['name']`; it is never used as a path.
+    pub client_name: String,
     /// The sanitised file name, for example `My-Photo.jpg`.
     pub file_name: String,
     /// The lowercase extension, for example `jpg`.
@@ -509,6 +514,11 @@ pub fn validate<'a>(
     }
 
     Ok(ValidatedUpload {
+        client_name: client_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
         file_name,
         extension,
         mime_type: file_type.mime_type,
@@ -687,16 +697,14 @@ fn looks_like_sub_size(stem: &str) -> bool {
         .is_some_and(|(_, tail)| is_sub_size_suffix(tail))
 }
 
-/// Whether `file` (a name in the folder) is named like a sub-size of the
-/// file `stem.extension`: `stem-{w}x{h}.extension`, `stem-scaled.extension`
-/// or `stem-rotated.extension`, ignoring case, as WordPress's
-/// `_wp_check_existing_file_names` matches them.
-fn is_sub_size_of(file: &str, stem: &str, extension: &str) -> bool {
-    let file = file.to_lowercase();
-    let Some(rest) = file.strip_prefix(&format!("{}-", stem.to_lowercase())) else {
-        return false;
-    };
-    rest.strip_suffix(&format!(".{}", extension.to_lowercase()))
+/// Whether `file`, a lowercased name in the folder, is named like a sub-size
+/// of a file whose lowercased stem and extension give `prefix` (`stem-`) and
+/// `suffix` (`.ext`): `stem-{w}x{h}.ext`, `stem-scaled.ext` or
+/// `stem-rotated.ext`, as WordPress's `_wp_check_existing_file_names`
+/// matches them (ignoring case).
+fn is_sub_size_of(file: &str, prefix: &str, suffix: &str) -> bool {
+    file.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(suffix))
         .is_some_and(is_sub_size_suffix)
 }
 
@@ -731,20 +739,29 @@ pub fn store(
         .rsplit_once('.')
         .unwrap_or((upload.file_name.as_str(), upload.extension.as_str()));
     let first = u32::from(looks_like_sub_size(stem));
-    let taken = if upload.mime_type.starts_with("image/") {
-        storage.list(&folder)?
+    // Lowercased once: the match ignores case.
+    let taken: Vec<String> = if upload.mime_type.starts_with("image/") {
+        storage
+            .list(&folder)?
+            .iter()
+            .map(|name| name.to_lowercase())
+            .collect()
     } else {
         Vec::new()
     };
+    let suffix = format!(".{}", extension.to_lowercase());
     let mut paths = (first..=MAX_UNIQUE_ATTEMPTS).filter_map(|number| {
         let candidate = if number == 0 {
             stem.to_owned()
         } else {
             format!("{stem}-{number}")
         };
-        let clashes = taken
-            .iter()
-            .any(|file| is_sub_size_of(file, &candidate, extension));
+        let clashes = !taken.is_empty() && {
+            let prefix = format!("{}-", candidate.to_lowercase());
+            taken
+                .iter()
+                .any(|file| is_sub_size_of(file, &prefix, &suffix))
+        };
         (!clashes).then(|| format!("{folder}/{candidate}.{extension}"))
     });
     match storage.put_new_first(&mut paths, upload.bytes) {

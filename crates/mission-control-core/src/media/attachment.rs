@@ -2,9 +2,9 @@
 //! `media_handle_upload` and `wp_insert_attachment` keep it.
 //!
 //! The row has the status `inherit` and the post it was uploaded to as its parent. Its title
-//! starts as the file name without the extension; the caption is the excerpt, the description
-//! is the content, and the MIME type is `mime_type` (`post_mime_type`). Three post meta keys go
-//! with it, as in WordPress:
+//! starts as the client's file name without the extension (see [`create_attachment`]); the
+//! caption is the excerpt, the description is the content, and the MIME type is `mime_type`
+//! (`post_mime_type`). Three post meta keys go with it, as in WordPress:
 //!
 //! - `_wp_attached_file`: the file's storage path, `YYYY/MM/name.ext`;
 //! - `_wp_attachment_metadata`: an image's size and sub-sizes ([`AttachmentMetadata`]), for
@@ -17,7 +17,8 @@
 //! use mission_control_core::media::{create_attachment, update_attachment_details, validate};
 //!
 //! let upload = validate("Harbour.jpg", &bytes, max_bytes)?;
-//! let attachment = create_attachment(&db, &storage, &sizes, &upload, Some(post.id), author).await?;
+//! let attachment = create_attachment(&db, &storage, &sizes, &upload, Some(post.id), author, None)
+//!     .await?;
 //! update_attachment_details(&db, attachment.id, "Harbour", "Boats at dawn", "", "").await?;
 //! ```
 
@@ -147,14 +148,22 @@ impl From<StorageError> for AttachmentError {
 ///    `parent` is given and is not a page, of the parent's publish date, as WordPress files an
 ///    upload under its post's month.
 /// 2. An image gets its sub-sizes, one per size in `sizes` ([`create_image_subsizes`]).
-/// 3. The attachment row (status `inherit`, parent `parent`, title the file name without its
-///    extension, the upload's MIME type) and its meta `_wp_attached_file` and, for an image,
-///    `_wp_attachment_metadata` are inserted in one transaction, as `wp_insert_attachment` and
-///    `wp_update_attachment_metadata` write them.
+/// 3. The attachment row (status `inherit`, parent `parent`, the upload's MIME type) and its
+///    meta `_wp_attached_file` and, for an image, `_wp_attachment_metadata` are inserted in one
+///    transaction, as `wp_insert_attachment` and `wp_update_attachment_metadata` write them.
+///
+/// The title is `title` when given (the REST API passes the stored file name without its
+/// extension, as `WP_REST_Attachments_Controller` does). Otherwise it is the admin's default,
+/// as `media_handle_upload` makes it: the client's file name
+/// ([`ValidatedUpload::client_name`]) without its extension, cleaned as `sanitize_text_field`
+/// does (tags stripped, whitespace collapsed and trimmed). So `Sunset Beach.jpg` stored as
+/// `Sunset-Beach-1.jpg` is titled `Sunset Beach`.
 ///
 /// Steps 1 and 2 are disk and CPU work, run on a blocking thread (`spawn_blocking`); the bytes
-/// are copied for it. When step 2 or 3 fails, the files already written are deleted, best
-/// effort, so a failed upload leaves no orphan files.
+/// are copied for it. When step 3 returns an error, the original and its sub-sizes are deleted
+/// (on a blocking thread too), and when step 2 returns an error, the original is; both are best
+/// effort, with failures logged. Files can still be left behind when step 2 fails after writing
+/// some sub-sizes, or when the caller drops this future part way (a closed request).
 ///
 /// # Errors
 ///
@@ -169,6 +178,7 @@ pub async fn create_attachment(
     upload: &ValidatedUpload<'_>,
     parent: Option<i64>,
     author: i64,
+    title: Option<&str>,
 ) -> Result<Attachment, AttachmentError> {
     let date = match parent {
         Some(id) => upload_date(db, id).await?,
@@ -178,31 +188,28 @@ pub async fn create_attachment(
     let (path, metadata) = {
         let storage = Arc::clone(storage);
         let sizes = Arc::clone(sizes);
+        let client_name = upload.client_name.clone();
         let file_name = upload.file_name.clone();
         let extension = upload.extension.clone();
         let mime_type = upload.mime_type;
         let bytes = upload.bytes.to_vec();
-        let task = tokio::task::spawn_blocking(move || {
+        blocking(move || {
             let upload = ValidatedUpload {
+                client_name,
                 file_name,
                 extension,
                 mime_type,
                 bytes: &bytes,
             };
             write_files(&*storage, &sizes, &upload, date)
-        });
-        match task.await {
-            Ok(result) => result?,
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(e) => return Err(StorageError::Io(std::io::Error::other(e)).into()),
-        }
+        })
+        .await??
     };
 
-    let title = upload
-        .file_name
-        .rsplit_once('.')
-        .map_or(upload.file_name.as_str(), |(stem, _)| stem)
-        .to_owned();
+    let title = match title {
+        Some(title) => title.to_owned(),
+        None => default_title(&upload.client_name),
+    };
     let new = NewPost {
         status: PostStatus::Inherit,
         title,
@@ -228,10 +235,134 @@ pub async fn create_attachment(
             metadata,
         }),
         Err(e) => {
-            delete_files(&**storage, &path, metadata.as_ref());
+            let storage = Arc::clone(storage);
+            let cleanup = blocking(move || delete_files(&*storage, &path, metadata.as_ref()));
+            if let Err(join) = cleanup.await {
+                log::warn!("could not delete the files of a failed upload: {join}");
+            }
             Err(e)
         }
     }
+}
+
+/// Runs `f` on a blocking thread and waits for it. A panic in `f` is resumed here; a task the
+/// runtime cancelled (it is shutting down) is an I/O error.
+async fn blocking<T, F>(f: F) -> Result<T, AttachmentError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => Ok(value),
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(StorageError::Io(std::io::Error::other(e)).into()),
+    }
+}
+
+/// The admin's default title for an upload sent as `client_name`, as `media_handle_upload`
+/// makes it: the name without its last extension (`wp_basename($name, ".$ext")`), through
+/// [`sanitize_text_field`].
+fn default_title(client_name: &str) -> String {
+    let stem = client_name
+        .rsplit_once('.')
+        .map_or(client_name, |(stem, _)| stem);
+    sanitize_text_field(stem)
+}
+
+/// Cleans one line of text as WordPress's `sanitize_text_field` does: a `<` that does not open a
+/// tag becomes `&lt;` (`wp_pre_kses_less_than`), tags are stripped (with the content of
+/// `script` and `style` elements, as `wp_strip_all_tags` does), line breaks, tabs and runs of
+/// spaces become one space, percent-encoded octets (`%C3`) are removed, and the ends are
+/// trimmed.
+fn sanitize_text_field(text: &str) -> String {
+    let stripped = strip_all_tags(text);
+    let mut collapsed = String::with_capacity(stripped.len());
+    for c in stripped.chars() {
+        let c = if matches!(c, '\r' | '\n' | '\t') {
+            ' '
+        } else {
+            c
+        };
+        if c == ' ' && collapsed.ends_with(' ') {
+            continue;
+        }
+        if c.is_control() {
+            continue;
+        }
+        collapsed.push(c);
+    }
+    // WordPress removes octets until none is left, so `%%41` cannot leave a new one.
+    let mut out = collapsed;
+    loop {
+        let next = remove_octets(&out);
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    out.trim_matches(' ').to_owned()
+}
+
+/// `text` without percent-encoded octets (`%` and two hex digits).
+fn remove_octets(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if bytes[i] == b'%'
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+        {
+            i += 3;
+            continue;
+        }
+        let c = text[i..].chars().next().expect("i is on a char boundary");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// `text` with its tags stripped, after `wp_pre_kses_less_than` and `wp_strip_all_tags`: a tag
+/// is `<` followed by a letter, `/`, `!` or `?`, up to the next `>`; any other `<`, or one with
+/// no `>` after it, becomes `&lt;`. The content of `script` and `style` elements goes with them.
+fn strip_all_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let opens_tag = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'));
+        match after.find('>') {
+            Some(end) if opens_tag => {
+                let name: String = after
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                rest = &after[end + 1..];
+                if name == "script" || name == "style" {
+                    let close = format!("</{name}");
+                    rest = match rest.to_ascii_lowercase().find(&close) {
+                        Some(at) => match rest[at..].find('>') {
+                            Some(gt) => &rest[at + gt + 1..],
+                            None => "",
+                        },
+                        None => "",
+                    };
+                }
+            }
+            _ => {
+                out.push_str("&lt;");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The date whose `YYYY/MM` folder an upload to `parent` goes in, as `media_handle_upload`

@@ -125,14 +125,15 @@ async fn an_image_upload_becomes_an_attachment_with_its_sizes_and_meta() {
 
     let bytes = jpeg_bytes(1600, 1200);
     let upload = validate("Sunset Beach.jpg", &bytes, MAX).unwrap();
-    let attachment = create_attachment(db, &storage, &sizes, &upload, None, author)
+    let attachment = create_attachment(db, &storage, &sizes, &upload, None, author, None)
         .await
         .expect("creates the attachment");
 
     let folder = this_month();
     assert!(attachment.id > 0);
-    // WordPress's default title: the file name without its extension.
-    assert_eq!(attachment.title, "Sunset-Beach");
+    // The admin's default title (`media_handle_upload`): the client's file name without its
+    // extension, cleaned as `sanitize_text_field` does; the stored name is sanitised apart.
+    assert_eq!(attachment.title, "Sunset Beach");
     assert_eq!(attachment.alt, "");
     assert_eq!(attachment.caption, "");
     assert_eq!(attachment.description, "");
@@ -165,7 +166,7 @@ async fn an_image_upload_becomes_an_attachment_with_its_sizes_and_meta() {
     assert_eq!(post.post_type, "attachment");
     assert_eq!(post.status, PostStatus::Inherit);
     assert_eq!(post.mime_type, "image/jpeg");
-    assert_eq!(post.title, "Sunset-Beach");
+    assert_eq!(post.title, "Sunset Beach");
     assert_eq!(post.slug, "sunset-beach");
     assert_eq!(post.author_id, author);
     assert!(post.published_at.is_some());
@@ -200,7 +201,7 @@ async fn title_alt_caption_and_description_save_and_read_back() {
 
     let bytes = jpeg_bytes(400, 300);
     let upload = validate("photo.jpg", &bytes, MAX).unwrap();
-    let attachment = create_attachment(db, &storage, &sizes, &upload, None, author)
+    let attachment = create_attachment(db, &storage, &sizes, &upload, None, author, None)
         .await
         .unwrap();
 
@@ -265,11 +266,11 @@ async fn files_that_are_not_images_have_no_sizes() {
     let (temp, storage, sizes) = media("documents");
 
     let pdf = validate("Annual Report.pdf", PDF, MAX).unwrap();
-    let report = create_attachment(db, &storage, &sizes, &pdf, None, author)
+    let report = create_attachment(db, &storage, &sizes, &pdf, None, author, None)
         .await
         .unwrap();
     assert_eq!(report.mime_type, "application/pdf");
-    assert_eq!(report.title, "Annual-Report");
+    assert_eq!(report.title, "Annual Report");
     assert_eq!(report.metadata, None);
     assert_eq!(
         get_post_meta(db, report.id, "_wp_attachment_metadata")
@@ -279,7 +280,7 @@ async fn files_that_are_not_images_have_no_sizes() {
     );
 
     let text = validate("notes.txt", b"Some notes.\n", MAX).unwrap();
-    let notes = create_attachment(db, &storage, &sizes, &text, None, author)
+    let notes = create_attachment(db, &storage, &sizes, &text, None, author, None)
         .await
         .unwrap();
     assert_eq!(notes.mime_type, "text/plain");
@@ -324,7 +325,7 @@ async fn an_attachment_links_to_the_post_it_was_uploaded_to() {
 
     let bytes = jpeg_bytes(200, 100);
     let upload = validate("boat.jpg", &bytes, MAX).unwrap();
-    let attachment = create_attachment(db, &storage, &sizes, &upload, Some(post.id), author)
+    let attachment = create_attachment(db, &storage, &sizes, &upload, Some(post.id), author, None)
         .await
         .unwrap();
     assert_eq!(attachment.parent_id, Some(post.id));
@@ -345,7 +346,7 @@ async fn an_attachment_links_to_the_post_it_was_uploaded_to() {
     )
     .await
     .unwrap();
-    let on_page = create_attachment(db, &storage, &sizes, &upload, Some(page.id), author)
+    let on_page = create_attachment(db, &storage, &sizes, &upload, Some(page.id), author, None)
         .await
         .unwrap();
     assert_eq!(on_page.file, format!("{}/boat.jpg", this_month()));
@@ -361,14 +362,30 @@ async fn an_attachment_links_to_the_post_it_was_uploaded_to() {
     // A parent that does not exist, or that is an attachment, is refused before any file is
     // written.
     let before = files(&temp);
-    let missing =
-        create_attachment(db, &storage, &sizes, &upload, Some(post.id + 1_000), author).await;
+    let missing = create_attachment(
+        db,
+        &storage,
+        &sizes,
+        &upload,
+        Some(post.id + 1_000),
+        author,
+        None,
+    )
+    .await;
     assert!(
         matches!(missing, Err(AttachmentError::InvalidParent(id)) if id == post.id + 1_000),
         "{missing:?}"
     );
-    let nested =
-        create_attachment(db, &storage, &sizes, &upload, Some(attachment.id), author).await;
+    let nested = create_attachment(
+        db,
+        &storage,
+        &sizes,
+        &upload,
+        Some(attachment.id),
+        author,
+        None,
+    )
+    .await;
     assert!(
         matches!(nested, Err(AttachmentError::InvalidParent(_))),
         "{nested:?}"
@@ -393,6 +410,7 @@ async fn an_upload_named_like_a_sub_size_never_blocks_or_overwrites_sub_sizes() 
         &validate("photo.jpg", &first_bytes, MAX).unwrap(),
         None,
         author,
+        None,
     )
     .await
     .unwrap();
@@ -406,6 +424,7 @@ async fn an_upload_named_like_a_sub_size_never_blocks_or_overwrites_sub_sizes() 
         &validate("photo-150x150.jpg", &second_bytes, MAX).unwrap(),
         None,
         author,
+        None,
     )
     .await
     .unwrap();
@@ -431,6 +450,7 @@ async fn an_upload_named_like_a_sub_size_never_blocks_or_overwrites_sub_sizes() 
         &validate("picture.jpg", &first_bytes, MAX).unwrap(),
         None,
         author,
+        None,
     )
     .await
     .unwrap();
@@ -461,7 +481,7 @@ async fn a_database_failure_removes_the_files_written() {
     let bytes = jpeg_bytes(800, 600);
     let upload = validate("photo.jpg", &bytes, MAX).unwrap();
     let missing_author = author + 1_000_000;
-    let result = create_attachment(db, &storage, &sizes, &upload, None, missing_author).await;
+    let result = create_attachment(db, &storage, &sizes, &upload, None, missing_author, None).await;
     assert!(
         matches!(
             result,
@@ -496,4 +516,64 @@ async fn other_post_types_are_not_attachments() {
     );
     // The post is untouched.
     assert_eq!(Post::query().find_or_fail(db, post.id).await.unwrap(), post);
+}
+
+#[tokio::test]
+async fn the_default_title_is_the_client_file_name_and_an_explicit_title_wins() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let (_temp, storage, sizes) = media("titles");
+    let folder = this_month();
+
+    let upload = validate("Sunset Beach.txt", b"dusk", MAX).unwrap();
+    let first = create_attachment(db, &storage, &sizes, &upload, None, author, None)
+        .await
+        .unwrap();
+    assert_eq!(first.title, "Sunset Beach");
+    assert_eq!(first.file, format!("{folder}/Sunset-Beach.txt"));
+
+    // A numbered upload keeps the client's name as its title, not the stored `-1` name.
+    let second = create_attachment(db, &storage, &sizes, &upload, None, author, None)
+        .await
+        .unwrap();
+    assert_eq!(second.file, format!("{folder}/Sunset-Beach-1.txt"));
+    assert_eq!(second.title, "Sunset Beach");
+
+    // An explicit title (the REST API's rule, Task 10.4) wins.
+    let titled = create_attachment(
+        db,
+        &storage,
+        &sizes,
+        &upload,
+        None,
+        author,
+        Some("Harbour at dawn"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(titled.title, "Harbour at dawn");
+
+    // Cleaned as `sanitize_text_field` does: tags stripped, whitespace collapsed and trimmed,
+    // percent-encoded octets removed, only the last extension dropped.
+    for (client, title) in [
+        // No `/` in a tag: the client name keeps only what follows the last one.
+        (
+            "  <em>Holiday<br>\tSnaps \n 2026 .txt",
+            "Holiday Snaps 2026",
+        ),
+        ("caf%C3%A9 menu.txt", "caf menu"),
+        ("../uploads/report.final.txt", "report.final"),
+        ("a < b.txt", "a &lt; b"),
+    ] {
+        let upload = validate(client, b"text", MAX).unwrap();
+        assert_eq!(
+            upload.client_name,
+            client.rsplit(['/', '\\']).next().unwrap()
+        );
+        let attachment = create_attachment(db, &storage, &sizes, &upload, None, author, None)
+            .await
+            .unwrap();
+        assert_eq!(attachment.title, title, "{client:?}");
+    }
 }

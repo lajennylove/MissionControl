@@ -404,6 +404,14 @@ fn files_that_get_no_sub_sizes_ignore_sub_size_names() {
 }
 
 #[test]
+fn the_client_name_is_kept_apart_from_the_stored_name() {
+    let upload = validate("../dir\\My Notes.TXT", b"hello", MAX).unwrap();
+    // The last component only, otherwise as sent: for the default title, never a path.
+    assert_eq!(upload.client_name, "My Notes.TXT");
+    assert_eq!(upload.file_name, "My-Notes.txt");
+}
+
+#[test]
 fn concurrent_uploads_of_one_name_never_overwrite() {
     let (_t, s) = setup("race");
     let s = Arc::new(s);
