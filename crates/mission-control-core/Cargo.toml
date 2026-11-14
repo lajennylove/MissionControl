@@ -16,6 +16,9 @@ dotenvy = "0.15"
 fs4 = "1.1.0"
 # `catch_unwind` on the scheduler's tick future.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Decodes, resizes and encodes image sub-sizes (MIT OR Apache-2.0). Only the four web formats
+# WordPress resizes by default; no rayon.
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 # Detects a file's real type from its magic numbers (MIT; its `cfb` dependency is MIT).
 infer = "0.22"
 # The logging facade Rocket 0.5 logs through.
