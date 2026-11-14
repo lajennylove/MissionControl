@@ -5,12 +5,17 @@
 //! `YYYY/MM/` folders, as WordPress's `wp_upload_dir` does with
 //! `uploads_use_yearmonth_folders` on (its default). An upload is checked
 //! and named by [`upload`] before it is written. Images get resized copies
-//! for each registered size ([`sizes`]).
+//! for each registered size ([`sizes`]). A stored file is an attachment, a
+//! `posts` row with its details ([`attachment`]).
 
+pub mod attachment;
 pub mod sizes;
 pub mod storage;
 pub mod upload;
 
+pub use attachment::{
+    Attachment, AttachmentError, create_attachment, get_attachment, update_attachment_details,
+};
 pub use sizes::{
     AttachmentMetadata, ImageSize, ImageSizes, JPEG_QUALITY, MAX_DECODE_BYTES, MAX_IMAGE_DIMENSION,
     ResizeDimensions, SubSize, constrain_dimensions, create_image_subsizes,

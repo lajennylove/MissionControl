@@ -136,6 +136,13 @@ impl Post {
     /// Fails with [`Error::ForeignKeyViolation`] when the author does not exist, or with the
     /// database's error.
     pub async fn create(db: &Database, new: NewPost) -> Result<Self, Error> {
+        db.transaction(async |tx| Self::create_in(tx, new).await)
+            .await
+    }
+
+    /// [`Post::create`] on the connection of a transaction the caller holds, so other writes
+    /// (an attachment's meta) commit or roll back with the post.
+    pub(crate) async fn create_in(tx: &mut Transaction, new: NewPost) -> Result<Self, Error> {
         let mut post = Self {
             id: 0,
             author_id: new.author_id,
@@ -153,14 +160,11 @@ impl Post {
             mime_type: new.mime_type,
         };
         post.slug = wanted_slug(&post, None);
-        db.transaction(async |tx| {
-            // The insert comes first, so on SQLite the transaction holds the write lock before
-            // it reads.
-            let id = Self::query().insert(&mut *tx, &post.columns()).await?;
-            post.id = i64::try_from(id).expect("an id from a BIGINT column fits in i64");
-            write_settled_slug(tx, &mut post).await
-        })
-        .await?;
+        // The insert comes first, so on SQLite the transaction holds the write lock before it
+        // reads.
+        let id = Self::query().insert(&mut *tx, &post.columns()).await?;
+        post.id = i64::try_from(id).expect("an id from a BIGINT column fits in i64");
+        write_settled_slug(tx, &mut post).await?;
         Ok(post)
     }
 
@@ -410,7 +414,7 @@ pub(super) async fn write_settled_slug(tx: &mut Transaction, post: &mut Post) ->
 /// writes in the same second would leave the same stamp, and an editor holding it as the
 /// expected value of [`save_revision`](super::save_revision) would overwrite the second write
 /// unnoticed. Under rapid writes the stamp can run a few seconds ahead of the clock.
-pub(super) fn next_modified_at(stored: NaiveDateTime) -> NaiveDateTime {
+pub(crate) fn next_modified_at(stored: NaiveDateTime) -> NaiveDateTime {
     now().max(stored + Duration::seconds(1))
 }
 
@@ -443,7 +447,7 @@ pub(super) fn due_status(
 
 /// The current time in UTC, to the second: what MySQL's `DATETIME` and PostgreSQL's
 /// `TIMESTAMP(0)` store, so the value read back equals the one written.
-pub(super) fn now() -> NaiveDateTime {
+pub(crate) fn now() -> NaiveDateTime {
     Utc::now().naive_utc().trunc_subsecs(0)
 }
 

@@ -31,6 +31,7 @@ pub use future::{
     PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
     schedule_future_post,
 };
+pub(crate) use meta::put_post_meta_in;
 pub use meta::{
     MetaError, delete_option, delete_post_meta, delete_term_meta, delete_user_meta, get_option,
     get_post_meta, get_post_meta_values, get_term_meta, get_user_meta, set_option, set_option_raw,
@@ -41,6 +42,7 @@ pub use permalink::{
     PermalinkContext, PermalinkError, PermalinkStructure, Segment, Tag, page_ancestors, permalink,
 };
 pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};
+pub(crate) use post::{next_modified_at, now};
 pub use revision::{
     Revision, SaveError, create_post_autosave, get_post_autosave, get_post_revisions, save_revision,
 };
