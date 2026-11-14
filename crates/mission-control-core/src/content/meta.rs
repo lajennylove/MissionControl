@@ -212,6 +212,89 @@ impl Store {
         self.set_text(db, owner, key, json).await
     }
 
+    /// Every value under `key`, in the order the rows were added.
+    async fn get_all<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+    ) -> Result<Vec<Value>, MetaError> {
+        let (filter, binds) = self.filter(owner, key);
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {filter} ORDER BY id",
+            self.value, self.table
+        );
+        let rows: Vec<(String,)> = raw::fetch_all(c.exec(), &sql, &binds).await?;
+        rows.into_iter()
+            .map(|(text,)| serde_json::from_str(&text).map_err(MetaError::from))
+            .collect()
+    }
+
+    /// Adds a row under `key`, beside any rows already there, as `add_post_meta` does.
+    async fn add<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<(), Error> {
+        let column = self.owner.expect("only owned meta repeats a key");
+        raw::execute(
+            c.exec(),
+            &format!(
+                "INSERT INTO {} ({column}, {}, {}) VALUES (?, ?, ?)",
+                self.table, self.key, self.value
+            ),
+            &[owner.into(), key.into(), json.into()],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Whether a row under `key` has the text `json`.
+    async fn has_value<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<bool, Error> {
+        let (filter, mut binds) = self.filter(owner, key);
+        binds.push(json.into());
+        let found: i64 = raw::fetch_scalar(
+            c.exec(),
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE {filter} AND {} = ?",
+                self.table, self.value
+            ),
+            &binds,
+        )
+        .await?;
+        Ok(found > 0)
+    }
+
+    /// Deletes the rows under `key` whose text is `json`. True when there was one.
+    async fn delete_value<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<bool, Error> {
+        let (filter, mut binds) = self.filter(owner, key);
+        binds.push(json.into());
+        let deleted = raw::execute(
+            c.exec(),
+            &format!(
+                "DELETE FROM {} WHERE {filter} AND {} = ?",
+                self.table, self.value
+            ),
+            &binds,
+        )
+        .await?;
+        Ok(deleted > 0)
+    }
+
     /// Deletes every row under `key`. True when there was one.
     async fn delete<C: Conn>(&self, c: &mut C, owner: i64, key: &str) -> Result<bool, Error> {
         let (filter, binds) = self.filter(owner, key);
@@ -243,6 +326,66 @@ pub(crate) async fn delete_post_meta_in<C: Conn>(
     key: &str,
 ) -> Result<bool, Error> {
     POST_META.delete(c, post_id, key).await
+}
+
+/// Adds a value under post meta `key` on a connection that is already in use, keeping the values
+/// already there, as `add_post_meta` does. For keys that hold a list, such as `_wp_old_slug`.
+pub(crate) async fn add_post_meta_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<(), Error> {
+    POST_META.add(c, post_id, key, &value.to_string()).await
+}
+
+/// Deletes the values of post meta `key` equal to `value`, on a connection that is already in
+/// use, as `delete_post_meta` with a value does.
+pub(crate) async fn delete_post_meta_value_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<bool, Error> {
+    POST_META
+        .delete_value(c, post_id, key, &value.to_string())
+        .await
+}
+
+/// Whether post meta `key` holds `value` among its values, on a connection that is already in use.
+pub(crate) async fn post_meta_has_value_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<bool, Error> {
+    POST_META
+        .has_value(c, post_id, key, &value.to_string())
+        .await
+}
+
+/// The value of post meta `key` on a connection that is already in use.
+pub(crate) async fn get_post_meta_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+    key: &str,
+) -> Result<Option<Value>, MetaError> {
+    POST_META.get(c, post_id, key).await
+}
+
+/// Every value of post meta `key`, in the order they were added, as `get_post_meta` with
+/// `$single = false` gives them. Empty when the post has none. Keys such as `_wp_old_slug` hold
+/// one row per value.
+///
+/// # Errors
+///
+/// As [`get_post_meta`].
+pub async fn get_post_meta_values(
+    db: &Database,
+    post_id: i64,
+    key: &str,
+) -> Result<Vec<Value>, MetaError> {
+    POST_META.get_all(&mut &*db, post_id, key).await
 }
 
 /// The value of post meta `key`, or `None` when the post has none. A key that repeats gives its

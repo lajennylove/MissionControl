@@ -26,6 +26,7 @@ use chrono::NaiveDateTime;
 use orbit_orm::{Database, Direction, Error, Model, Operator, Transaction};
 
 use super::post::{Post, PostStatus, due_status, next_modified_at, now};
+use super::slug::record_old_slug;
 use super::taxonomy::recount_post_terms;
 
 /// The `post_type` of revisions and autosaves.
@@ -136,6 +137,9 @@ impl From<Error> for SaveError {
 /// an editor who opened the post before the scheduler published it does not put it back to
 /// `future`, where it would never be published.
 ///
+/// A published post whose slug changes keeps the old slug in the post meta `_wp_old_slug`, as
+/// [`Post::save`] does.
+///
 /// Like WordPress, the revision's author is the post's author, and its `published_at` and
 /// `modified_at` are the post's new modification time. Every save records a revision, even one
 /// that changed nothing, and there is no cap on how many are kept. No hooks are fired.
@@ -155,7 +159,7 @@ pub async fn save_revision(
         return Err(SaveError::IsRevision { id });
     }
     let mut saved = post.clone();
-    saved.status = due_status(saved.status, saved.published_at);
+    saved.status = due_status(&saved.post_type, saved.status, saved.published_at);
     saved.modified_at = next_modified_at(expected_modified_at);
     let columns = saved.columns();
     let revision = revision_of(
@@ -164,6 +168,20 @@ pub async fn save_revision(
         revision_slug(id),
         saved.modified_at,
     );
+    // The row as it is before the save, for the old slug. Read outside the transaction, so on
+    // SQLite the transaction starts with its write and waits for the lock rather than failing to
+    // upgrade a read. Stamps only move forward, so when the update below matches
+    // `expected_modified_at`, no write landed since this read and it is the row the save replaces.
+    let before = match Post::query().find(db, id).await? {
+        None => return Err(SaveError::NotFound { id }),
+        Some(row) if row.post_type == REVISION => return Err(SaveError::IsRevision { id }),
+        Some(row) if row.modified_at != expected_modified_at => {
+            return Err(SaveError::Conflict {
+                current_modified_at: row.modified_at,
+            });
+        }
+        Some(row) => row,
+    };
     db.transaction(async |tx| {
         let matched = Post::query()
             .where_eq(Post::PRIMARY_KEY, id)
@@ -183,6 +201,7 @@ pub async fn save_revision(
             });
         }
         recount_post_terms(tx, id).await?;
+        record_old_slug(tx, &before, &saved).await?;
         Ok(insert(tx, revision).await?)
     })
     .await

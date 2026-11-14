@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Transliterates titles to ASCII slugs (BSD-3-Clause).
+deunicode = "1.6"
 dotenvy = "0.15"
 fs4 = "1.1.0"
 # `catch_unwind` on the scheduler's tick future.

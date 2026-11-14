@@ -1,6 +1,6 @@
 //! The content model: posts of every type, after WordPress's `wp_posts`, their revisions and
-//! autosaves, and the terms of their taxonomies, after `wp_terms`, `wp_term_taxonomy` and
-//! `wp_term_relationships`.
+//! autosaves, their slugs and permalinks, and the terms of their taxonomies, after `wp_terms`,
+//! `wp_term_taxonomy` and `wp_term_relationships`.
 //!
 //! ```ignore
 //! use mission_control_core::content::{NewPost, NewTerm, Post, PostStatus, Taxonomy, Term};
@@ -20,8 +20,10 @@
 
 mod future;
 mod meta;
+mod permalink;
 mod post;
 mod revision;
+mod slug;
 mod taxonomy;
 
 pub use future::{
@@ -30,11 +32,18 @@ pub use future::{
 };
 pub use meta::{
     MetaError, delete_option, delete_post_meta, delete_term_meta, delete_user_meta, get_option,
-    get_post_meta, get_term_meta, get_user_meta, set_option, set_option_raw, set_post_meta,
-    set_post_meta_raw, set_term_meta, set_term_meta_raw, set_user_meta, set_user_meta_raw,
+    get_post_meta, get_post_meta_values, get_term_meta, get_user_meta, set_option, set_option_raw,
+    set_post_meta, set_post_meta_raw, set_term_meta, set_term_meta_raw, set_user_meta,
+    set_user_meta_raw,
+};
+pub use permalink::{
+    PermalinkContext, PermalinkError, PermalinkStructure, Segment, Tag, page_ancestors, permalink,
 };
 pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};
 pub use revision::{
     Revision, SaveError, create_post_autosave, get_post_autosave, get_post_revisions, save_revision,
+};
+pub use slug::{
+    MAX_SLUG_LENGTH, find_by_old_slug, is_hierarchical, make_slug, unique_slug, unique_slug_for,
 };
 pub use taxonomy::{MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermError, update_term_counts};

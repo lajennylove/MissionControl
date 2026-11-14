@@ -8,7 +8,11 @@ use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Query, Transaction
 use serde_json::json;
 use sqlx::error::BoxDynError;
 
-use super::meta::{delete_post_meta_in, put_post_meta_in};
+use super::meta::{MetaError, delete_post_meta_in, get_post_meta_in, put_post_meta_in};
+use super::slug::{
+    DESIRED_SLUG_META, TRASHED_SUFFIX, is_hierarchical, record_old_slug, trashed_slug,
+    unique_slug_on,
+};
 use super::taxonomy::recount_post_terms;
 
 /// The post meta that holds a trashed post's previous status, as in WordPress.
@@ -143,7 +147,9 @@ impl Post {
     /// `modified_at` (see [`next_modified_at`]). In the same transaction, recounts the post's
     /// terms, as WordPress does when a post's status changes, so publishing or unpublishing a
     /// post keeps its terms' `count` in step. A `future` post whose date has passed is saved as
-    /// `publish`, as `wp_insert_post` does (see [`due_status`]).
+    /// `publish`, as `wp_insert_post` does (see [`due_status`]). A published post whose slug
+    /// changes keeps the old slug in the post meta `_wp_old_slug`, so links to it can still find
+    /// it (see [`find_by_old_slug`](super::find_by_old_slug)).
     ///
     /// This is the unchecked path: the last write wins, whatever was saved since this post was
     /// read. Editor saves must not use it; they go through
@@ -159,7 +165,7 @@ impl Post {
     pub async fn save(&mut self, db: &Database) -> Result<(), Error> {
         let id = self.id;
         let mut saved = self.clone();
-        saved.status = due_status(saved.status, saved.published_at);
+        saved.status = due_status(&saved.post_type, saved.status, saved.published_at);
         loop {
             let stored = Self::query().find_or_fail(db, id).await?;
             saved.modified_at = next_modified_at(stored.modified_at);
@@ -177,6 +183,7 @@ impl Post {
                         return Ok(false);
                     }
                     recount_post_terms(tx, id).await?;
+                    record_old_slug(tx, &stored, &saved).await?;
                     Ok::<_, Error>(true)
                 })
                 .await?;
@@ -190,11 +197,13 @@ impl Post {
     /// Moves this post to the trash, as WordPress's `wp_trash_post` does: records its previous
     /// status in the post meta `_wp_trash_meta_status` and the time in `_wp_trash_meta_time` (a
     /// unix time), sets its status to `trash` with a new `modified_at`, and recounts its terms,
-    /// in one transaction. Only the status and `modified_at` are written, read from and
-    /// conditional on the stored row, so a stale copy of the post does not overwrite another
-    /// save. A trashed post stays in the table until it is deleted. A post already in the trash
-    /// is left as it is, so the first status is kept. On success this post becomes the stored
-    /// row.
+    /// in one transaction. The slug gets the suffix `__trashed`, so another post can take it,
+    /// and the slug is kept in the post meta `_wp_desired_post_slug` for [`Post::untrash`], as
+    /// `wp_add_trashed_suffix_to_post_name_for_post` does. Only the status, slug and
+    /// `modified_at` are written, read from and conditional on the stored row, so a stale copy of
+    /// the post does not overwrite another save. A trashed post stays in the table until it is
+    /// deleted. A post already in the trash is left as it is, so the first status is kept. On
+    /// success this post becomes the stored row.
     ///
     /// # Errors
     ///
@@ -211,6 +220,7 @@ impl Post {
             let previous = stored.status;
             let next = Self {
                 status: PostStatus::Trash,
+                slug: trashed_slug(&stored.slug),
                 modified_at: next_modified_at(stored.modified_at),
                 ..stored.clone()
             };
@@ -222,6 +232,9 @@ impl Post {
                     put_post_meta_in(tx, id, TRASH_META_STATUS, &json!(previous.as_str())).await?;
                     put_post_meta_in(tx, id, TRASH_META_TIME, &json!(Utc::now().timestamp()))
                         .await?;
+                    if next.slug != stored.slug {
+                        put_post_meta_in(tx, id, DESIRED_SLUG_META, &json!(stored.slug)).await?;
+                    }
                     Ok::<_, Error>(true)
                 })
                 .await?;
@@ -235,9 +248,13 @@ impl Post {
 
     /// Takes this post out of the trash, as WordPress 5.6 and later do in `wp_untrash_post`: the
     /// status becomes `draft`, whatever it was before, except that an attachment goes back to
-    /// `inherit`. Deletes the two trash meta keys. Like [`Post::trash`], only the status and
-    /// `modified_at` are written, conditional on the stored row. A post that is not in the
-    /// trash is left as it is. On success this post becomes the stored row.
+    /// `inherit`. Deletes the two trash meta keys. The slug the post had before the trash
+    /// (`_wp_desired_post_slug`) comes back, made unique again with
+    /// [`unique_slug`](super::unique_slug) in case another post took it meanwhile. WordPress
+    /// gives a draft its slug back as it is and makes it unique only on publish; Mission Control
+    /// makes it unique here, so two posts never share a slug. Like [`Post::trash`], only the
+    /// status, slug and `modified_at` are written, conditional on the stored row. A post that is
+    /// not in the trash is left as it is. On success this post becomes the stored row.
     ///
     /// # Errors
     ///
@@ -251,7 +268,7 @@ impl Post {
                 *self = stored;
                 return Ok(());
             }
-            let next = Self {
+            let mut next = Self {
                 status: if stored.post_type == "attachment" {
                     PostStatus::Inherit
                 } else {
@@ -262,11 +279,38 @@ impl Post {
             };
             let written = db
                 .transaction(async |tx| {
+                    // The write comes first, so on SQLite the transaction takes the write lock
+                    // (waiting for it) before it reads; the slug is set once it is known.
                     if !set_status(tx, &stored, &next).await? {
                         return Ok(false);
                     }
+                    let desired = match get_post_meta_in(tx, id, DESIRED_SLUG_META).await {
+                        Ok(Some(serde_json::Value::String(slug))) => slug,
+                        // No desired slug (trashed before slugs were kept, or a value that is
+                        // not a string): the trashed slug without its suffix.
+                        Ok(_) | Err(MetaError::InvalidJson(_)) => stored
+                            .slug
+                            .strip_suffix(TRASHED_SUFFIX)
+                            .unwrap_or(&stored.slug)
+                            .to_owned(),
+                        Err(MetaError::Database(e)) => return Err(e),
+                    };
+                    next.slug = unique_slug_on(
+                        tx,
+                        &stored.post_type,
+                        is_hierarchical(&stored.post_type),
+                        stored.parent_id,
+                        &desired,
+                        Some(id),
+                    )
+                    .await?;
+                    Self::query()
+                        .where_eq(Self::PRIMARY_KEY, id)
+                        .update(&mut *tx, &[("slug", next.slug.clone().into())])
+                        .await?;
                     delete_post_meta_in(tx, id, TRASH_META_STATUS).await?;
                     delete_post_meta_in(tx, id, TRASH_META_TIME).await?;
+                    delete_post_meta_in(tx, id, DESIRED_SLUG_META).await?;
                     Ok::<_, Error>(true)
                 })
                 .await?;
@@ -303,7 +347,7 @@ impl Post {
     }
 }
 
-/// Sets `stored`'s status and `modified_at` to `next`'s, if the row still has `stored`'s
+/// Sets `stored`'s status, slug and `modified_at` to `next`'s, if the row still has `stored`'s
 /// status and `modified_at`, and recounts its terms, on the connection of a transaction. Returns
 /// whether the row was written; `false` means another write landed since `stored` was read.
 async fn set_status(tx: &mut Transaction, stored: &Post, next: &Post) -> Result<bool, Error> {
@@ -316,6 +360,7 @@ async fn set_status(tx: &mut Transaction, stored: &Post, next: &Post) -> Result<
             &mut *tx,
             &[
                 ("status", next.status.into()),
+                ("slug", next.slug.clone().into()),
                 ("modified_at", next.modified_at.into()),
             ],
         )
@@ -337,13 +382,28 @@ pub(super) fn next_modified_at(stored: NaiveDateTime) -> NaiveDateTime {
     now().max(stored + Duration::seconds(1))
 }
 
-/// The status to save a post with, as `wp_insert_post` decides it: a `future` post whose date
-/// is now or past, or that has no date, is saved as `publish`. So a save of a stale copy does
-/// not put back `future` on a post the scheduler has already published, which would never be
-/// published again. Any other status is kept.
-pub(super) fn due_status(status: PostStatus, published_at: Option<NaiveDateTime>) -> PostStatus {
+/// How far ahead a `future` post's date must be to stay `future`: WordPress's
+/// `MINUTE_IN_SECONDS`, so a post scheduled less than a minute ahead is published at once.
+const FUTURE_GRACE: Duration = Duration::seconds(60);
+
+/// The status to save a post of `post_type` with, as `wp_insert_post` decides it: a `future`
+/// post whose date is less than a minute ahead, or past, or that has no date, is saved as
+/// `publish`. So a save of a stale copy does not put back `future` on a post the scheduler has
+/// already published, which would never be published again. Attachments are left as they are,
+/// as WordPress never applies the rule to them. Any other status is kept.
+///
+/// WordPress also saves a `publish` post dated a minute or more ahead as `future`; that half is
+/// not applied here, since nothing would then schedule its publication.
+pub(super) fn due_status(
+    post_type: &str,
+    status: PostStatus,
+    published_at: Option<NaiveDateTime>,
+) -> PostStatus {
+    if post_type == "attachment" {
+        return status;
+    }
     match (status, published_at) {
-        (PostStatus::Future, Some(date)) if date > now() => PostStatus::Future,
+        (PostStatus::Future, Some(date)) if date - now() >= FUTURE_GRACE => PostStatus::Future,
         (PostStatus::Future, _) => PostStatus::Publish,
         (other, _) => other,
     }

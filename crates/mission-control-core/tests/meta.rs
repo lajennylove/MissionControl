@@ -366,7 +366,8 @@ async fn trash_records_the_previous_status_and_time_and_untrash_restores_a_draft
             .unwrap(),
         Some(json!("publish"))
     );
-    assert_eq!(count(db, "post_meta").await, 2);
+    // The status, the time, and the slug before the `__trashed` suffix.
+    assert_eq!(count(db, "post_meta").await, 3);
 
     post.untrash(db).await.unwrap();
     // WordPress 5.6+ restores to draft, whatever the post was before.

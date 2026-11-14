@@ -11,6 +11,7 @@ use std::fmt;
 use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Transaction, Value, raw};
 
 use super::post::{Post, PostStatus};
+use super::slug::make_slug;
 
 /// A taxonomy: its name and whether its terms nest. A minimal stand-in for the taxonomy
 /// definitions that custom taxonomies bring later; for now the built-ins are
@@ -227,8 +228,9 @@ impl Term {
     /// Creates a term in `taxonomy`, as WordPress's `wp_insert_term` does, and returns it.
     ///
     /// The name is trimmed and must not be empty; it and the slug may have at most
-    /// [`MAX_TERM_LENGTH`] characters. An empty slug is made from the name. A parent
-    /// must be a term of the same taxonomy, and only a hierarchical taxonomy takes one.
+    /// [`MAX_TERM_LENGTH`] characters. An empty slug is made from the name with
+    /// [`make_slug`](super::make_slug). A parent must be a term of the same taxonomy, and only a
+    /// hierarchical taxonomy takes one.
     ///
     /// A name that already exists is refused, compared without regard to case: under the same
     /// parent in a hierarchical taxonomy, anywhere in a flat one. A distinct slug of the caller's
@@ -272,7 +274,7 @@ impl Term {
             let slug = if slug_given {
                 new.slug
             } else {
-                slug_from_name(&name)
+                make_slug(&name)
             };
             if let Some(term_taxonomy_id) =
                 existing(tx, &taxonomy, &name, &slug, slug_given, new.parent_id).await?
@@ -556,24 +558,6 @@ pub(crate) async fn recount_post_terms<C: Conn>(c: &mut C, post_id: i64) -> Resu
         }
     }
     Ok(())
-}
-
-/// The slug for a term given none: the name in lower case, each run of characters other than
-/// letters and digits made one hyphen, with no hyphen at either end. A stand-in for the content
-/// API's slug rules, which replace it.
-fn slug_from_name(name: &str) -> String {
-    let mut slug = String::with_capacity(name.len());
-    for c in name.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            slug.push(c);
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    if slug.ends_with('-') {
-        slug.pop();
-    }
-    slug
 }
 
 /// The term with this `term_taxonomy_id`, if there is one.
