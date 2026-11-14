@@ -18,12 +18,18 @@
 //! ```
 
 mod future;
+mod meta;
 mod post;
 mod taxonomy;
 
 pub use future::{
     PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
     schedule_future_post,
+};
+pub use meta::{
+    MetaError, delete_option, delete_post_meta, delete_term_meta, delete_user_meta, get_option,
+    get_post_meta, get_term_meta, get_user_meta, set_option, set_option_raw, set_post_meta,
+    set_post_meta_raw, set_term_meta, set_term_meta_raw, set_user_meta, set_user_meta_raw,
 };
 pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};
 pub use taxonomy::{MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermError, update_term_counts};

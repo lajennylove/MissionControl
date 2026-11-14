@@ -4,10 +4,17 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{NaiveDateTime, SubsecRound, Utc};
-use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Query, Value};
+use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Query, Transaction, Value};
+use serde_json::json;
 use sqlx::error::BoxDynError;
 
+use super::meta::{delete_post_meta_in, put_post_meta_in};
 use super::taxonomy::recount_post_terms;
+
+/// The post meta that holds a trashed post's previous status, as in WordPress.
+const TRASH_META_STATUS: &str = "_wp_trash_meta_status";
+/// The post meta that holds when a post was trashed, as a unix time, as in WordPress.
+const TRASH_META_TIME: &str = "_wp_trash_meta_time";
 
 /// A row of `posts`: a post, a page, a custom type, an attachment, a revision or a menu item, as
 /// in WordPress's `wp_posts`. `post_type` tells them apart.
@@ -144,28 +151,76 @@ impl Post {
         self.modified_at = now();
         let id = self.id;
         let columns = self.columns();
-        db.transaction(async |tx| {
-            Self::query()
-                .where_eq(Self::PRIMARY_KEY, id)
-                .update(&mut *tx, &columns)
-                .await?;
-            recount_post_terms(tx, id).await
-        })
-        .await
+        db.transaction(async |tx| write(tx, id, &columns).await)
+            .await
     }
 
-    /// Moves this post to the trash: sets its status to `trash` and saves it, as WordPress's
-    /// `wp_trash_post` does. A trashed post stays in the table until it is deleted.
-    ///
-    /// WordPress also keeps the previous status in the post meta `_wp_trash_meta_status`, so
-    /// that untrashing restores it; that arrives with post meta.
+    /// Moves this post to the trash, as WordPress's `wp_trash_post` does: records its previous
+    /// status in the post meta `_wp_trash_meta_status` and the time in `_wp_trash_meta_time` (a
+    /// unix time), sets its status to `trash` and saves it, in one transaction. A trashed post
+    /// stays in the table until it is deleted. A post already in the trash is left as it is, so
+    /// the first status is kept.
     ///
     /// # Errors
     ///
-    /// Fails with the database's error.
+    /// Fails with the database's error; then nothing is written and the post is unchanged.
     pub async fn trash(&mut self, db: &Database) -> Result<(), Error> {
+        if self.status == PostStatus::Trash {
+            return Ok(());
+        }
+        let (status, modified_at) = (self.status, self.modified_at);
         self.status = PostStatus::Trash;
-        self.save(db).await
+        self.modified_at = now();
+        let id = self.id;
+        let columns = self.columns();
+        let result = db
+            .transaction(async |tx| {
+                write(tx, id, &columns).await?;
+                put_post_meta_in(tx, id, TRASH_META_STATUS, &json!(status.as_str())).await?;
+                put_post_meta_in(tx, id, TRASH_META_TIME, &json!(Utc::now().timestamp())).await
+            })
+            .await;
+        if result.is_err() {
+            self.status = status;
+            self.modified_at = modified_at;
+        }
+        result
+    }
+
+    /// Takes this post out of the trash, as WordPress 5.6 and later do in `wp_untrash_post`: the
+    /// status becomes `draft`, whatever it was before, except that an attachment goes back to
+    /// `inherit`. Deletes the two trash meta keys. A post that is not in the trash is left as it
+    /// is.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the database's error; then nothing is written and the post is unchanged.
+    pub async fn untrash(&mut self, db: &Database) -> Result<(), Error> {
+        if self.status != PostStatus::Trash {
+            return Ok(());
+        }
+        let (status, modified_at) = (self.status, self.modified_at);
+        self.status = if self.post_type == "attachment" {
+            PostStatus::Inherit
+        } else {
+            PostStatus::Draft
+        };
+        self.modified_at = now();
+        let id = self.id;
+        let columns = self.columns();
+        let result = db
+            .transaction(async |tx| {
+                write(tx, id, &columns).await?;
+                delete_post_meta_in(tx, id, TRASH_META_STATUS).await?;
+                delete_post_meta_in(tx, id, TRASH_META_TIME).await?;
+                Ok(())
+            })
+            .await;
+        if result.is_err() {
+            self.status = status;
+            self.modified_at = modified_at;
+        }
+        result
     }
 
     /// The posts of one type, such as `post` or `page`, like a Laravel query scope. Attachments,
@@ -191,6 +246,19 @@ impl Post {
             ("password", self.password.clone().into()),
         ]
     }
+}
+
+/// Writes `columns` to post `id` and recounts its terms, on the connection of a transaction.
+async fn write(
+    tx: &mut Transaction,
+    id: i64,
+    columns: &[(&'static str, Value); 12],
+) -> Result<(), Error> {
+    Post::query()
+        .where_eq(Post::PRIMARY_KEY, id)
+        .update(&mut *tx, columns)
+        .await?;
+    recount_post_terms(tx, id).await
 }
 
 /// The current time in UTC, to the second: what MySQL's `DATETIME` and PostgreSQL's

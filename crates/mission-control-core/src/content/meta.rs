@@ -1,0 +1,439 @@
+//! Meta for posts, users and terms, and site options: named values stored as JSON text, after
+//! WordPress's `get_post_meta`/`update_post_meta`/`delete_post_meta` and `get_option`/
+//! `update_option`/`delete_option`.
+//!
+//! One implementation, [`Store`], serves the four tables; the public functions are thin wrappers
+//! that name the table. Each `set_*` replaces the value stored under the key and inserts it when
+//! there is none, as `update_post_meta` does. Each `set_*_raw` takes the value as text and refuses
+//! text that is not valid JSON, for forms and the importer.
+//!
+//! ```ignore
+//! use mission_control_core::content::{get_post_meta, set_post_meta};
+//!
+//! set_post_meta(&db, post.id, "subtitle", &serde_json::json!("Hello")).await?;
+//! let subtitle = get_post_meta(&db, post.id, "subtitle").await?;
+//! ```
+
+use std::fmt;
+
+use orbit_orm::{Database, Error, Value as Sql, raw};
+use serde_json::Value;
+
+use super::taxonomy::Conn;
+
+/// Why a meta value or option was not read or written.
+#[derive(Debug)]
+pub enum MetaError {
+    /// The text is not valid JSON: given to a `set_*_raw` function, or found stored in a row.
+    InvalidJson(serde_json::Error),
+    /// The database refused a query, for example a post that does not exist.
+    Database(Error),
+}
+
+impl fmt::Display for MetaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidJson(e) => write!(f, "the value is not valid JSON: {e}"),
+            Self::Database(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MetaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidJson(e) => Some(e),
+            Self::Database(e) => Some(e),
+        }
+    }
+}
+
+impl From<Error> for MetaError {
+    fn from(e: Error) -> Self {
+        Self::Database(e)
+    }
+}
+
+impl From<serde_json::Error> for MetaError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::InvalidJson(e)
+    }
+}
+
+/// A table of named values: the columns that hold the owner, the key and the value.
+struct Store {
+    table: &'static str,
+    /// The column that names the owning row (`post_id`), or `None` when the table is global.
+    owner: Option<&'static str>,
+    key: &'static str,
+    value: &'static str,
+}
+
+const POST_META: Store = Store {
+    table: "post_meta",
+    owner: Some("post_id"),
+    key: "meta_key",
+    value: "meta_value",
+};
+const USER_META: Store = Store {
+    table: "user_meta",
+    owner: Some("user_id"),
+    key: "meta_key",
+    value: "meta_value",
+};
+const TERM_META: Store = Store {
+    table: "term_meta",
+    owner: Some("term_id"),
+    key: "meta_key",
+    value: "meta_value",
+};
+const OPTIONS: Store = Store {
+    table: "options",
+    owner: None,
+    key: "name",
+    value: "value",
+};
+
+impl Store {
+    /// The `WHERE` clause that picks `key` of `owner`, and its binds.
+    fn filter(&self, owner: i64, key: &str) -> (String, Vec<Sql>) {
+        match self.owner {
+            Some(column) => (
+                format!("{column} = ? AND {} = ?", self.key),
+                vec![owner.into(), key.into()],
+            ),
+            None => (format!("{} = ?", self.key), vec![key.into()]),
+        }
+    }
+
+    /// The value under `key`: the first row, if the key repeats.
+    async fn get<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+    ) -> Result<Option<Value>, MetaError> {
+        let (filter, binds) = self.filter(owner, key);
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {filter} ORDER BY id LIMIT 1",
+            self.value, self.table
+        );
+        let text: Option<(String,)> = raw::fetch_optional(c.exec(), &sql, &binds).await?;
+        text.map(|(text,)| serde_json::from_str(&text).map_err(MetaError::from))
+            .transpose()
+    }
+
+    /// Replaces the text under `key`, or inserts it when the key is absent. The text is stored as
+    /// it is, so callers pass JSON. Not atomic by itself: run it in a transaction.
+    async fn put<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<(), Error> {
+        let (filter, binds) = self.filter(owner, key);
+        // Existence is counted rather than read from the rows an `UPDATE` changed: MySQL reports
+        // no changed rows when the value is the same, which would insert a duplicate.
+        let found: i64 = raw::fetch_scalar(
+            c.exec(),
+            &format!("SELECT COUNT(*) FROM {} WHERE {filter}", self.table),
+            &binds,
+        )
+        .await?;
+        if found > 0 {
+            let mut binds = binds;
+            binds.insert(0, json.into());
+            raw::execute(
+                c.exec(),
+                &format!(
+                    "UPDATE {} SET {} = ? WHERE {filter}",
+                    self.table, self.value
+                ),
+                &binds,
+            )
+            .await?;
+        } else {
+            let (columns, marks, binds) = match self.owner {
+                Some(column) => (
+                    format!("{column}, {}, {}", self.key, self.value),
+                    "?, ?, ?",
+                    vec![owner.into(), key.into(), json.into()],
+                ),
+                None => (
+                    format!("{}, {}", self.key, self.value),
+                    "?, ?",
+                    vec![key.into(), json.into()],
+                ),
+            };
+            raw::execute(
+                c.exec(),
+                &format!("INSERT INTO {} ({columns}) VALUES ({marks})", self.table),
+                &binds,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// [`put`](Self::put) in its own transaction.
+    async fn set_text(
+        &self,
+        db: &Database,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<(), MetaError> {
+        db.transaction(async |tx| self.put(tx, owner, key, json).await)
+            .await?;
+        Ok(())
+    }
+
+    /// Stores `value` as JSON text.
+    async fn set(
+        &self,
+        db: &Database,
+        owner: i64,
+        key: &str,
+        value: &Value,
+    ) -> Result<(), MetaError> {
+        self.set_text(db, owner, key, &value.to_string()).await
+    }
+
+    /// Stores `json` after checking that it parses, so a bad value never reaches the table.
+    async fn set_raw(
+        &self,
+        db: &Database,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<(), MetaError> {
+        serde_json::from_str::<Value>(json)?;
+        self.set_text(db, owner, key, json).await
+    }
+
+    /// Deletes every row under `key`. True when there was one.
+    async fn delete<C: Conn>(&self, c: &mut C, owner: i64, key: &str) -> Result<bool, Error> {
+        let (filter, binds) = self.filter(owner, key);
+        let deleted = raw::execute(
+            c.exec(),
+            &format!("DELETE FROM {} WHERE {filter}", self.table),
+            &binds,
+        )
+        .await?;
+        Ok(deleted > 0)
+    }
+}
+
+/// Post meta, set and read on a connection that is already in use (the steps of a transaction),
+/// for the trash meta `Post::trash` keeps.
+pub(crate) async fn put_post_meta_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<(), Error> {
+    POST_META.put(c, post_id, key, &value.to_string()).await
+}
+
+/// Deletes post meta on a connection that is already in use.
+pub(crate) async fn delete_post_meta_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+    key: &str,
+) -> Result<bool, Error> {
+    POST_META.delete(c, post_id, key).await
+}
+
+/// The value of post meta `key`, or `None` when the post has none. A key that repeats gives its
+/// first value.
+///
+/// # Errors
+///
+/// Fails with [`MetaError::InvalidJson`] when the stored text is not JSON, or with the database's
+/// error.
+pub async fn get_post_meta(
+    db: &Database,
+    post_id: i64,
+    key: &str,
+) -> Result<Option<Value>, MetaError> {
+    POST_META.get(&mut &*db, post_id, key).await
+}
+
+/// Sets post meta `key` to `value`, replacing the stored value, or inserting it when the post has
+/// none, as `update_post_meta` does.
+///
+/// # Errors
+///
+/// Fails with the database's error, such as a foreign key violation for a post that does not
+/// exist.
+pub async fn set_post_meta(
+    db: &Database,
+    post_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<(), MetaError> {
+    POST_META.set(db, post_id, key, value).await
+}
+
+/// Sets post meta `key` to `json`, text that must be valid JSON; stores it as given.
+///
+/// # Errors
+///
+/// Fails with [`MetaError::InvalidJson`] when `json` is not valid JSON; nothing is written. Or with
+/// the database's error.
+pub async fn set_post_meta_raw(
+    db: &Database,
+    post_id: i64,
+    key: &str,
+    json: &str,
+) -> Result<(), MetaError> {
+    POST_META.set_raw(db, post_id, key, json).await
+}
+
+/// Deletes post meta `key`. True when the post had it.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn delete_post_meta(db: &Database, post_id: i64, key: &str) -> Result<bool, MetaError> {
+    Ok(POST_META.delete(&mut &*db, post_id, key).await?)
+}
+
+/// The value of user meta `key`, or `None`. See [`get_post_meta`].
+///
+/// # Errors
+///
+/// As [`get_post_meta`].
+pub async fn get_user_meta(
+    db: &Database,
+    user_id: i64,
+    key: &str,
+) -> Result<Option<Value>, MetaError> {
+    USER_META.get(&mut &*db, user_id, key).await
+}
+
+/// Sets user meta `key` to `value`. See [`set_post_meta`].
+///
+/// # Errors
+///
+/// As [`set_post_meta`].
+pub async fn set_user_meta(
+    db: &Database,
+    user_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<(), MetaError> {
+    USER_META.set(db, user_id, key, value).await
+}
+
+/// Sets user meta `key` to `json`, text that must be valid JSON. See [`set_post_meta_raw`].
+///
+/// # Errors
+///
+/// As [`set_post_meta_raw`].
+pub async fn set_user_meta_raw(
+    db: &Database,
+    user_id: i64,
+    key: &str,
+    json: &str,
+) -> Result<(), MetaError> {
+    USER_META.set_raw(db, user_id, key, json).await
+}
+
+/// Deletes user meta `key`. True when the user had it.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn delete_user_meta(db: &Database, user_id: i64, key: &str) -> Result<bool, MetaError> {
+    Ok(USER_META.delete(&mut &*db, user_id, key).await?)
+}
+
+/// The value of term meta `key`, or `None`. `term_id` is the `terms` id, as in WordPress's
+/// `get_term_meta`, not the `term_taxonomy` id. See [`get_post_meta`].
+///
+/// # Errors
+///
+/// As [`get_post_meta`].
+pub async fn get_term_meta(
+    db: &Database,
+    term_id: i64,
+    key: &str,
+) -> Result<Option<Value>, MetaError> {
+    TERM_META.get(&mut &*db, term_id, key).await
+}
+
+/// Sets term meta `key` to `value`. See [`set_post_meta`].
+///
+/// # Errors
+///
+/// As [`set_post_meta`].
+pub async fn set_term_meta(
+    db: &Database,
+    term_id: i64,
+    key: &str,
+    value: &Value,
+) -> Result<(), MetaError> {
+    TERM_META.set(db, term_id, key, value).await
+}
+
+/// Sets term meta `key` to `json`, text that must be valid JSON. See [`set_post_meta_raw`].
+///
+/// # Errors
+///
+/// As [`set_post_meta_raw`].
+pub async fn set_term_meta_raw(
+    db: &Database,
+    term_id: i64,
+    key: &str,
+    json: &str,
+) -> Result<(), MetaError> {
+    TERM_META.set_raw(db, term_id, key, json).await
+}
+
+/// Deletes term meta `key`. True when the term had it.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn delete_term_meta(db: &Database, term_id: i64, key: &str) -> Result<bool, MetaError> {
+    Ok(TERM_META.delete(&mut &*db, term_id, key).await?)
+}
+
+/// The value of option `name`, or `None` when it is not set, as `get_option` without a default.
+///
+/// # Errors
+///
+/// As [`get_post_meta`].
+pub async fn get_option(db: &Database, name: &str) -> Result<Option<Value>, MetaError> {
+    OPTIONS.get(&mut &*db, 0, name).await
+}
+
+/// Sets option `name` to `value`, replacing the stored value, as `update_option` does. A new
+/// option gets the column's default `autoload`; a replaced one keeps its own.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn set_option(db: &Database, name: &str, value: &Value) -> Result<(), MetaError> {
+    OPTIONS.set(db, 0, name, value).await
+}
+
+/// Sets option `name` to `json`, text that must be valid JSON. See [`set_post_meta_raw`].
+///
+/// # Errors
+///
+/// As [`set_post_meta_raw`].
+pub async fn set_option_raw(db: &Database, name: &str, json: &str) -> Result<(), MetaError> {
+    OPTIONS.set_raw(db, 0, name, json).await
+}
+
+/// Deletes option `name`. True when it was set.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn delete_option(db: &Database, name: &str) -> Result<bool, MetaError> {
+    Ok(OPTIONS.delete(&mut &*db, 0, name).await?)
+}
