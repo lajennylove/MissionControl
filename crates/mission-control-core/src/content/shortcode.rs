@@ -68,6 +68,8 @@ impl Attributes {
             let (next, name, value) = parse_att(&text, i);
             match name {
                 Some(name) => atts.set(name, value),
+                // WordPress drops an empty quoted positional value (`""`, `''`).
+                None if value.is_empty() => {}
                 None => atts.positional.push(value),
             }
             i = next;
@@ -141,7 +143,7 @@ fn parse_att(text: &str, i: usize) -> (usize, Option<String>, String) {
 
     // `(\w+)\s*=\s*` then a quoted or bare value.
     let mut j = i;
-    while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+    while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] == b'-') {
         j += 1;
     }
     if j > i {
@@ -253,20 +255,32 @@ impl Shortcodes {
             owner,
             callback: Arc::new(f),
         };
-        let mut list = self.write();
-        match list.iter_mut().find(|e| e.tag == tag) {
-            Some(slot) => *slot = entry,
-            None => list.push(entry),
-        }
+        // The replaced entry is dropped after the lock is released.
+        let _replaced = {
+            let mut list = self.write();
+            match list.iter_mut().find(|e| e.tag == tag) {
+                Some(slot) => Some(std::mem::replace(slot, entry)),
+                None => {
+                    list.push(entry);
+                    None
+                }
+            }
+        };
         Ok(())
     }
 
     /// Removes `tag`. Returns whether it was registered.
     pub fn remove_shortcode(&self, tag: &str) -> bool {
-        let mut list = self.write();
-        let before = list.len();
-        list.retain(|e| e.tag != tag);
-        list.len() != before
+        let removed = {
+            let mut list = self.write();
+            let (gone, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut *list)
+                .into_iter()
+                .partition(|e| e.tag == tag);
+            *list = kept;
+            gone
+        };
+        // Dropped here, after the guard.
+        !removed.is_empty()
     }
 
     /// Whether `tag` is registered.
@@ -276,7 +290,16 @@ impl Shortcodes {
 
     /// Removes every shortcode registered by `owner` (a plugin or theme deactivating).
     pub fn remove_owner(&self, owner: &Owner) {
-        self.write().retain(|e| &e.owner != owner);
+        let removed = {
+            let mut list = self.write();
+            let (gone, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut *list)
+                .into_iter()
+                .partition(|e| &e.owner == owner);
+            *list = kept;
+            gone
+        };
+        // Dropped here, after the guard.
+        drop(removed);
     }
 
     /// Adds [`do_shortcodes`](Self::do_shortcodes) to the `the_content` filter on `hooks`, at

@@ -48,6 +48,11 @@ fn do_shortcodes_table() {
             r#"[attrs a="1 2" b='3 4' c=5 "six" 'se ven' eight]"#,
             "[a=1 2,b=3 4,c=5|six,se ven,eight|none]",
         ),
+        // Hyphens in names, as `[\w-]+`; empty quoted positionals are dropped.
+        (r#"[attrs data-id="5"]"#, "[data-id=5||none]"),
+        ("[attrs aria-label='x y']", "[aria-label=x y||none]"),
+        ("[attrs data-x=y]", "[data-x=y||none]"),
+        (r#"[attrs "" '' w e=""]"#, "[e=|w|none]"),
         (r#"[attrs Foo="Bar"]"#, "[foo=Bar||none]"),
         (r#"[attrs a="x"/]"#, "[a=x||none]"),
         ("[attrs]in[/attrs]", "[||some:in]"),
@@ -204,17 +209,31 @@ fn the_content_applies_shortcodes_at_priority_eleven() {
 fn hostile_input_stays_linear() {
     let s = registry();
     let n = 200_000;
-    for input in [
-        "[hello ".repeat(n),
-        "[bold]".repeat(n),
-        "[[".repeat(n),
-        "[attrs /".repeat(n),
-    ] {
+    // (input, expected output)
+    let cases: Vec<(String, String)> = vec![
+        // No `]` at all: the scan gives up at once and the text is unchanged.
+        ("[hello ".repeat(n), "[hello ".repeat(n)),
+        // Closers missing: each `[bold]` is replaced, the missing-closer search runs once.
+        ("[bold]".repeat(n), "<b>-</b>".repeat(n)),
+        ("[[".repeat(n), "[[".repeat(n)),
+        ("[attrs /".repeat(n), "[attrs /".repeat(n)),
+        // One closer at the very end: the first `[bold]` takes everything.
+        (
+            "[bold]x".repeat(n) + "[/bold]",
+            format!("<b>x{}</b>", "[bold]x".repeat(n - 1)),
+        ),
+        // Many `[hello` before one `]`: the first takes the `]`, the rest is its attributes.
+        ("[hello ".repeat(n) + "]", "HELLO".to_string()),
+        // Interleaved tags without closers.
+        ("[bold][attrs]".repeat(n), "<b>-</b>[||none]".repeat(n)),
+    ];
+    for (input, expected) in cases {
         let start = std::time::Instant::now();
-        let _ = s.do_shortcodes(&input);
+        let out = s.do_shortcodes(&input);
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "too slow"
         );
+        assert!(out == expected, "unexpected output (len {})", out.len());
     }
 }
