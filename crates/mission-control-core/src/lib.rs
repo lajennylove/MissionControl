@@ -6,5 +6,6 @@ pub mod hooks;
 pub mod media;
 pub mod migrations;
 pub mod scheduler;
+pub mod users;
 
 pub mod install;
