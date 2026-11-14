@@ -22,10 +22,10 @@
 use std::fmt;
 use std::ops::Deref;
 
-use chrono::{Duration, NaiveDateTime};
-use orbit_orm::{Database, Direction, Error, Model, Transaction};
+use chrono::NaiveDateTime;
+use orbit_orm::{Database, Direction, Error, Model, Operator, Transaction};
 
-use super::post::{Post, PostStatus, now};
+use super::post::{Post, PostStatus, due_status, next_modified_at, now};
 use super::taxonomy::recount_post_terms;
 
 /// The `post_type` of revisions and autosaves.
@@ -74,6 +74,11 @@ pub enum SaveError {
         /// The id that was saved.
         id: i64,
     },
+    /// The post is itself a revision or an autosave. WordPress does not revise revisions.
+    IsRevision {
+        /// The id that was saved.
+        id: i64,
+    },
     /// The database refused a query.
     Database(Error),
 }
@@ -88,6 +93,7 @@ impl fmt::Display for SaveError {
                 "the post was changed by another save at {current_modified_at}"
             ),
             Self::NotFound { id } => write!(f, "post {id} does not exist"),
+            Self::IsRevision { id } => write!(f, "post {id} is a revision"),
             Self::Database(e) => e.fmt(f),
         }
     }
@@ -97,7 +103,7 @@ impl std::error::Error for SaveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Database(e) => Some(e),
-            Self::Conflict { .. } | Self::NotFound { .. } => None,
+            Self::Conflict { .. } | Self::NotFound { .. } | Self::IsRevision { .. } => None,
         }
     }
 }
@@ -121,11 +127,14 @@ impl From<Error> for SaveError {
 /// silently.
 ///
 /// The new `modified_at` is strictly later than `expected_modified_at`: now, or one second after
-/// the expected time when now is not later. The column has one-second resolution, so two saves
-/// in the same second from the same start would otherwise both stamp, and find, the same time.
-/// Under rapid saves the stamp can run a few seconds ahead of the clock. Because the stamp
-/// always changes, the update changes the row it matches, so MySQL's count of changed rows
-/// equals the count of matched rows.
+/// the expected time when now is not later, the rule every write to a post row follows. The
+/// column has one-second resolution, so two saves in the same second from the same start would
+/// otherwise both stamp, and find, the same time. Under rapid saves the stamp can run a few
+/// seconds ahead of the clock.
+///
+/// As `wp_insert_post` does, a `future` post whose date is now or past is saved as `publish`, so
+/// an editor who opened the post before the scheduler published it does not put it back to
+/// `future`, where it would never be published.
 ///
 /// Like WordPress, the revision's author is the post's author, and its `published_at` and
 /// `modified_at` are the post's new modification time. Every save records a revision, even one
@@ -134,16 +143,20 @@ impl From<Error> for SaveError {
 /// # Errors
 ///
 /// [`SaveError::Conflict`] when the post was saved after `expected_modified_at`,
-/// [`SaveError::NotFound`] when there is no post with `post.id`, and [`SaveError::Database`]
-/// when the database fails.
+/// [`SaveError::NotFound`] when there is no post with `post.id`, [`SaveError::IsRevision`] when
+/// the post is a revision, and [`SaveError::Database`] when the database fails.
 pub async fn save_revision(
     db: &Database,
     post: &Post,
     expected_modified_at: NaiveDateTime,
 ) -> Result<Revision, SaveError> {
+    let id = post.id;
+    if post.post_type == REVISION {
+        return Err(SaveError::IsRevision { id });
+    }
     let mut saved = post.clone();
-    saved.modified_at = now().max(expected_modified_at + Duration::seconds(1));
-    let id = saved.id;
+    saved.status = due_status(saved.status, saved.published_at);
+    saved.modified_at = next_modified_at(expected_modified_at);
     let columns = saved.columns();
     let revision = revision_of(
         &saved,
@@ -155,10 +168,14 @@ pub async fn save_revision(
         let matched = Post::query()
             .where_eq(Post::PRIMARY_KEY, id)
             .where_eq("modified_at", expected_modified_at)
+            .where_op("post_type", Operator::Ne, REVISION)
             .update(&mut *tx, &columns)
             .await?;
+        // MySQL reports changed rows, not matched rows. The new stamp is always later than the
+        // one matched, so a matched row is always a changed row, and 0 means no row matched.
         if matched == 0 {
             return Err(match Post::query().find(&mut *tx, id).await? {
+                Some(current) if current.post_type == REVISION => SaveError::IsRevision { id },
                 Some(current) => SaveError::Conflict {
                     current_modified_at: current.modified_at,
                 },
@@ -180,24 +197,33 @@ pub async fn save_revision(
 /// autosaves of one post do not both insert. SQLite has no row locks; there the second writer
 /// waits for the first, or fails with a busy error.
 ///
+/// A replaced autosave's `modified_at` follows the rule of every post write: strictly later
+/// than its stored one.
+///
 /// # Errors
 ///
-/// [`SaveError::NotFound`] when there is no post with `post.id`, [`SaveError::Database`] when
-/// the database fails.
+/// [`SaveError::NotFound`] when there is no post with `post.id`, [`SaveError::IsRevision`] when
+/// the post is a revision, [`SaveError::Database`] when the database fails.
 pub async fn create_post_autosave(
     db: &Database,
     post: &Post,
     user_id: i64,
 ) -> Result<Revision, SaveError> {
     let id = post.id;
+    if post.post_type == REVISION {
+        return Err(SaveError::IsRevision { id });
+    }
     let mut autosave = revision_of(post, user_id, autosave_slug(id), now());
     db.transaction(async |tx| {
-        Post::query()
+        let parent = Post::query()
             .where_eq(Post::PRIMARY_KEY, id)
             .for_update()
             .first(&mut *tx)
             .await?
             .ok_or(SaveError::NotFound { id })?;
+        if parent.post_type == REVISION {
+            return Err(SaveError::IsRevision { id });
+        }
         match autosave_query(id, user_id)
             .for_update()
             .first(&mut *tx)
@@ -205,6 +231,8 @@ pub async fn create_post_autosave(
         {
             Some(existing) => {
                 autosave.id = existing.id;
+                autosave.modified_at = next_modified_at(existing.modified_at);
+                autosave.published_at = Some(autosave.modified_at);
                 Post::query()
                     .where_eq(Post::PRIMARY_KEY, existing.id)
                     .update(&mut *tx, &autosave.columns())

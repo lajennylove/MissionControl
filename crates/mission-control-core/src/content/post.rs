@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{NaiveDateTime, SubsecRound, Utc};
+use chrono::{Duration, NaiveDateTime, SubsecRound, Utc};
 use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Query, Transaction, Value};
 use serde_json::json;
 use sqlx::error::BoxDynError;
@@ -139,88 +139,143 @@ impl Post {
         Ok(post)
     }
 
-    /// Writes every column of this post to its row and sets `modified_at` to now, as Laravel's
-    /// `save` touches `updated_at`. In the same transaction, recounts the post's terms, as
-    /// WordPress does when a post's status changes, so publishing or unpublishing a post keeps
-    /// its terms' `count` in step.
+    /// Writes every column of this post to its row, as Laravel's `save` does, with a new
+    /// `modified_at` (see [`next_modified_at`]). In the same transaction, recounts the post's
+    /// terms, as WordPress does when a post's status changes, so publishing or unpublishing a
+    /// post keeps its terms' `count` in step. A `future` post whose date has passed is saved as
+    /// `publish`, as `wp_insert_post` does (see [`due_status`]).
+    ///
+    /// This is the unchecked path: the last write wins, whatever was saved since this post was
+    /// read. Editor saves must not use it; they go through
+    /// [`save_revision`](super::save_revision), which refuses a save that would overwrite
+    /// another. The new `modified_at` is computed from the stored one, and the update is
+    /// conditional on it, retried when another write lands in between, so the stamp never
+    /// moves backwards and never returns to a value an editor may still hold.
     ///
     /// # Errors
     ///
-    /// Fails with the database's error; then nothing is written.
+    /// Fails with [`Error::NotFound`] when the row is gone, or with the database's error; then
+    /// nothing is written and the post is unchanged.
     pub async fn save(&mut self, db: &Database) -> Result<(), Error> {
-        self.modified_at = now();
         let id = self.id;
-        let columns = self.columns();
-        db.transaction(async |tx| write(tx, id, &columns).await)
-            .await
+        let mut saved = self.clone();
+        saved.status = due_status(saved.status, saved.published_at);
+        loop {
+            let stored = Self::query().find_or_fail(db, id).await?;
+            saved.modified_at = next_modified_at(stored.modified_at);
+            let columns = saved.columns();
+            let written = db
+                .transaction(async |tx| {
+                    // The stamp always changes, so a matched row is a changed row and MySQL's
+                    // count of changed rows is the count of matched rows.
+                    let matched = Self::query()
+                        .where_eq(Self::PRIMARY_KEY, id)
+                        .where_eq("modified_at", stored.modified_at)
+                        .update(&mut *tx, &columns)
+                        .await?;
+                    if matched == 0 {
+                        return Ok(false);
+                    }
+                    recount_post_terms(tx, id).await?;
+                    Ok::<_, Error>(true)
+                })
+                .await?;
+            if written {
+                *self = saved;
+                return Ok(());
+            }
+        }
     }
 
     /// Moves this post to the trash, as WordPress's `wp_trash_post` does: records its previous
     /// status in the post meta `_wp_trash_meta_status` and the time in `_wp_trash_meta_time` (a
-    /// unix time), sets its status to `trash` and saves it, in one transaction. A trashed post
-    /// stays in the table until it is deleted. A post already in the trash is left as it is, so
-    /// the first status is kept.
+    /// unix time), sets its status to `trash` with a new `modified_at`, and recounts its terms,
+    /// in one transaction. Only the status and `modified_at` are written, read from and
+    /// conditional on the stored row, so a stale copy of the post does not overwrite another
+    /// save. A trashed post stays in the table until it is deleted. A post already in the trash
+    /// is left as it is, so the first status is kept. On success this post becomes the stored
+    /// row.
     ///
     /// # Errors
     ///
-    /// Fails with the database's error; then nothing is written and the post is unchanged.
+    /// Fails with [`Error::NotFound`] when the row is gone, or with the database's error; then
+    /// nothing is written and the post is unchanged.
     pub async fn trash(&mut self, db: &Database) -> Result<(), Error> {
-        if self.status == PostStatus::Trash {
-            return Ok(());
-        }
-        let (status, modified_at) = (self.status, self.modified_at);
-        self.status = PostStatus::Trash;
-        self.modified_at = now();
         let id = self.id;
-        let columns = self.columns();
-        let result = db
-            .transaction(async |tx| {
-                write(tx, id, &columns).await?;
-                put_post_meta_in(tx, id, TRASH_META_STATUS, &json!(status.as_str())).await?;
-                put_post_meta_in(tx, id, TRASH_META_TIME, &json!(Utc::now().timestamp())).await
-            })
-            .await;
-        if result.is_err() {
-            self.status = status;
-            self.modified_at = modified_at;
-        }
-        result
+        let stored = loop {
+            let stored = Self::query().find_or_fail(db, id).await?;
+            if stored.status == PostStatus::Trash {
+                *self = stored;
+                return Ok(());
+            }
+            let previous = stored.status;
+            let next = Self {
+                status: PostStatus::Trash,
+                modified_at: next_modified_at(stored.modified_at),
+                ..stored.clone()
+            };
+            let written = db
+                .transaction(async |tx| {
+                    if !set_status(tx, &stored, &next).await? {
+                        return Ok(false);
+                    }
+                    put_post_meta_in(tx, id, TRASH_META_STATUS, &json!(previous.as_str())).await?;
+                    put_post_meta_in(tx, id, TRASH_META_TIME, &json!(Utc::now().timestamp()))
+                        .await?;
+                    Ok::<_, Error>(true)
+                })
+                .await?;
+            if written {
+                break next;
+            }
+        };
+        *self = stored;
+        Ok(())
     }
 
     /// Takes this post out of the trash, as WordPress 5.6 and later do in `wp_untrash_post`: the
     /// status becomes `draft`, whatever it was before, except that an attachment goes back to
-    /// `inherit`. Deletes the two trash meta keys. A post that is not in the trash is left as it
-    /// is.
+    /// `inherit`. Deletes the two trash meta keys. Like [`Post::trash`], only the status and
+    /// `modified_at` are written, conditional on the stored row. A post that is not in the
+    /// trash is left as it is. On success this post becomes the stored row.
     ///
     /// # Errors
     ///
-    /// Fails with the database's error; then nothing is written and the post is unchanged.
+    /// Fails with [`Error::NotFound`] when the row is gone, or with the database's error; then
+    /// nothing is written and the post is unchanged.
     pub async fn untrash(&mut self, db: &Database) -> Result<(), Error> {
-        if self.status != PostStatus::Trash {
-            return Ok(());
-        }
-        let (status, modified_at) = (self.status, self.modified_at);
-        self.status = if self.post_type == "attachment" {
-            PostStatus::Inherit
-        } else {
-            PostStatus::Draft
-        };
-        self.modified_at = now();
         let id = self.id;
-        let columns = self.columns();
-        let result = db
-            .transaction(async |tx| {
-                write(tx, id, &columns).await?;
-                delete_post_meta_in(tx, id, TRASH_META_STATUS).await?;
-                delete_post_meta_in(tx, id, TRASH_META_TIME).await?;
-                Ok(())
-            })
-            .await;
-        if result.is_err() {
-            self.status = status;
-            self.modified_at = modified_at;
-        }
-        result
+        let stored = loop {
+            let stored = Self::query().find_or_fail(db, id).await?;
+            if stored.status != PostStatus::Trash {
+                *self = stored;
+                return Ok(());
+            }
+            let next = Self {
+                status: if stored.post_type == "attachment" {
+                    PostStatus::Inherit
+                } else {
+                    PostStatus::Draft
+                },
+                modified_at: next_modified_at(stored.modified_at),
+                ..stored.clone()
+            };
+            let written = db
+                .transaction(async |tx| {
+                    if !set_status(tx, &stored, &next).await? {
+                        return Ok(false);
+                    }
+                    delete_post_meta_in(tx, id, TRASH_META_STATUS).await?;
+                    delete_post_meta_in(tx, id, TRASH_META_TIME).await?;
+                    Ok::<_, Error>(true)
+                })
+                .await?;
+            if written {
+                break next;
+            }
+        };
+        *self = stored;
+        Ok(())
     }
 
     /// The posts of one type, such as `post` or `page`, like a Laravel query scope. Attachments,
@@ -248,17 +303,50 @@ impl Post {
     }
 }
 
-/// Writes `columns` to post `id` and recounts its terms, on the connection of a transaction.
-async fn write(
-    tx: &mut Transaction,
-    id: i64,
-    columns: &[(&'static str, Value); 12],
-) -> Result<(), Error> {
-    Post::query()
-        .where_eq(Post::PRIMARY_KEY, id)
-        .update(&mut *tx, columns)
+/// Sets `stored`'s status and `modified_at` to `next`'s, if the row still has `stored`'s
+/// status and `modified_at`, and recounts its terms, on the connection of a transaction. Returns
+/// whether the row was written; `false` means another write landed since `stored` was read.
+async fn set_status(tx: &mut Transaction, stored: &Post, next: &Post) -> Result<bool, Error> {
+    // The stamp always changes, so a matched row is a changed row on MySQL too.
+    let matched = Post::query()
+        .where_eq(Post::PRIMARY_KEY, stored.id)
+        .where_eq("status", stored.status)
+        .where_eq("modified_at", stored.modified_at)
+        .update(
+            &mut *tx,
+            &[
+                ("status", next.status.into()),
+                ("modified_at", next.modified_at.into()),
+            ],
+        )
         .await?;
-    recount_post_terms(tx, id).await
+    if matched == 0 {
+        return Ok(false);
+    }
+    recount_post_terms(tx, stored.id).await?;
+    Ok(true)
+}
+
+/// The `modified_at` for a write to a row whose stored `modified_at` is `stored`: now, or one
+/// second after `stored` when now is not later. Every write to a post row uses it, so the stamp
+/// only moves forward. The column has one-second resolution, so without the extra second two
+/// writes in the same second would leave the same stamp, and an editor holding it as the
+/// expected value of [`save_revision`](super::save_revision) would overwrite the second write
+/// unnoticed. Under rapid writes the stamp can run a few seconds ahead of the clock.
+pub(super) fn next_modified_at(stored: NaiveDateTime) -> NaiveDateTime {
+    now().max(stored + Duration::seconds(1))
+}
+
+/// The status to save a post with, as `wp_insert_post` decides it: a `future` post whose date
+/// is now or past, or that has no date, is saved as `publish`. So a save of a stale copy does
+/// not put back `future` on a post the scheduler has already published, which would never be
+/// published again. Any other status is kept.
+pub(super) fn due_status(status: PostStatus, published_at: Option<NaiveDateTime>) -> PostStatus {
+    match (status, published_at) {
+        (PostStatus::Future, Some(date)) if date > now() => PostStatus::Future,
+        (PostStatus::Future, _) => PostStatus::Publish,
+        (other, _) => other,
+    }
 }
 
 /// The current time in UTC, to the second: what MySQL's `DATETIME` and PostgreSQL's

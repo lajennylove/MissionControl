@@ -4,8 +4,8 @@
 
 use chrono::{Duration, NaiveDateTime, SubsecRound, Utc};
 use mission_control_core::content::{
-    NewPost, Post, PostStatus, SaveError, create_post_autosave, get_post_autosave,
-    get_post_revisions, save_revision,
+    NewPost, Post, PostStatus, SaveError, check_and_publish_future_post, create_post_autosave,
+    get_post_autosave, get_post_revisions, save_revision,
 };
 use mission_control_core::migrations::migrator;
 use mission_control_testing::{create_users_table, database, unique_email};
@@ -377,4 +377,197 @@ async fn autosaving_a_missing_post_is_not_found() {
         matches!(err, SaveError::NotFound { id } if id == gone.id),
         "expected not found, got {err:?}"
     );
+}
+
+/// Now, to the second, as the stored stamps are.
+fn now() -> NaiveDateTime {
+    Utc::now().naive_utc().trunc_subsecs(0)
+}
+
+#[tokio::test]
+async fn a_plain_save_never_moves_the_stamp_back_to_one_an_editor_holds() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let post = published_post(db, author).await;
+    // Editor A opened the post at `start`. Editor B saves (the stamp becomes start + 1 s),
+    // then a plain save follows in the same second. Had it stamped plain now, the stamp would
+    // be back at `start`, and A's save would overwrite B's unnoticed.
+    let start = now();
+    set_modified_at(db, post.id, start).await;
+    let mut a = post.clone();
+    a.title = "Editor A".into();
+    let mut b = post.clone();
+    b.title = "Editor B".into();
+
+    let saved = save_revision(db, &b, start).await.expect("B saves");
+    let mut plain = Post::query().find_or_fail(db, post.id).await.unwrap();
+    plain.menu_order = 3;
+    plain.save(db).await.expect("a plain save");
+    assert!(plain.modified_at > saved.modified_at);
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored, plain);
+
+    let err = save_revision(db, &a, start).await.unwrap_err();
+    assert!(
+        matches!(err, SaveError::Conflict { current_modified_at } if current_modified_at == plain.modified_at),
+        "expected a conflict, got {err:?}"
+    );
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored.title, "Editor B");
+}
+
+#[tokio::test]
+async fn a_plain_save_stamps_after_a_stored_time_ahead_of_the_clock() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let mut post = published_post(db, author).await;
+    let ahead = now() + Duration::hours(1);
+    set_modified_at(db, post.id, ahead).await;
+
+    post.save(db).await.unwrap();
+    assert_eq!(post.modified_at, ahead + Duration::seconds(1));
+    post.trash(db).await.unwrap();
+    assert_eq!(post.modified_at, ahead + Duration::seconds(2));
+    post.untrash(db).await.unwrap();
+    assert_eq!(post.modified_at, ahead + Duration::seconds(3));
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored, post);
+}
+
+#[tokio::test]
+async fn trashing_a_stale_copy_keeps_another_save() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let post = published_post(db, author).await;
+    let mut stale = post.clone();
+
+    let mut edited = post.clone();
+    edited.title = "Saved meanwhile".into();
+    edited.content = "New body".into();
+    let saved = save_revision(db, &edited, post.modified_at).await.unwrap();
+
+    stale.trash(db).await.expect("trashes");
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored.status, PostStatus::Trash);
+    assert_eq!(stored.title, "Saved meanwhile");
+    assert_eq!(stored.content, "New body");
+    assert!(stored.modified_at > saved.modified_at);
+    // The copy now holds the stored row.
+    assert_eq!(stale, stored);
+
+    let mut stale = post.clone();
+    stale.untrash(db).await.expect("untrashes");
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored.status, PostStatus::Draft);
+    assert_eq!(stored.title, "Saved meanwhile");
+    assert_eq!(stale, stored);
+}
+
+#[tokio::test]
+async fn a_save_of_a_post_the_scheduler_published_keeps_it_published() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let post = Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Future,
+            title: "Scheduled".into(),
+            published_at: Some(now() - Duration::minutes(1)),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .unwrap();
+    // The editor opened the post while it was `future`; then the scheduler published it, which
+    // changes only the status, not `modified_at`.
+    let opened = post.clone();
+    assert!(check_and_publish_future_post(db, post.id).await.unwrap());
+
+    let mut edited = opened.clone();
+    edited.title = "Scheduled, edited".into();
+    let revision = save_revision(db, &edited, opened.modified_at)
+        .await
+        .expect("saves");
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored.status, PostStatus::Publish);
+    assert_eq!(stored.title, "Scheduled, edited");
+    assert_eq!(stored.modified_at, revision.modified_at);
+
+    // The plain save follows the same rule.
+    let mut plain = opened.clone();
+    plain.save(db).await.unwrap();
+    assert_eq!(plain.status, PostStatus::Publish);
+    let stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored.status, PostStatus::Publish);
+}
+
+#[tokio::test]
+async fn a_save_of_a_future_post_still_ahead_keeps_it_future() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let post = Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Future,
+            published_at: Some(now() + Duration::days(1)),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .unwrap();
+    save_revision(db, &post, post.modified_at).await.unwrap();
+    let mut stored = Post::query().find_or_fail(db, post.id).await.unwrap();
+    assert_eq!(stored.status, PostStatus::Future);
+    stored.save(db).await.unwrap();
+    assert_eq!(stored.status, PostStatus::Future);
+}
+
+#[tokio::test]
+async fn a_revision_is_not_revised_or_autosaved() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let post = published_post(db, author).await;
+    let revision = save_revision(db, &post, post.modified_at)
+        .await
+        .unwrap()
+        .into_post();
+
+    let err = save_revision(db, &revision, revision.modified_at)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, SaveError::IsRevision { id } if id == revision.id),
+        "{err:?}"
+    );
+    let err = create_post_autosave(db, &revision, author)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, SaveError::IsRevision { id } if id == revision.id),
+        "{err:?}"
+    );
+
+    // A copy that claims to be a post but has a revision's id is refused too.
+    let disguised = Post {
+        post_type: "post".into(),
+        ..revision.clone()
+    };
+    let err = save_revision(db, &disguised, revision.modified_at)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SaveError::IsRevision { .. }), "{err:?}");
+    let err = create_post_autosave(db, &disguised, author)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SaveError::IsRevision { .. }), "{err:?}");
+    let stored = Post::query().find_or_fail(db, revision.id).await.unwrap();
+    assert_eq!(stored, revision);
+    assert_eq!(count_children(db, "revision", post.id).await, 1);
+    assert_eq!(count_children(db, "revision", revision.id).await, 0);
 }
