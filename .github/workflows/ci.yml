@@ -37,11 +37,9 @@ jobs:
             url: sqlite
           - database: mariadb
             url: mysql://root:ci-password@127.0.0.1:3306/mission_control_test
-          - database: mysql
-            url: mysql://root:ci-password@127.0.0.1:3307/mission_control_test
           - database: postgres
             url: postgres://postgres:ci-password@127.0.0.1:5432/mission_control_test
-    # All three service containers start for every entry (the matrix only picks the
+    # Both service containers start for every entry (the matrix only picks the
     # URL the tests use). Throwaway passwords: they exist only for the job.
     services:
       mariadb:
@@ -53,18 +51,6 @@ jobs:
           - 3306:3306
         options: >-
           --health-cmd "healthcheck.sh --connect --innodb_initialized"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: ci-password
-          MYSQL_DATABASE: mission_control_test
-        ports:
-          - 3307:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -pci-password"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
