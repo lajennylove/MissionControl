@@ -5,6 +5,7 @@ use chrono::{SubsecRound, Utc};
 use orbit_orm::{Database, Model, Operator};
 use tokio::runtime::Handle;
 
+use super::taxonomy::recount_post_terms;
 use super::{Post, PostStatus};
 use crate::hooks::{Action, DEFAULT_PRIORITY, Owner};
 use crate::scheduler::{self, Error, Scheduler};
@@ -64,17 +65,27 @@ pub async fn check_and_publish_future_post(db: &Database, id: i64) -> Result<boo
     }
     // WordPress's `wp_publish_post`: only the status changes, and only if the post is still
     // `future` and due, so an edit saved since the read is kept and `modified_at` is not touched.
+    // Its terms are recounted in the same transaction, as WordPress does on the status change.
     let now = Utc::now().naive_utc().trunc_subsecs(0);
-    let published = Post::query()
-        .where_eq(Post::PRIMARY_KEY, id)
-        .where_eq("status", PostStatus::Future)
-        .where_group(|q| {
-            q.where_null("published_at")
-                .or_where_op("published_at", Operator::Le, now)
+    let published = db
+        .transaction(async |tx| {
+            let published = Post::query()
+                .where_eq(Post::PRIMARY_KEY, id)
+                .where_eq("status", PostStatus::Future)
+                .where_group(|q| {
+                    q.where_null("published_at")
+                        .or_where_op("published_at", Operator::Le, now)
+                })
+                .update(&mut *tx, &[("status", PostStatus::Publish.into())])
+                .await?
+                == 1;
+            if published {
+                recount_post_terms(tx, id).await?;
+            }
+            Ok::<_, orbit_orm::Error>(published)
         })
-        .update(db, &[("status", PostStatus::Publish.into())])
         .await?;
-    Ok(published == 1)
+    Ok(published)
 }
 
 /// Schedules `post`'s publication, as WordPress's `_future_post_hook` does when a post becomes

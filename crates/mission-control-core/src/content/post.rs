@@ -4,8 +4,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{NaiveDateTime, SubsecRound, Utc};
-use orbit_orm::{Error, Executor, Model, OrbitModel, Query, Value};
+use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Query, Value};
 use sqlx::error::BoxDynError;
+
+use super::taxonomy::recount_post_terms;
 
 /// A row of `posts`: a post, a page, a custom type, an attachment, a revision or a menu item, as
 /// in WordPress's `wp_posts`. `post_type` tells them apart.
@@ -131,18 +133,25 @@ impl Post {
     }
 
     /// Writes every column of this post to its row and sets `modified_at` to now, as Laravel's
-    /// `save` touches `updated_at`.
+    /// `save` touches `updated_at`. In the same transaction, recounts the post's terms, as
+    /// WordPress does when a post's status changes, so publishing or unpublishing a post keeps
+    /// its terms' `count` in step.
     ///
     /// # Errors
     ///
-    /// Fails with the database's error.
-    pub async fn save<'a>(&mut self, db: impl Executor<'a>) -> Result<(), Error> {
+    /// Fails with the database's error; then nothing is written.
+    pub async fn save(&mut self, db: &Database) -> Result<(), Error> {
         self.modified_at = now();
-        Self::query()
-            .where_eq(Self::PRIMARY_KEY, self.id)
-            .update(db, &self.columns())
-            .await?;
-        Ok(())
+        let id = self.id;
+        let columns = self.columns();
+        db.transaction(async |tx| {
+            Self::query()
+                .where_eq(Self::PRIMARY_KEY, id)
+                .update(&mut *tx, &columns)
+                .await?;
+            recount_post_terms(tx, id).await
+        })
+        .await
     }
 
     /// Moves this post to the trash: sets its status to `trash` and saves it, as WordPress's
@@ -154,7 +163,7 @@ impl Post {
     /// # Errors
     ///
     /// Fails with the database's error.
-    pub async fn trash<'a>(&mut self, db: impl Executor<'a>) -> Result<(), Error> {
+    pub async fn trash(&mut self, db: &Database) -> Result<(), Error> {
         self.status = PostStatus::Trash;
         self.save(db).await
     }

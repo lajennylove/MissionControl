@@ -2,8 +2,9 @@
 //! hierarchical and a flat taxonomy, and the terms of a post. They run on the database in
 //! `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
 
+use chrono::{Duration, SubsecRound, Utc};
 use mission_control_core::content::{
-    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermError,
+    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermError, check_and_publish_future_post,
 };
 use mission_control_core::migrations::migrator;
 use mission_control_testing::{create_users_table, database, unique_email};
@@ -504,7 +505,7 @@ async fn deleting_a_term_removes_its_relationships_and_lifts_its_children() {
     .await
     .unwrap();
 
-    assert!(fruit.clone().delete(db).await.unwrap());
+    assert!(fruit.delete(db).await.unwrap());
 
     assert_eq!(Term::find(db, fruit.term_taxonomy_id).await.unwrap(), None);
     assert_eq!(
@@ -524,7 +525,7 @@ async fn deleting_a_term_removes_its_relationships_and_lifts_its_children() {
     assert_eq!(names(&food.children(db).await.unwrap()), ["Apple", "Pear"]);
 
     // A top-level term's children become top-level; a second delete finds nothing.
-    assert!(food.clone().delete(db).await.unwrap());
+    assert!(food.delete(db).await.unwrap());
     assert_eq!(
         Term::find(db, apple.term_taxonomy_id)
             .await
@@ -577,4 +578,90 @@ async fn a_relationship_is_unique_per_post_and_term() {
         raw::execute(db, insert, &row).await,
         Err(orbit_orm::Error::UniqueViolation { .. })
     ));
+}
+
+#[tokio::test]
+async fn a_name_over_200_characters_is_refused() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+
+    let longest = "é".repeat(200);
+    let term = tag(db, &longest).await;
+    assert_eq!(term.name.chars().count(), 200);
+    let err = Term::create(db, &Taxonomy::POST_TAG, NewTerm::new(&"x".repeat(201)))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TermError::NameTooLong), "{err:?}");
+    let err = Term::create(
+        db,
+        &Taxonomy::POST_TAG,
+        NewTerm {
+            slug: "s".repeat(201),
+            ..NewTerm::new("Long slug")
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, TermError::SlugTooLong), "{err:?}");
+}
+
+async fn count_of(db: &Database, term: &Term) -> i64 {
+    Term::find(db, term.term_taxonomy_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .count
+}
+
+#[tokio::test]
+async fn saving_and_trashing_a_post_keep_its_counts_in_step() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let news = category(db, "News", None).await;
+    let rust = tag(db, "Rust").await;
+    let mut post = post(db, author, PostStatus::Draft).await;
+    post.sync_terms(db, &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    post.sync_terms(db, &Taxonomy::POST_TAG, &[rust.term_taxonomy_id])
+        .await
+        .unwrap();
+    assert_eq!(count_of(db, &news).await, 0, "a draft is not counted");
+
+    post.status = PostStatus::Publish;
+    post.save(db).await.unwrap();
+    assert_eq!(count_of(db, &news).await, 1, "publishing counts the post");
+    assert_eq!(count_of(db, &rust).await, 1);
+
+    post.trash(db).await.unwrap();
+    assert_eq!(count_of(db, &news).await, 0, "trashing uncounts the post");
+    assert_eq!(count_of(db, &rust).await, 0);
+}
+
+#[tokio::test]
+async fn a_scheduled_publish_counts_the_post() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let news = category(db, "News", None).await;
+    let post = Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Future,
+            title: "Later".into(),
+            published_at: Some(Utc::now().naive_utc().trunc_subsecs(0) - Duration::minutes(1)),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .unwrap();
+    post.sync_terms(db, &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    assert_eq!(count_of(db, &news).await, 0);
+
+    assert!(check_and_publish_future_post(db, post.id).await.unwrap());
+    assert_eq!(count_of(db, &news).await, 1);
 }

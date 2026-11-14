@@ -68,7 +68,10 @@ pub struct Term {
     pub description: String,
     /// The parent's `term_id`, or `None` for a top-level term.
     pub parent_id: Option<i64>,
-    /// How many published posts have this term, kept up to date as WordPress does.
+    /// How many published posts of the taxonomy's post types have this term. Kept in step, as
+    /// WordPress does, when a post's terms change, when [`Post::save`] or [`Post::trash`] writes
+    /// a post, and when a scheduled post is published; see [`update_term_counts`] for other
+    /// changes and for deleting a post.
     pub count: i64,
 }
 
@@ -97,11 +100,22 @@ impl NewTerm {
     }
 }
 
+/// The most characters a term's name or slug may have: the size of the `terms.name` and
+/// `terms.slug` columns, as in WordPress.
+pub const MAX_TERM_LENGTH: usize = 200;
+
 /// Why a term was not created. The messages follow WordPress's `wp_insert_term` errors.
 #[derive(Debug)]
 pub enum TermError {
     /// The name is empty or only whitespace (`empty_term_name`).
     EmptyName,
+    /// The name is longer than [`MAX_TERM_LENGTH`] characters, the size of the `name` column, as
+    /// WordPress refuses it (`invalid_term_name`).
+    NameTooLong,
+    /// The slug, as given or once made unique, is longer than [`MAX_TERM_LENGTH`] characters, the size
+    /// of the `slug` column. Refused so that every database behaves alike; MySQL and PostgreSQL
+    /// would reject it and SQLite would store it.
+    SlugTooLong,
     /// A parent was given for a flat taxonomy, such as tags.
     NotHierarchical {
         /// The taxonomy's name.
@@ -123,6 +137,14 @@ impl fmt::Display for TermError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyName => f.write_str("a term name must not be empty"),
+            Self::NameTooLong => write!(
+                f,
+                "a term name must be at most {MAX_TERM_LENGTH} characters"
+            ),
+            Self::SlugTooLong => write!(
+                f,
+                "a term slug must be at most {MAX_TERM_LENGTH} characters"
+            ),
             Self::NotHierarchical { taxonomy } => write!(
                 f,
                 "the {taxonomy} taxonomy is not hierarchical, so a term cannot have a parent"
@@ -184,7 +206,7 @@ struct TermTaxonomyRow {
 
 /// A connection that queries can run on more than once: the pool, or an open transaction. Lets
 /// one helper serve both reads on the pool and the steps of a write.
-trait Conn: Send {
+pub(crate) trait Conn: Send {
     /// The executor for the next query.
     fn exec(&mut self) -> impl Executor<'_> + Send;
 }
@@ -204,7 +226,8 @@ impl Conn for Transaction {
 impl Term {
     /// Creates a term in `taxonomy`, as WordPress's `wp_insert_term` does, and returns it.
     ///
-    /// The name is trimmed and must not be empty. An empty slug is made from the name. A parent
+    /// The name is trimmed and must not be empty; it and the slug may have at most
+    /// [`MAX_TERM_LENGTH`] characters. An empty slug is made from the name. A parent
     /// must be a term of the same taxonomy, and only a hierarchical taxonomy takes one.
     ///
     /// A name that already exists is refused, compared without regard to case: under the same
@@ -224,6 +247,9 @@ impl Term {
         let name = new.name.trim().to_owned();
         if name.is_empty() {
             return Err(TermError::EmptyName);
+        }
+        if name.chars().count() > MAX_TERM_LENGTH {
+            return Err(TermError::NameTooLong);
         }
         if new.parent_id.is_some() && !taxonomy.hierarchical {
             return Err(TermError::NotHierarchical {
@@ -254,6 +280,9 @@ impl Term {
                 return Err(TermError::Exists { term_taxonomy_id });
             }
             let slug = unique_slug(tx, &taxonomy, slug, new.parent_id).await?;
+            if slug.chars().count() > MAX_TERM_LENGTH {
+                return Err(TermError::SlugTooLong);
+            }
 
             let term_id = TermRow::query()
                 .insert(
@@ -487,8 +516,12 @@ impl Post {
 
 /// Sets `count` on the terms `term_taxonomy_ids` of `taxonomy` to the number of their posts that
 /// are published and of the taxonomy's post types, as WordPress's `wp_update_term_count` does.
-/// Adding and removing a post's terms calls it; call it when a post's status changes, or after
-/// deleting a post.
+/// Adding and removing a post's terms, [`Post::save`], [`Post::trash`] and publishing a scheduled
+/// post call it already; call it after changing a post's status any other way.
+///
+/// Deleting a post deletes its `term_relationships` rows through the foreign key, without a
+/// recount. A post delete (none exists yet) must read the post's terms first and recount them
+/// once the post is gone, as WordPress's `wp_delete_post` does.
 ///
 /// # Errors
 ///
@@ -499,6 +532,30 @@ pub async fn update_term_counts(
     term_taxonomy_ids: &[i64],
 ) -> Result<(), Error> {
     recount(&mut { db }, taxonomy, term_taxonomy_ids).await
+}
+
+/// Recounts every term post `post_id` has, in each of its taxonomies, as WordPress's
+/// `_update_term_count_on_transition_post_status` does when a post's status changes. Only the
+/// built-in taxonomies are known yet; terms of any other taxonomy are left as they are.
+pub(crate) async fn recount_post_terms<C: Conn>(c: &mut C, post_id: i64) -> Result<(), Error> {
+    let rows: Vec<(i64, String)> = raw::fetch_all(
+        c.exec(),
+        "SELECT tt.id, tt.taxonomy FROM term_relationships r \
+         INNER JOIN term_taxonomy tt ON tt.id = r.term_taxonomy_id \
+         WHERE r.object_id = ?",
+        &[post_id.into()],
+    )
+    .await?;
+    let mut by_taxonomy: HashMap<String, Vec<i64>> = HashMap::new();
+    for (id, taxonomy) in rows {
+        by_taxonomy.entry(taxonomy).or_default().push(id);
+    }
+    for (name, ids) in by_taxonomy {
+        if let Some(taxonomy) = Taxonomy::builtin(&name) {
+            recount(c, &taxonomy, &ids).await?;
+        }
+    }
+    Ok(())
 }
 
 /// The slug for a term given none: the name in lower case, each run of characters other than

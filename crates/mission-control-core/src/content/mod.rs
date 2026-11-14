@@ -26,4 +26,4 @@ pub use future::{
     schedule_future_post,
 };
 pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};
-pub use taxonomy::{NewTerm, Taxonomy, Term, TermError, update_term_counts};
+pub use taxonomy::{MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermError, update_term_counts};
