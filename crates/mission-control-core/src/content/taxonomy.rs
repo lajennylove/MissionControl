@@ -11,7 +11,7 @@ use std::fmt;
 use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Transaction, Value, raw};
 
 use super::post::{Post, PostStatus};
-use super::slug::make_slug;
+use super::slug::{make_slug, sanitize_title};
 
 /// A taxonomy: its name and whether its terms nest. A minimal stand-in for the taxonomy
 /// definitions that custom taxonomies bring later; for now the built-ins are
@@ -228,9 +228,10 @@ impl Term {
     /// Creates a term in `taxonomy`, as WordPress's `wp_insert_term` does, and returns it.
     ///
     /// The name is trimmed and must not be empty; it and the slug may have at most
-    /// [`MAX_TERM_LENGTH`] characters. An empty slug is made from the name with
-    /// [`make_slug`](super::make_slug). A parent must be a term of the same taxonomy, and only a
-    /// hierarchical taxonomy takes one.
+    /// [`MAX_TERM_LENGTH`] characters. A given slug is sanitized with
+    /// [`make_slug`](super::make_slug)'s rules (`Hello World` is stored as `hello-world`); an
+    /// empty one, or one that sanitizes to nothing, is made from the name. A parent must be a
+    /// term of the same taxonomy, and only a hierarchical taxonomy takes one.
     ///
     /// A name that already exists is refused, compared without regard to case: under the same
     /// parent in a hierarchical taxonomy, anywhere in a flat one. A distinct slug of the caller's
@@ -270,12 +271,12 @@ impl Term {
                     return Err(TermError::MissingParent);
                 }
             }
-            let slug_given = !new.slug.is_empty();
-            let slug = if slug_given {
-                new.slug
-            } else {
-                make_slug(&name)
-            };
+            // A given slug is sanitized too, as WordPress's `pre_term_slug` filter runs
+            // `sanitize_title` on it, and counts as given only when something is left. It is not
+            // cut to the column: one that is too long is refused below.
+            let given = sanitize_title(&new.slug);
+            let slug_given = !given.is_empty();
+            let slug = if slug_given { given } else { make_slug(&name) };
             if let Some(term_taxonomy_id) =
                 existing(tx, &taxonomy, &name, &slug, slug_given, new.parent_id).await?
             {

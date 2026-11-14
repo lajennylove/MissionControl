@@ -154,25 +154,37 @@ impl Store {
             )
             .await?;
         } else {
-            let (columns, marks, binds) = match self.owner {
-                Some(column) => (
-                    format!("{column}, {}, {}", self.key, self.value),
-                    "?, ?, ?",
-                    vec![owner.into(), key.into(), json.into()],
-                ),
-                None => (
-                    format!("{}, {}", self.key, self.value),
-                    "?, ?",
-                    vec![key.into(), json.into()],
-                ),
-            };
-            raw::execute(
-                c.exec(),
-                &format!("INSERT INTO {} ({columns}) VALUES ({marks})", self.table),
-                &binds,
-            )
-            .await?;
+            self.insert(c, owner, key, json).await?;
         }
+        Ok(())
+    }
+
+    /// Inserts a row under `key` with the text `json`, whatever rows the key already has.
+    async fn insert<C: Conn>(
+        &self,
+        c: &mut C,
+        owner: i64,
+        key: &str,
+        json: &str,
+    ) -> Result<(), Error> {
+        let (columns, marks, binds) = match self.owner {
+            Some(column) => (
+                format!("{column}, {}, {}", self.key, self.value),
+                "?, ?, ?",
+                vec![owner.into(), key.into(), json.into()],
+            ),
+            None => (
+                format!("{}, {}", self.key, self.value),
+                "?, ?",
+                vec![key.into(), json.into()],
+            ),
+        };
+        raw::execute(
+            c.exec(),
+            &format!("INSERT INTO {} ({columns}) VALUES ({marks})", self.table),
+            &binds,
+        )
+        .await?;
         Ok(())
     }
 
@@ -228,27 +240,6 @@ impl Store {
         rows.into_iter()
             .map(|(text,)| serde_json::from_str(&text).map_err(MetaError::from))
             .collect()
-    }
-
-    /// Adds a row under `key`, beside any rows already there, as `add_post_meta` does.
-    async fn add<C: Conn>(
-        &self,
-        c: &mut C,
-        owner: i64,
-        key: &str,
-        json: &str,
-    ) -> Result<(), Error> {
-        let column = self.owner.expect("only owned meta repeats a key");
-        raw::execute(
-            c.exec(),
-            &format!(
-                "INSERT INTO {} ({column}, {}, {}) VALUES (?, ?, ?)",
-                self.table, self.key, self.value
-            ),
-            &[owner.into(), key.into(), json.into()],
-        )
-        .await?;
-        Ok(())
     }
 
     /// Whether a row under `key` has the text `json`.
@@ -336,7 +327,7 @@ pub(crate) async fn add_post_meta_in<C: Conn>(
     key: &str,
     value: &Value,
 ) -> Result<(), Error> {
-    POST_META.add(c, post_id, key, &value.to_string()).await
+    POST_META.insert(c, post_id, key, &value.to_string()).await
 }
 
 /// Deletes the values of post meta `key` equal to `value`, on a connection that is already in

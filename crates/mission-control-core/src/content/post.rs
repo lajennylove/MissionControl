@@ -4,14 +4,13 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{Duration, NaiveDateTime, SubsecRound, Utc};
-use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Query, Transaction, Value};
+use orbit_orm::{Database, Error, Model, OrbitModel, Query, Transaction, Value};
 use serde_json::json;
 use sqlx::error::BoxDynError;
 
 use super::meta::{MetaError, delete_post_meta_in, get_post_meta_in, put_post_meta_in};
 use super::slug::{
-    DESIRED_SLUG_META, TRASHED_SUFFIX, is_hierarchical, record_old_slug, trashed_slug,
-    unique_slug_on,
+    DESIRED_SLUG_META, TRASHED_SUFFIX, record_old_slug, settle_slug, trashed_slug, wanted_slug,
 };
 use super::taxonomy::recount_post_terms;
 
@@ -118,11 +117,18 @@ impl NewPost {
 impl Post {
     /// Inserts `new` and returns the stored post, with `modified_at` set to now.
     ///
+    /// The slug is settled as `wp_insert_post` does: the given slug is sanitized with
+    /// [`make_slug`](super::make_slug). Unless the status is `draft`, `pending` or `auto-draft`,
+    /// an empty slug is made from the title (or, when the title gives none, the new post's id)
+    /// and the slug is made unique with [`unique_slug`](super::unique_slug). Drafts and pending
+    /// posts keep their slug as given, even empty or taken, until they are published. The insert
+    /// and the slug are one transaction.
+    ///
     /// # Errors
     ///
     /// Fails with [`Error::ForeignKeyViolation`] when the author does not exist, or with the
     /// database's error.
-    pub async fn create<'a>(db: impl Executor<'a>, new: NewPost) -> Result<Self, Error> {
+    pub async fn create(db: &Database, new: NewPost) -> Result<Self, Error> {
         let mut post = Self {
             id: 0,
             author_id: new.author_id,
@@ -138,18 +144,28 @@ impl Post {
             modified_at: now(),
             password: new.password,
         };
-        let id = Self::query().insert(db, &post.columns()).await?;
-        post.id = i64::try_from(id).expect("an id from a BIGINT column fits in i64");
+        post.slug = wanted_slug(&post, None);
+        db.transaction(async |tx| {
+            // The insert comes first, so on SQLite the transaction holds the write lock before
+            // it reads.
+            let id = Self::query().insert(&mut *tx, &post.columns()).await?;
+            post.id = i64::try_from(id).expect("an id from a BIGINT column fits in i64");
+            write_settled_slug(tx, &mut post).await
+        })
+        .await?;
         Ok(post)
     }
 
     /// Writes every column of this post to its row, as Laravel's `save` does, with a new
-    /// `modified_at` (see [`next_modified_at`]). In the same transaction, recounts the post's
-    /// terms, as WordPress does when a post's status changes, so publishing or unpublishing a
-    /// post keeps its terms' `count` in step. A `future` post whose date has passed is saved as
-    /// `publish`, as `wp_insert_post` does (see [`due_status`]). A published post whose slug
-    /// changes keeps the old slug in the post meta `_wp_old_slug`, so links to it can still find
-    /// it (see [`find_by_old_slug`](super::find_by_old_slug)).
+    /// `modified_at`: now, or one second after the stored one when now is not later. In the same
+    /// transaction, recounts the post's terms, as WordPress does when a post's status changes,
+    /// so publishing or unpublishing a post keeps its terms' `count` in step. A `future` post
+    /// whose date is less than a minute ahead, or past, is saved as `publish`, as `wp_insert_post`
+    /// does; attachments are left as they are. The slug is settled as in [`Post::create`]
+    /// (sanitized, made from the title or the id when empty, made unique unless the post is a
+    /// draft, pending or an auto-draft). A published post whose slug changes keeps the old slug
+    /// in the post meta `_wp_old_slug`, so links to it can still find it (see
+    /// [`find_by_old_slug`](super::find_by_old_slug)).
     ///
     /// This is the unchecked path: the last write wins, whatever was saved since this post was
     /// read. Editor saves must not use it; they go through
@@ -166,6 +182,7 @@ impl Post {
         let id = self.id;
         let mut saved = self.clone();
         saved.status = due_status(&saved.post_type, saved.status, saved.published_at);
+        saved.slug = wanted_slug(&saved, Some(id));
         loop {
             let stored = Self::query().find_or_fail(db, id).await?;
             saved.modified_at = next_modified_at(stored.modified_at);
@@ -183,6 +200,7 @@ impl Post {
                         return Ok(false);
                     }
                     recount_post_terms(tx, id).await?;
+                    write_settled_slug(tx, &mut saved).await?;
                     record_old_slug(tx, &stored, &saved).await?;
                     Ok::<_, Error>(true)
                 })
@@ -249,10 +267,9 @@ impl Post {
     /// Takes this post out of the trash, as WordPress 5.6 and later do in `wp_untrash_post`: the
     /// status becomes `draft`, whatever it was before, except that an attachment goes back to
     /// `inherit`. Deletes the two trash meta keys. The slug the post had before the trash
-    /// (`_wp_desired_post_slug`) comes back, made unique again with
-    /// [`unique_slug`](super::unique_slug) in case another post took it meanwhile. WordPress
-    /// gives a draft its slug back as it is and makes it unique only on publish; Mission Control
-    /// makes it unique here, so two posts never share a slug. Like [`Post::trash`], only the
+    /// (`_wp_desired_post_slug`) comes back as it was, as `wp_insert_post` restores it, even if
+    /// another post took it meanwhile: a draft may share a slug, and the next save that
+    /// publishes the post makes it unique (see [`Post::save`]). Like [`Post::trash`], only the
     /// status, slug and `modified_at` are written, conditional on the stored row. A post that is
     /// not in the trash is left as it is. On success this post becomes the stored row.
     ///
@@ -295,15 +312,7 @@ impl Post {
                             .to_owned(),
                         Err(MetaError::Database(e)) => return Err(e),
                     };
-                    next.slug = unique_slug_on(
-                        tx,
-                        &stored.post_type,
-                        is_hierarchical(&stored.post_type),
-                        stored.parent_id,
-                        &desired,
-                        Some(id),
-                    )
-                    .await?;
+                    next.slug = desired;
                     Self::query()
                         .where_eq(Self::PRIMARY_KEY, id)
                         .update(&mut *tx, &[("slug", next.slug.clone().into())])
@@ -370,6 +379,20 @@ async fn set_status(tx: &mut Transaction, stored: &Post, next: &Post) -> Result<
     }
     recount_post_terms(tx, stored.id).await?;
     Ok(true)
+}
+
+/// Settles `post`'s slug with [`settle_slug`] once its row is written, on the save's
+/// transaction, and writes it when it differs from the one written.
+pub(super) async fn write_settled_slug(tx: &mut Transaction, post: &mut Post) -> Result<(), Error> {
+    let slug = settle_slug(tx, post, post.id).await?;
+    if slug != post.slug {
+        Post::query()
+            .where_eq(Post::PRIMARY_KEY, post.id)
+            .update(&mut *tx, &[("slug", slug.clone().into())])
+            .await?;
+        post.slug = slug;
+    }
+    Ok(())
 }
 
 /// The `modified_at` for a write to a row whose stored `modified_at` is `stored`: now, or one

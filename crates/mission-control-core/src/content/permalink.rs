@@ -212,12 +212,7 @@ impl FromStr for PermalinkStructure {
         if s.is_empty() {
             return Ok(Self::plain());
         }
-        let mut text = String::with_capacity(s.len() + 1);
-        for c in format!("/{s}").chars() {
-            if !(c == '/' && text.ends_with('/')) {
-                text.push(c);
-            }
-        }
+        let text = fold_slashes(&format!("/{s}"));
         let mut segments = Vec::new();
         let mut rest = text.as_str();
         while let Some(start) = rest.find('%') {
@@ -269,7 +264,8 @@ pub struct PermalinkContext {
     pub ancestors: Vec<String>,
     /// `%category%`: the slug path of the post's category, its ancestors first (`news/local`).
     /// WordPress uses the category with the lowest id, or the default category when the post
-    /// has none. `None` renders nothing.
+    /// has none, so it always has a value: callers pass the default category's slug for a post
+    /// without categories. `None` renders nothing, and the `//` it leaves is folded into `/`.
     pub category: Option<String>,
     /// `%author%`: the author's nicename. `None` renders nothing.
     pub author: Option<String>,
@@ -313,33 +309,54 @@ impl PermalinkContext {
 ///   rewrite (`with_front`) does.
 /// - An attachment gets `?attachment_id=ID`.
 ///
-/// Links end with a slash when the structure does. Under the plain structure, or when the post
-/// is not public (anything but `publish` and `private`), the link is a query: `?p=ID`,
-/// `?page_id=ID`, `?{post_type}={slug}` for a published custom type and `?post_type=...&p=ID`
-/// otherwise. A private post gets its pretty link, as WordPress gives it to users who may read
-/// it.
+/// Links end with a slash when the structure does, and a `//` left by an empty value (such as
+/// a missing `%category%`) is folded into `/`.
+///
+/// The link is a query instead under the plain structure, and for a post that is not yet
+/// published, as `get_permalink` decides: a post or a custom type that is `draft`, `pending`,
+/// `auto-draft` or `future`, and a page that is `draft`, `pending` or `auto-draft`
+/// (`_get_page_link` leaves `future` out). Other statuses, `private`, `trash` and `inherit`
+/// included, keep the pretty link. The queries are `?p=ID`, `?page_id=ID`, `?{post_type}={slug}`
+/// for a custom type that is not a draft, and `?post_type=...&p=ID` for one that is.
 pub fn permalink(
     structure: &PermalinkStructure,
     post: &Post,
     context: &PermalinkContext,
 ) -> String {
-    let public = matches!(post.status, PostStatus::Publish | PostStatus::Private);
-    let pretty = public && !structure.is_plain();
-    let slash = |path: String| trailing_slash(path, structure.uses_trailing_slash());
+    let draft_or_pending = matches!(
+        post.status,
+        PostStatus::Draft | PostStatus::Pending | PostStatus::AutoDraft
+    );
+    let unpublished = draft_or_pending || post.status == PostStatus::Future;
+    let pretty = !structure.is_plain();
+    let slash = |path: String| trailing_slash(fold_slashes(&path), structure.uses_trailing_slash());
     match post.post_type.as_str() {
         "attachment" => context.url(&format!("?attachment_id={}", post.id)),
-        "post" if pretty => context.url(&slash(render(structure, post, context))),
+        "post" if pretty && !unpublished => context.url(&slash(render(structure, post, context))),
         "post" => context.url(&format!("?p={}", post.id)),
-        "page" if pretty => context.url(&slash(context.path(&post.slug))),
+        "page" if pretty && !draft_or_pending => context.url(&slash(context.path(&post.slug))),
         "page" => context.url(&format!("?page_id={}", post.id)),
-        post_type if pretty => context.url(&slash(format!(
+        post_type if pretty && !unpublished => context.url(&slash(format!(
             "{}{post_type}/{}",
             structure.front(),
             context.path(&post.slug)
         ))),
-        post_type if public => context.url(&format!("?{post_type}={}", context.path(&post.slug))),
+        post_type if !unpublished => {
+            context.url(&format!("?{post_type}={}", context.path(&post.slug)))
+        }
         post_type => context.url(&format!("?post_type={post_type}&p={}", post.id)),
     }
+}
+
+/// `path` with each run of slashes made one.
+fn fold_slashes(path: &str) -> String {
+    let mut folded = String::with_capacity(path.len());
+    for c in path.chars() {
+        if !(c == '/' && folded.ends_with('/')) {
+            folded.push(c);
+        }
+    }
+    folded
 }
 
 /// `structure` with its tags replaced by `post`'s values.

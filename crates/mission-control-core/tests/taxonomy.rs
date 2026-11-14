@@ -152,6 +152,37 @@ async fn an_empty_slug_comes_from_the_name() {
 }
 
 #[tokio::test]
+async fn a_given_slug_is_sanitized() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+
+    let term = Term::create(
+        db,
+        &Taxonomy::POST_TAG,
+        NewTerm {
+            slug: "Hello World".into(),
+            ..NewTerm::new("Greeting")
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(term.slug, "hello-world");
+    // A given slug that sanitizes to nothing counts as none: the name gives it.
+    let term = Term::create(
+        db,
+        &Taxonomy::POST_TAG,
+        NewTerm {
+            slug: "!!!".into(),
+            ..NewTerm::new("Shout")
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(term.slug, "shout");
+}
+
+#[tokio::test]
 async fn an_empty_name_is_refused() {
     let test = database().await;
     let db = test.db();

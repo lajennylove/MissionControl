@@ -344,10 +344,14 @@ async fn trash_frees_the_slug_and_untrash_takes_it_back() {
         None
     );
 
-    // When another post took the slug meanwhile, untrash makes it unique again.
+    // When another post took the slug meanwhile, untrash gives it back as it was, as WordPress
+    // does: a draft may share a slug. Publishing makes it unique.
     first.trash(db).await.unwrap();
     post(db, author, "post", "hello", PostStatus::Publish, None).await;
     first.untrash(db).await.unwrap();
+    assert_eq!(first.slug, "hello");
+    first.status = PostStatus::Publish;
+    first.save(db).await.unwrap();
     assert_eq!(first.slug, "hello-2");
 }
 
@@ -444,11 +448,112 @@ async fn only_published_flat_posts_record_old_slugs() {
     file.slug = "f2".into();
     file.save(db).await.unwrap();
     assert_eq!(old_slugs(db, file.id).await, ["f1"]);
-    // An empty slug is not recorded.
-    let mut bare = post(db, author, "post", "", PostStatus::Publish, None).await;
+    // An empty slug is not recorded: a draft without one, published with a slug.
+    let mut bare = post(db, author, "post", "", PostStatus::Draft, None).await;
+    bare.status = PostStatus::Publish;
     bare.slug = "named".into();
     bare.save(db).await.unwrap();
     assert!(old_slugs(db, bare.id).await.is_empty());
+}
+
+/// A post created with `title`, no slug and `status`.
+async fn titled(db: &Database, author: i64, title: &str, status: PostStatus) -> Post {
+    Post::create(
+        db,
+        NewPost {
+            status,
+            title: title.into(),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .expect("creates the post")
+}
+
+#[tokio::test]
+async fn publishing_gives_a_post_a_unique_slug_from_its_title() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let first = titled(db, author, "Hello World", PostStatus::Publish).await;
+    assert_eq!(first.slug, "hello-world");
+    assert_eq!(
+        Post::query().find_or_fail(db, first.id).await.unwrap().slug,
+        "hello-world"
+    );
+
+    // A draft keeps an empty slug, even with a taken title.
+    let mut draft = titled(db, author, "Hello World", PostStatus::Draft).await;
+    assert_eq!(draft.slug, "");
+    draft.title = "Hello World".into();
+    draft.save(db).await.unwrap();
+    assert_eq!(draft.slug, "");
+
+    // Publishing it makes the slug from the title, unique.
+    draft.status = PostStatus::Publish;
+    draft.save(db).await.unwrap();
+    assert_eq!(draft.slug, "hello-world-2");
+    assert_eq!(
+        Post::query().find_or_fail(db, draft.id).await.unwrap().slug,
+        "hello-world-2"
+    );
+    // A later save keeps it: the post's own slug does not count against it.
+    draft.save(db).await.unwrap();
+    assert_eq!(draft.slug, "hello-world-2");
+
+    // A published post created with a taken slug gets a number at once.
+    let third = post(db, author, "post", "hello-world", PostStatus::Publish, None).await;
+    assert_eq!(third.slug, "hello-world-3");
+    // A draft keeps a taken slug as given; pending and auto-drafts too.
+    for status in [
+        PostStatus::Draft,
+        PostStatus::Pending,
+        PostStatus::AutoDraft,
+    ] {
+        let kept = post(db, author, "post", "hello-world", status, None).await;
+        assert_eq!(kept.slug, "hello-world", "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_given_slug_is_sanitized_and_an_untitled_post_takes_its_id() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let given = post(db, author, "post", "Hello World!", PostStatus::Draft, None).await;
+    assert_eq!(given.slug, "hello-world");
+
+    // A published post whose title gives no slug takes its id, as `wp_insert_post` does.
+    let untitled = titled(db, author, "!!!", PostStatus::Publish).await;
+    assert_eq!(untitled.slug, untitled.id.to_string());
+    assert_eq!(
+        Post::query()
+            .find_or_fail(db, untitled.id)
+            .await
+            .unwrap()
+            .slug,
+        untitled.id.to_string()
+    );
+}
+
+#[tokio::test]
+async fn save_revision_settles_the_slug() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    titled(db, author, "Taken", PostStatus::Publish).await;
+    let mut edited = titled(db, author, "Taken", PostStatus::Draft).await;
+    let opened = edited.modified_at;
+    edited.status = PostStatus::Publish;
+    save_revision(db, &edited, opened).await.unwrap();
+    assert_eq!(
+        Post::query()
+            .find_or_fail(db, edited.id)
+            .await
+            .unwrap()
+            .slug,
+        "taken-2"
+    );
 }
 
 #[tokio::test]

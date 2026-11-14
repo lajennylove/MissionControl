@@ -48,12 +48,19 @@ const RESERVED: [&str; 6] = ["feed", "rdf", "rss", "rss2", "atom", "embed"];
 /// WordPress percent-encodes the letters `remove_accents` leaves, the letters are transliterated
 /// here with [`deunicode`].
 ///
-/// When nothing is left but the title had characters that do not transliterate (such as private
-/// use characters), the slug is made from their code points instead, `u` and lower-case hex,
-/// joined by hyphens: `\u{E000}` gives `ue000`. So a title with letters always gives a non-empty
-/// slug. An empty title, or one of only ASCII punctuation, gives an empty slug, as in WordPress;
-/// `wp_insert_post` then uses the post id.
+/// When nothing else is left, the non-ASCII characters whose transliteration has no letter or
+/// digit (such as private use characters, or CJK brackets) give the slug instead: `u` and the
+/// lower-case hex code point of each, joined by hyphens, so `\u{E000}` gives `ue000`. So any
+/// title with a non-ASCII character gives a non-empty slug. A title of only ASCII punctuation,
+/// or an empty one, gives `""`, as in WordPress; a published post's save then uses the post id
+/// (see [`Post::save`](super::Post::save)).
 pub fn make_slug(title: &str) -> String {
+    truncate(&sanitize_title(title), MAX_SLUG_LENGTH)
+}
+
+/// [`make_slug`] without the length cap, for callers that refuse a slug that is too long rather
+/// than cut it, such as a term's given slug.
+pub(super) fn sanitize_title(title: &str) -> String {
     let stripped = strip_tags(title);
     let mut ascii = String::with_capacity(stripped.len());
     // The characters that gave no letter or digit, for the fallback.
@@ -111,15 +118,64 @@ pub fn make_slug(title: &str) -> String {
     }
     let slug = sanitize_ascii(&ascii.to_ascii_lowercase());
     if slug.is_empty() {
-        return truncate(&code_points(&untransliterated), MAX_SLUG_LENGTH);
+        return code_points(&untransliterated);
     }
-    truncate(&slug, MAX_SLUG_LENGTH)
+    slug
 }
 
 /// Whether `post_type` is hierarchical, so its slugs are unique among siblings and its links are
 /// paths. Only `page` is, until post types are registered with their own settings.
+// TODO(post-type registry): read `hierarchical` from the registered post type. Its callers
+// (`unique_slug`, `settle_slug`, `record_old_slug`) change with it.
 pub fn is_hierarchical(post_type: &str) -> bool {
     post_type == "page"
+}
+
+/// Whether `status` lets a post keep an empty or taken slug, as `wp_insert_post` and
+/// `wp_unique_post_slug` treat `draft`, `pending` and `auto-draft`.
+fn keeps_slug(status: PostStatus) -> bool {
+    matches!(
+        status,
+        PostStatus::Draft | PostStatus::Pending | PostStatus::AutoDraft
+    )
+}
+
+/// The slug `wp_insert_post` stores for `post` before it makes it unique: the given slug run
+/// through [`make_slug`] (`sanitize_title`); when that is empty and the status is not draft,
+/// pending or auto-draft, the slug made from the title; when that is empty too, the post's id,
+/// if it has one yet (`id` is `None` before the insert). Drafts may keep an empty slug.
+pub(super) fn wanted_slug(post: &Post, id: Option<i64>) -> String {
+    let slug = make_slug(&post.slug);
+    if !slug.is_empty() || keeps_slug(post.status) {
+        return slug;
+    }
+    let slug = make_slug(&post.title);
+    match id {
+        Some(id) if slug.is_empty() => id.to_string(),
+        _ => slug,
+    }
+}
+
+/// The slug to store for `post`, once saved with id `id`, as `wp_insert_post` settles it: the
+/// [`wanted_slug`], made unique with `wp_unique_post_slug`'s rules (excluding the post itself)
+/// unless the status is draft, pending or auto-draft, which keep their slug as given. Runs on
+/// the connection of the save's transaction, after the row is written.
+pub(super) async fn settle_slug<C: Conn>(c: &mut C, post: &Post, id: i64) -> Result<String, Error> {
+    let wanted = wanted_slug(post, Some(id));
+    if keeps_slug(post.status) {
+        return Ok(wanted);
+    }
+    // TODO(post-type registry): see `is_hierarchical`.
+    let hierarchical = is_hierarchical(&post.post_type);
+    unique_slug_on(
+        c,
+        &post.post_type,
+        hierarchical,
+        post.parent_id,
+        &wanted,
+        Some(id),
+    )
+    .await
 }
 
 /// `base`, or a free slug made from it with `-2`, `-3`, ..., for a post of `post_type` under
@@ -142,6 +198,7 @@ pub async fn unique_slug(
     unique_slug_on(
         &mut &*db,
         post_type,
+        // TODO(post-type registry): see `is_hierarchical`.
         is_hierarchical(post_type),
         parent_id,
         base,
@@ -308,6 +365,7 @@ pub(super) async fn record_old_slug<C: Conn>(
     }
     let published = after.status == PostStatus::Publish
         || (after.post_type == "attachment" && after.status == PostStatus::Inherit);
+    // TODO(post-type registry): see `is_hierarchical`.
     if !published || is_hierarchical(&after.post_type) {
         return Ok(());
     }

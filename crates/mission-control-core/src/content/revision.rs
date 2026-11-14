@@ -25,8 +25,8 @@ use std::ops::Deref;
 use chrono::NaiveDateTime;
 use orbit_orm::{Database, Direction, Error, Model, Operator, Transaction};
 
-use super::post::{Post, PostStatus, due_status, next_modified_at, now};
-use super::slug::record_old_slug;
+use super::post::{Post, PostStatus, due_status, next_modified_at, now, write_settled_slug};
+use super::slug::{record_old_slug, wanted_slug};
 use super::taxonomy::recount_post_terms;
 
 /// The `post_type` of revisions and autosaves.
@@ -133,12 +133,15 @@ impl From<Error> for SaveError {
 /// otherwise both stamp, and find, the same time. Under rapid saves the stamp can run a few
 /// seconds ahead of the clock.
 ///
-/// As `wp_insert_post` does, a `future` post whose date is now or past is saved as `publish`, so
-/// an editor who opened the post before the scheduler published it does not put it back to
-/// `future`, where it would never be published.
+/// As `wp_insert_post` does, a `future` post whose date is less than a minute ahead, or past, is
+/// saved as `publish` (attachments are left as they are), so an editor who opened the post
+/// before the scheduler published it does not put it back to `future`, where it would never be
+/// published.
 ///
-/// A published post whose slug changes keeps the old slug in the post meta `_wp_old_slug`, as
-/// [`Post::save`] does.
+/// The slug is settled as [`Post::save`] settles it: sanitized, made from the title when empty,
+/// and made unique unless the post is a draft, pending or an auto-draft. The returned revision
+/// does not carry the post's slug; read the post again for it. A published post whose slug
+/// changes keeps the old slug in the post meta `_wp_old_slug`, as [`Post::save`] does.
 ///
 /// Like WordPress, the revision's author is the post's author, and its `published_at` and
 /// `modified_at` are the post's new modification time. Every save records a revision, even one
@@ -160,6 +163,7 @@ pub async fn save_revision(
     }
     let mut saved = post.clone();
     saved.status = due_status(&saved.post_type, saved.status, saved.published_at);
+    saved.slug = wanted_slug(&saved, Some(id));
     saved.modified_at = next_modified_at(expected_modified_at);
     let columns = saved.columns();
     let revision = revision_of(
@@ -201,6 +205,7 @@ pub async fn save_revision(
             });
         }
         recount_post_terms(tx, id).await?;
+        write_settled_slug(tx, &mut saved).await?;
         record_old_slug(tx, &before, &saved).await?;
         Ok(insert(tx, revision).await?)
     })

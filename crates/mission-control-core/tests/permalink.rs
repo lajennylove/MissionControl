@@ -186,40 +186,65 @@ fn custom_types_and_attachments() {
 
 #[test]
 fn unpublished_posts_get_the_plain_link() {
+    let link = |post_type: &str, status: PostStatus| {
+        let post = Post {
+            status,
+            ..sample(post_type)
+        };
+        permalink(&PermalinkStructure::post_name(), &post, &context())
+    };
+    // `get_permalink`: drafts, pending, auto-drafts and scheduled posts.
     for status in [
         PostStatus::Draft,
         PostStatus::Pending,
         PostStatus::AutoDraft,
         PostStatus::Future,
-        PostStatus::Trash,
     ] {
-        let post = Post {
-            status,
-            ..sample("post")
-        };
         assert_eq!(
-            permalink(&PermalinkStructure::post_name(), &post, &context()),
+            link("post", status),
             "https://example.com/?p=42",
             "{status}"
         );
-        let page = Post {
-            status,
-            ..sample("page")
-        };
         assert_eq!(
-            permalink(&PermalinkStructure::post_name(), &page, &context()),
+            link("book", status),
+            "https://example.com/?post_type=book&p=42",
+            "{status}"
+        );
+    }
+    // `_get_page_link` leaves `future` out.
+    for status in [
+        PostStatus::Draft,
+        PostStatus::Pending,
+        PostStatus::AutoDraft,
+    ] {
+        assert_eq!(
+            link("page", status),
             "https://example.com/?page_id=42",
             "{status}"
         );
     }
-    let private = Post {
-        status: PostStatus::Private,
-        ..sample("post")
-    };
     assert_eq!(
-        permalink(&PermalinkStructure::post_name(), &private, &context()),
+        link("page", PostStatus::Future),
         "https://example.com/hello-world/"
     );
+    // Other statuses keep the pretty link.
+    for status in [PostStatus::Private, PostStatus::Trash, PostStatus::Inherit] {
+        assert_eq!(
+            link("post", status),
+            "https://example.com/hello-world/",
+            "{status}"
+        );
+        assert_eq!(
+            link("page", status),
+            "https://example.com/hello-world/",
+            "{status}"
+        );
+        assert_eq!(
+            link("book", status),
+            "https://example.com/book/hello-world/",
+            "{status}"
+        );
+    }
 }
 
 #[test]
@@ -240,6 +265,15 @@ fn a_missing_category_renders_empty_and_the_base_slash_is_trimmed() {
     let ctx = PermalinkContext::new("https://example.com/blog/");
     assert_eq!(
         permalink(&structure("/%category%/%postname%/"), &sample("post"), &ctx),
+        "https://example.com/blog/hello-world/"
+    );
+    // A missing value in the middle leaves no `//`.
+    assert_eq!(
+        permalink(
+            &structure("/blog/%category%/%postname%/"),
+            &sample("post"),
+            &PermalinkContext::new(BASE)
+        ),
         "https://example.com/blog/hello-world/"
     );
     assert_eq!(
