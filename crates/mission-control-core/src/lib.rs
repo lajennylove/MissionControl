@@ -2,5 +2,6 @@
 
 pub mod config;
 pub mod hooks;
+pub mod migrations;
 
 pub mod install;

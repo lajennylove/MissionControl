@@ -13,3 +13,8 @@ edition = "2024"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/lajennylove/MissionControl"
 publish = false
+
+[workspace.dependencies]
+# Pinned by git until the schema builder is on crates.io. The three drivers MC supports.
+orbit-orm = { git = "https://github.com/lajennylove/Orbit", rev = "c2ee11f", default-features = false, features = ["mysql", "postgres", "sqlite"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

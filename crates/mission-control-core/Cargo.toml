@@ -9,4 +9,9 @@ publish.workspace = true
 [dependencies]
 dotenvy = "0.15"
 fs4 = "1.1.0"
+orbit-orm.workspace = true
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+mission-control-testing = { path = "../mission-control-testing" }
+tokio.workspace = true
