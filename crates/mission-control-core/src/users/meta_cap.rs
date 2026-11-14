@@ -295,12 +295,14 @@ fn dedup(caps: Vec<String>) -> Vec<String> {
     seen
 }
 
-/// Whether WordPress's `is_protected_meta` counts `key` as protected: its first character,
-/// once the characters that are neither printable ASCII nor letters are dropped, is `_`.
+/// Whether `key` is protected: its first printable ASCII character (0x20 to 0x7E) is `_`.
+///
+/// WordPress's `is_protected_meta` drops the bytes that are neither printable ASCII nor
+/// letters (`/[^\x20-\x7E\p{L}]/` without the `u` flag, so it tests bytes, not characters) and
+/// looks at the first byte left. Skipping every non-ASCII character here protects at least the
+/// keys WordPress protects, and sometimes more (`é_x`), never fewer.
 fn is_protected_meta(key: &str) -> bool {
-    key.chars()
-        .find(|c| matches!(c, ' '..='~') || c.is_alphabetic())
-        == Some('_')
+    key.chars().find(|c| matches!(c, ' '..='~')) == Some('_')
 }
 
 /// The `edit_post_meta`, `add_post_meta` and `delete_post_meta` branch of `map_meta_cap`:

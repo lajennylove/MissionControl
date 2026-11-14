@@ -657,12 +657,15 @@ fn post_meta_capabilities_map_to_edit_post_and_refuse_protected_keys() {
         assert_eq!(mapped(cap, Some(&Object::Post(&own))), ["edit_posts", cap]);
         assert!(!can(&author, cap, Some(&Object::Post(&own))));
     }
-    // `is_protected_meta` drops characters that are neither printable ASCII nor letters first.
+    // The leading-character test skips every character outside printable ASCII, so a key is
+    // protected whenever WordPress's byte-wise `is_protected_meta` protects it: a zero-width
+    // space or a Hebrew letter before `_` does not unprotect the key.
     assert!(!can(
         &author,
         "edit_post_meta",
         Some(&meta("\u{200B}_secret"))
     ));
+    assert!(!can(&author, "edit_post_meta", Some(&meta("\u{05D0}_x"))));
     assert!(can(&author, "edit_post_meta", Some(&meta(" _spaced"))));
     assert!(can(&author, "edit_post_meta", Some(&meta(""))));
 
