@@ -2,9 +2,9 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Free space the default install needs: 100 MiB.
 pub const MIN_FREE_BYTES: u64 = 104_857_600;
@@ -71,9 +71,7 @@ pub fn preflight(install_dir: &Path, port: u16) -> Vec<PreflightIssue> {
         }),
     }
 
-    if let Err(error) = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-        && error.kind() == io::ErrorKind::AddrInUse
-    {
+    if port_in_use(port) {
         issues.push(PreflightIssue {
             code: IssueCode::PortInUse,
             message: format!(
@@ -84,6 +82,22 @@ pub fn preflight(install_dir: &Path, port: u16) -> Vec<PreflightIssue> {
     }
 
     issues
+}
+
+/// True when something already listens on `port`, on loopback or on all interfaces.
+///
+/// A bind to 127.0.0.1 alone can succeed while another program holds 0.0.0.0
+/// (SO_REUSEADDR on macOS), so a connect probe and a wildcard bind are tried too.
+fn port_in_use(port: u16) -> bool {
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    if TcpStream::connect_timeout(&loopback, Duration::from_millis(500)).is_ok() {
+        return true;
+    }
+    [Ipv4Addr::LOCALHOST, Ipv4Addr::UNSPECIFIED]
+        .iter()
+        .any(|ip| {
+            TcpListener::bind((*ip, port)).is_err_and(|e| e.kind() == io::ErrorKind::AddrInUse)
+        })
 }
 
 /// The path itself, or its closest ancestor that exists.

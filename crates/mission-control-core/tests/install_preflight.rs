@@ -102,3 +102,14 @@ fn missing_directory_is_checked_through_its_parent() {
     assert!(!dir.exists(), "preflight must not create the folder");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn port_held_on_all_interfaces_is_in_use() {
+    let dir = temp_root("wildcard");
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let found = codes(&dir, port);
+    drop(listener);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(found, vec![IssueCode::PortInUse]);
+}
