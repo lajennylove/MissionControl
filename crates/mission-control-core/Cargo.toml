@@ -10,6 +10,8 @@ publish.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 fs4 = "1.1.0"
+# `catch_unwind` on the scheduler's tick future.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The logging facade Rocket 0.5 logs through.
 log = "0.4"
 orbit-orm.workspace = true

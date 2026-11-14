@@ -36,6 +36,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{NaiveDateTime, SubsecRound, TimeDelta, Utc};
+use futures_util::FutureExt;
 use orbit_orm::{Database, Direction, Executor, Model, Operator, OrbitModel, Value};
 
 use crate::hooks::{Action, Hooks, Payload};
@@ -68,6 +69,8 @@ pub enum Error {
     Database(orbit_orm::Error),
     /// The payload did not serialise to JSON.
     Payload(serde_json::Error),
+    /// A recurring interval under one second or over [`MAX_INTERVAL`].
+    Interval(Duration),
 }
 
 impl fmt::Display for Error {
@@ -75,6 +78,10 @@ impl fmt::Display for Error {
         match self {
             Self::Database(e) => write!(f, "scheduler database error: {e}"),
             Self::Payload(e) => write!(f, "the event payload is not JSON: {e}"),
+            Self::Interval(d) => write!(
+                f,
+                "a recurring interval is from one second to 100 years, not {d:?}"
+            ),
         }
     }
 }
@@ -84,6 +91,7 @@ impl std::error::Error for Error {
         match self {
             Self::Database(e) => Some(e),
             Self::Payload(e) => Some(e),
+            Self::Interval(_) => None,
         }
     }
 }
@@ -99,6 +107,10 @@ impl From<serde_json::Error> for Error {
         Self::Payload(e)
     }
 }
+
+/// The longest recurring interval: 100 years. Any next run stays far inside every database's
+/// date range (MySQL's `DATETIME` ends at 9999).
+pub const MAX_INTERVAL: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
 /// What one [`Scheduler::run_due`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -187,17 +199,14 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// Fails when the database refuses the query.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `every` is shorter than one second, the scheduler's resolution.
+    /// Fails with [`Error::Interval`] when `every` is under one second (the scheduler's
+    /// resolution) or over [`MAX_INTERVAL`], and with
+    /// [`Error::Database`] when the database refuses the query.
     pub async fn schedule_recurring(&self, every: Duration, hook: Action<()>) -> Result<(), Error> {
-        let seconds = i64::try_from(every.as_secs()).unwrap_or(i64::MAX);
-        assert!(
-            seconds > 0,
-            "a recurring event's interval is at least one second"
-        );
+        let seconds = i64::try_from(every.as_secs())
+            .ok()
+            .filter(|&s| s > 0 && next_run(now(), s, now()).is_some())
+            .ok_or(Error::Interval(every))?;
         self.register(hook);
         let payload = serde_json::to_string(&())?;
         let updated = ScheduledEvent::query()
@@ -267,9 +276,14 @@ impl Scheduler {
                 tick.unregistered += 1;
                 continue;
             };
-            if !self.take(&event, now).await? {
+            match self.take(&event, now).await? {
+                Taken::Run => {}
                 // Another process took it.
-                continue;
+                Taken::Gone => continue,
+                Taken::Dropped => {
+                    tick.failed += 1;
+                    continue;
+                }
             }
             if self.dispatch(dispatch, &event).await {
                 tick.completed += 1;
@@ -280,15 +294,25 @@ impl Scheduler {
         Ok(tick)
     }
 
-    /// Runs the due events every `interval`, forever: the app's background task. A tick that
-    /// fails is logged at `error` and the loop goes on. A minute matches Laravel's scheduler.
+    /// Runs the due events every `interval`, forever: the app's background task. A minute
+    /// matches Laravel's scheduler.
+    ///
+    /// A tick that fails, or panics, is logged at `error` and the loop goes on: callbacks already
+    /// run under `catch_unwind`, and the tick itself is wrapped too, so a bug in the scheduler
+    /// cannot stop every later event.
     pub async fn run(&self, interval: Duration) {
         let mut ticks = tokio::time::interval(interval);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticks.tick().await;
-            if let Err(e) = self.run_due(Utc::now().naive_utc()).await {
-                log::error!("the scheduler could not run the due events: {e}");
+            let tick = AssertUnwindSafe(self.run_due(Utc::now().naive_utc())).catch_unwind();
+            match tick.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => log::error!("the scheduler could not run the due events: {e}"),
+                Err(panic) => log::error!(
+                    "the scheduler panicked while running the due events: {}",
+                    panic_message(&*panic)
+                ),
             }
         }
     }
@@ -303,19 +327,42 @@ impl Scheduler {
 
     /// Claims `event` before running it, as WordPress unschedules an event before it runs it: a
     /// single event is deleted, a recurring one moved to its next run after `now`. The query
-    /// matches the row as it was read, so `false` means another process claimed it first.
-    async fn take(&self, event: &ScheduledEvent, now: NaiveDateTime) -> Result<bool, Error> {
+    /// matches the row as it was read, so a row that changed meanwhile is [`Taken::Gone`].
+    ///
+    /// A recurring event whose stored interval gives no next run (under one second, over
+    /// [`MAX_INTERVAL`], or past the last date `NaiveDateTime` holds: a corrupt or hand-edited
+    /// row) is deleted without running, logged at `error`, and [`Taken::Dropped`].
+    async fn take(&self, event: &ScheduledEvent, now: NaiveDateTime) -> Result<Taken, Error> {
         let row = ScheduledEvent::query()
             .where_eq(ScheduledEvent::PRIMARY_KEY, event.id)
             .where_eq("run_at", event.run_at);
-        let claimed = match event.interval_seconds {
-            None => row.delete(&*self.db).await?,
-            Some(seconds) => {
-                let next = next_run(event.run_at, seconds, now);
-                row.update(&*self.db, &[("run_at", next.into())]).await?
-            }
+        let next = match event.interval_seconds {
+            None => None,
+            Some(seconds) => match next_run(event.run_at, seconds, now) {
+                Some(next) => Some(next),
+                None => {
+                    if row.delete(&*self.db).await? != 1 {
+                        return Ok(Taken::Gone);
+                    }
+                    log::error!(
+                        "scheduled event {} for `{}` failed; its interval of {seconds} seconds \
+                         cannot be rescheduled, so it was removed",
+                        event.id,
+                        event.hook
+                    );
+                    return Ok(Taken::Dropped);
+                }
+            },
         };
-        Ok(claimed == 1)
+        let claimed = match next {
+            None => row.delete(&*self.db).await?,
+            Some(next) => row.update(&*self.db, &[("run_at", next.into())]).await?,
+        };
+        Ok(if claimed == 1 {
+            Taken::Run
+        } else {
+            Taken::Gone
+        })
     }
 
     /// Runs one event's callbacks on a blocking thread, catching a panic. Returns whether it
@@ -340,6 +387,16 @@ impl Scheduler {
         );
         false
     }
+}
+
+/// What [`Scheduler::take`] did with a due event.
+enum Taken {
+    /// Claimed: run its callbacks.
+    Run,
+    /// Another process claimed or changed it first.
+    Gone,
+    /// Removed without running, because it cannot be rescheduled.
+    Dropped,
 }
 
 /// Inserts an event and returns its id.
@@ -385,11 +442,18 @@ pub(crate) async fn unschedule<'a, A: Payload>(
 }
 
 /// The first run of a recurring event after `now`, keeping its phase: runs it missed are
-/// skipped, not caught up, as WordPress's `wp_reschedule_event` does.
-fn next_run(run_at: NaiveDateTime, seconds: i64, now: NaiveDateTime) -> NaiveDateTime {
-    let behind = (now - run_at).num_seconds().max(0);
+/// skipped, not caught up, as WordPress's `wp_reschedule_event` does. `None` when `seconds` is
+/// not between one second and [`MAX_INTERVAL`], or the next run is past the last date
+/// `NaiveDateTime` holds.
+fn next_run(run_at: NaiveDateTime, seconds: i64, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    let max = i64::try_from(MAX_INTERVAL.as_secs()).expect("MAX_INTERVAL fits in i64");
+    if !(1..=max).contains(&seconds) {
+        return None;
+    }
+    let behind = now.signed_duration_since(run_at).num_seconds().max(0);
     let periods = behind / seconds + 1;
-    run_at + TimeDelta::seconds(periods.saturating_mul(seconds))
+    let delta = TimeDelta::try_seconds(periods.checked_mul(seconds)?)?;
+    run_at.checked_add_signed(delta)
 }
 
 /// The current time in UTC, to the second.
@@ -420,12 +484,47 @@ mod tests {
 
     #[test]
     fn next_run_keeps_the_phase_and_skips_missed_runs() {
-        assert_eq!(next_run(at(9, 0, 0), 3600, at(9, 0, 0)), at(10, 0, 0));
-        assert_eq!(next_run(at(9, 0, 0), 3600, at(9, 59, 59)), at(10, 0, 0));
-        assert_eq!(next_run(at(9, 0, 0), 3600, at(10, 0, 0)), at(11, 0, 0));
-        assert_eq!(next_run(at(9, 0, 0), 3600, at(12, 30, 0)), at(13, 0, 0));
+        assert_eq!(next_run(at(9, 0, 0), 3600, at(9, 0, 0)), Some(at(10, 0, 0)));
+        assert_eq!(
+            next_run(at(9, 0, 0), 3600, at(9, 59, 59)),
+            Some(at(10, 0, 0))
+        );
+        assert_eq!(
+            next_run(at(9, 0, 0), 3600, at(10, 0, 0)),
+            Some(at(11, 0, 0))
+        );
+        assert_eq!(
+            next_run(at(9, 0, 0), 3600, at(12, 30, 0)),
+            Some(at(13, 0, 0))
+        );
         // A clock that went back does not run it early.
-        assert_eq!(next_run(at(9, 0, 0), 60, at(8, 0, 0)), at(9, 1, 0));
+        assert_eq!(next_run(at(9, 0, 0), 60, at(8, 0, 0)), Some(at(9, 1, 0)));
+    }
+
+    #[test]
+    fn next_run_is_none_instead_of_overflowing() {
+        for seconds in [
+            0,
+            -1,
+            i64::MIN,
+            i64::MAX,
+            i64::MAX / 1000,
+            400_000 * 365 * 86_400,
+        ] {
+            assert_eq!(
+                next_run(at(9, 0, 0), seconds, at(9, 0, 0)),
+                None,
+                "{seconds}"
+            );
+        }
+        assert_eq!(
+            next_run(
+                NaiveDateTime::MAX - TimeDelta::seconds(30),
+                60,
+                NaiveDateTime::MAX
+            ),
+            None
+        );
     }
 
     #[test]

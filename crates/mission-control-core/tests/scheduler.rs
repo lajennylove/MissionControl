@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use chrono::{NaiveDateTime, SubsecRound, TimeDelta, Utc};
 use mission_control_core::content::{
-    NewPost, PUBLISH_FUTURE_POST, Post, PostStatus, register_publish_future_post,
-    schedule_future_post,
+    NewPost, PUBLISH_FUTURE_POST, Post, PostStatus, check_and_publish_future_post,
+    register_publish_future_post, schedule_future_post,
 };
 use mission_control_core::hooks::{Action, DEFAULT_PRIORITY, Hooks, Owner};
 use mission_control_core::migrations::migrator;
-use mission_control_core::scheduler::{ScheduledEvent, Scheduler, Tick};
+use mission_control_core::scheduler::{Error, MAX_INTERVAL, ScheduledEvent, Scheduler, Tick};
 use mission_control_testing::{create_users_table, database, unique_email};
 use orbit_orm::{Database, Model, raw};
 
@@ -524,4 +524,185 @@ async fn scheduling_a_post_again_replaces_its_event() {
     post.status = PostStatus::Draft;
     schedule_future_post(&scheduler, &post).await.unwrap();
     assert!(events(test.db()).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_interval_out_of_range_is_refused() {
+    let test = database().await;
+    migrate(test.db()).await;
+    let scheduler = Scheduler::new(test.shared(), Arc::new(Hooks::new()));
+    let too_long = MAX_INTERVAL + Duration::from_secs(1);
+    for every in [
+        Duration::MAX,
+        too_long,
+        Duration::ZERO,
+        Duration::from_millis(999),
+    ] {
+        let refused = scheduler.schedule_recurring(every, HOURLY).await;
+        assert!(
+            matches!(refused, Err(Error::Interval(d)) if d == every),
+            "{every:?}: {refused:?}"
+        );
+    }
+    assert!(events(test.db()).await.is_empty());
+
+    // The longest interval is stored, and its next run is a date every database holds.
+    scheduler
+        .schedule_recurring(MAX_INTERVAL, HOURLY)
+        .await
+        .unwrap();
+    let first = events(test.db()).await[0].run_at;
+    scheduler.run_due(first).await.unwrap();
+    let next = events(test.db()).await[0].run_at;
+    assert_eq!(next - first, TimeDelta::from_std(MAX_INTERVAL).unwrap());
+}
+
+/// Sets a recurring event's stored interval to `seconds`, as a corrupt or hand-edited row.
+async fn corrupt_interval(db: &Database, seconds: i64) {
+    raw::execute(
+        db,
+        "UPDATE scheduled_events SET interval_seconds = ? WHERE hook = ?",
+        &[seconds.into(), "mc_test_hourly".into()],
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_recurring_event_with_a_bad_interval_fails_and_the_others_run() {
+    capture_logs();
+    for seconds in [i64::MAX, 0, -5] {
+        let test = database().await;
+        migrate(test.db()).await;
+        let (hooks, seen) = recording_hooks();
+        hooks.add_action(HOURLY, DEFAULT_PRIORITY, Owner::Core, |_: &()| {
+            panic!("a corrupt event ran its callbacks");
+        });
+        let scheduler = Scheduler::new(test.shared(), hooks);
+        scheduler
+            .schedule_recurring(Duration::from_secs(60), HOURLY)
+            .await
+            .unwrap();
+        corrupt_interval(test.db(), seconds).await;
+        let t = now();
+        scheduler
+            .schedule(t, NOTE, "still runs".into())
+            .await
+            .unwrap();
+
+        let tick = scheduler.run_due(t + TimeDelta::seconds(5)).await.unwrap();
+        assert_eq!(
+            tick,
+            Tick {
+                completed: 1,
+                failed: 1,
+                unregistered: 0
+            },
+            "{seconds}"
+        );
+        assert_eq!(*seen.lock().unwrap(), ["still runs"]);
+        assert!(
+            events(test.db()).await.is_empty(),
+            "the bad event is dropped"
+        );
+    }
+    let lines = logged("cannot be rescheduled");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("ERROR") && l.contains("mc_test_hourly")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_background_loop_survives_a_bad_event() {
+    let test = database().await;
+    migrate(test.db()).await;
+    let (hooks, seen) = recording_hooks();
+    let scheduler = Arc::new(Scheduler::new(test.shared(), hooks));
+    scheduler
+        .schedule_recurring(Duration::from_secs(60), HOURLY)
+        .await
+        .unwrap();
+    corrupt_interval(test.db(), i64::MAX).await;
+
+    let background = tokio::spawn({
+        let scheduler = Arc::clone(&scheduler);
+        async move { scheduler.run(Duration::from_millis(50)).await }
+    });
+    // Due after the first tick has met the bad event.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    scheduler
+        .schedule(now(), NOTE, "later".into())
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while seen.lock().unwrap().is_empty() {
+        assert!(!background.is_finished(), "the loop stopped");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the loop no longer runs events"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    background.abort();
+}
+
+#[tokio::test]
+async fn publishing_changes_only_the_status() {
+    let test = database().await;
+    migrate(test.db()).await;
+    let author = author(test.db()).await;
+    let post = Post::create(
+        test.db(),
+        NewPost {
+            status: PostStatus::Future,
+            title: "Before".into(),
+            published_at: Some(now() - TimeDelta::minutes(1)),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .unwrap();
+    // An edit saved elsewhere, and an old modification time, which publishing keeps.
+    raw::execute(
+        test.db(),
+        "UPDATE posts SET title = ?, modified_at = ? WHERE id = ?",
+        &[
+            "Edited".into(),
+            (now() - TimeDelta::days(3)).into(),
+            post.id.into(),
+        ],
+    )
+    .await
+    .unwrap();
+    let edited = Post::query()
+        .find_or_fail(test.db(), post.id)
+        .await
+        .unwrap();
+
+    assert!(
+        check_and_publish_future_post(test.db(), post.id)
+            .await
+            .unwrap()
+    );
+    let read = Post::query()
+        .find_or_fail(test.db(), post.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        read,
+        Post {
+            status: PostStatus::Publish,
+            ..edited
+        }
+    );
+
+    // Already published: nothing to do.
+    assert!(
+        !check_and_publish_future_post(test.db(), post.id)
+            .await
+            .unwrap()
+    );
 }
