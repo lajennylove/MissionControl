@@ -218,12 +218,10 @@ fn an_author_edits_their_own_post_and_cannot_publish_or_edit_someone_elses() {
         Some(&Object::Post(&others_published))
     ));
     // WordPress has no "publish someone else's post" capability: `publish_post` maps to
-    // `publish_posts` whoever wrote it, and publishing goes through the edit screen, which
-    // needs `edit_post` on that post. An author lacks it, so cannot publish another's post.
-    assert!(
-        !(can(&author, "edit_post", Some(&Object::Post(&others)))
-            && can(&author, "publish_post", Some(&Object::Post(&others))))
-    );
+    // `publish_posts` whoever wrote the post, so it passes here. Publishing goes through
+    // saving the post, which needs `edit_post` on it (refused above), so an author cannot
+    // publish another's post.
+    assert!(can(&author, "publish_post", Some(&Object::Post(&others))));
 }
 
 #[test]

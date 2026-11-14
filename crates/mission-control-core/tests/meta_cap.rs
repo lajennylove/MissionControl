@@ -9,8 +9,16 @@ use chrono::NaiveDateTime;
 use mission_control_core::content::{Post, PostStatus};
 use mission_control_core::users::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, Object, PostContext, SUBSCRIBER,
-    UserCaps, can, map_meta_cap,
+    SitePages, UserCaps, can, map_meta_cap,
 };
+
+/// `post` on a site with none of the special pages set.
+fn known(post: &Post) -> Object<'_> {
+    Object::PostWithContext(PostContext {
+        site_pages: Some(SitePages::NONE),
+        ..PostContext::new(post)
+    })
+}
 
 /// The id of the user every check is made as.
 const ME: i64 = 10;
@@ -142,9 +150,14 @@ const PAGES: &[Row] = &[
     (EDITOR,        "page", Is(Publish),          OTHER, "yyyy"),
     (EDITOR,        "page", Is(Private),          OTHER, "yyyy"),
     (EDITOR,        "page", Is(Draft),            OWN,   "yyyy"),
+    (EDITOR,        "page", TrashedFrom(Publish), OTHER, "yyyy"),
+    (EDITOR,        "page", TrashedFrom(Draft),   OWN,   "yyyy"),
+    (ADMINISTRATOR, "page", TrashedFrom(Publish), OTHER, "yyyy"),
+    (ADMINISTRATOR, "page", TrashedFrom(Draft),   OWN,   "yyyy"),
     (AUTHOR,        "page", Is(Publish),          OWN,   "nnyn"),
     (AUTHOR,        "page", Is(Draft),            OWN,   "nnyn"),
     (AUTHOR,        "page", Is(Publish),          OTHER, "nnyn"),
+    (AUTHOR,        "page", Is(Future),           OTHER, "nnnn"),
     (AUTHOR,        "page", Is(Draft),            OTHER, "nnnn"),
     (CONTRIBUTOR,   "page", Is(Draft),            OWN,   "nnyn"),
     (CONTRIBUTOR,   "page", Is(Publish),          OTHER, "nnyn"),
@@ -164,6 +177,7 @@ fn check_table(rows: &[Row]) {
         let row = post(1, author, post_type, status);
         let context = PostContext {
             trash_meta_status: before,
+            site_pages: Some(SitePages::NONE),
             ..PostContext::new(&row)
         };
         let object = Object::PostWithContext(context);
@@ -237,27 +251,174 @@ fn page_checks_use_page_capabilities_whichever_name_is_asked() {
     let others_page = post(1, SOMEONE, "page", Publish);
     for cap in ["edit_post", "edit_page"] {
         assert_eq!(
-            mapped(cap, Some(&Object::Post(&others_page))),
+            mapped(cap, Some(&known(&others_page))),
             ["edit_others_pages", "edit_published_pages"]
         );
     }
     assert_eq!(
-        mapped("delete_page", Some(&Object::Post(&others_page))),
+        mapped("delete_page", Some(&known(&others_page))),
         ["delete_others_pages", "delete_published_pages"]
     );
     assert_eq!(
-        mapped("publish_post", Some(&Object::Post(&others_page))),
+        mapped("publish_post", Some(&known(&others_page))),
         ["publish_pages"]
     );
     let draft_page = post(2, SOMEONE, "page", Draft);
     assert_eq!(
-        mapped("read_page", Some(&Object::Post(&draft_page))),
+        mapped("read_page", Some(&known(&draft_page))),
         ["edit_others_pages"]
     );
     let private_page = post(3, SOMEONE, "page", Private);
     assert_eq!(
-        mapped("read_page", Some(&Object::Post(&private_page))),
+        mapped("read_page", Some(&known(&private_page))),
         ["read_private_pages"]
+    );
+}
+
+/// Which special page a row's page is.
+#[derive(Debug, Clone, Copy)]
+enum Special {
+    /// None of them, on a site whose special pages are known.
+    Plain,
+    /// The static front page.
+    Front,
+    /// The posts page.
+    PostsPage,
+    /// The privacy policy page.
+    Privacy,
+    /// Unknown: the site's special pages were not given.
+    Unknown,
+}
+
+/// The special pages: who, which page (someone else's published page, id 1), and whether
+/// `edit_post` and `delete_post` are allowed. WordPress requires `manage_options` to delete the
+/// front page or the posts page, and to edit or delete the privacy policy page; when the pages
+/// are not known, a page is checked as if it might be any of them.
+#[rustfmt::skip]
+const SPECIAL_PAGES: &[(&str, Special, &str)] = &[
+    (EDITOR,        Special::Plain,     "yy"),
+    (EDITOR,        Special::Front,     "yn"),
+    (EDITOR,        Special::PostsPage, "yn"),
+    (EDITOR,        Special::Privacy,   "nn"),
+    (EDITOR,        Special::Unknown,   "nn"),
+    (ADMINISTRATOR, Special::Plain,     "yy"),
+    (ADMINISTRATOR, Special::Front,     "yy"),
+    (ADMINISTRATOR, Special::PostsPage, "yy"),
+    (ADMINISTRATOR, Special::Privacy,   "yy"),
+    (ADMINISTRATOR, Special::Unknown,   "yy"),
+    (AUTHOR,        Special::Front,     "nn"),
+];
+
+#[test]
+fn the_special_pages_table() {
+    let page = post(1, SOMEONE, "page", Publish);
+    let mut failures = Vec::new();
+    for &(role, special, expected) in SPECIAL_PAGES {
+        let site_pages = match special {
+            Special::Plain => Some(SitePages::NONE),
+            Special::Front => Some(SitePages {
+                page_on_front: Some(1),
+                ..SitePages::NONE
+            }),
+            Special::PostsPage => Some(SitePages {
+                page_for_posts: Some(1),
+                ..SitePages::NONE
+            }),
+            Special::Privacy => Some(SitePages {
+                privacy_policy: Some(1),
+                ..SitePages::NONE
+            }),
+            Special::Unknown => None,
+        };
+        let object = Object::PostWithContext(PostContext {
+            site_pages,
+            ..PostContext::new(&page)
+        });
+        let user = user(role);
+        let got: String = ["edit_post", "delete_post"]
+            .iter()
+            .map(|cap| {
+                if can(&user, cap, Some(&object)) {
+                    'y'
+                } else {
+                    'n'
+                }
+            })
+            .collect();
+        if got != expected {
+            failures.push(format!(
+                "{role} on {special:?}: expected {expected}, got {got}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn special_pages_map_as_wordpress_does() {
+    let page = post(1, SOMEONE, "page", Publish);
+    let front = Object::PostWithContext(PostContext {
+        site_pages: Some(SitePages {
+            page_on_front: Some(1),
+            ..SitePages::NONE
+        }),
+        ..PostContext::new(&page)
+    });
+    assert_eq!(mapped("delete_post", Some(&front)), ["manage_options"]);
+    assert_eq!(
+        mapped("edit_post", Some(&front)),
+        ["edit_others_pages", "edit_published_pages"]
+    );
+    let privacy = Object::PostWithContext(PostContext {
+        site_pages: Some(SitePages {
+            privacy_policy: Some(1),
+            ..SitePages::NONE
+        }),
+        ..PostContext::new(&page)
+    });
+    assert_eq!(
+        mapped("edit_post", Some(&privacy)),
+        [
+            "edit_others_pages",
+            "edit_published_pages",
+            "manage_options"
+        ]
+    );
+    assert_eq!(mapped("read_post", Some(&privacy)), ["read"]);
+    // Not given: the strictest outcome, for editing and deleting a page.
+    assert_eq!(
+        mapped("delete_post", Some(&Object::Post(&page))),
+        [
+            "delete_others_pages",
+            "delete_published_pages",
+            "manage_options"
+        ]
+    );
+    // A post is never one of the special pages when they are not given.
+    let others_post = post(2, SOMEONE, "post", Publish);
+    assert_eq!(
+        mapped("delete_post", Some(&Object::Post(&others_post))),
+        ["delete_others_posts", "delete_published_posts"]
+    );
+    // A revision of the privacy page counts as the privacy page.
+    let mut revision = post(3, SOMEONE, "revision", PostStatus::Inherit);
+    revision.parent_id = Some(1);
+    let parent = PostContext::new(&page);
+    let object = Object::PostWithContext(PostContext {
+        parent: Some(&parent),
+        site_pages: Some(SitePages {
+            privacy_policy: Some(1),
+            ..SitePages::NONE
+        }),
+        ..PostContext::new(&revision)
+    });
+    assert_eq!(
+        mapped("edit_post", Some(&object)),
+        [
+            "edit_others_pages",
+            "edit_published_pages",
+            "manage_options"
+        ]
     );
 }
 
@@ -360,14 +521,75 @@ fn revisions_follow_their_parent() {
     assert_eq!(mapped("read_post", Some(&object)), ["read"]);
     // A revision is never deleted through `delete_post`.
     assert_eq!(mapped("delete_post", Some(&object)), [DO_NOT_ALLOW]);
+
+    // A parent whose id is not the revision's `parent_id` is not its parent.
+    let stranger = post(99, ME, "post", Publish);
+    let stranger_context = PostContext::new(&stranger);
+    let object = Object::PostWithContext(PostContext {
+        parent: Some(&stranger_context),
+        ..PostContext::new(&revision)
+    });
+    assert_eq!(mapped("edit_post", Some(&object)), [DO_NOT_ALLOW]);
+    assert_eq!(mapped("read_post", Some(&object)), [DO_NOT_ALLOW]);
 }
 
 #[test]
-fn other_post_types_use_post_capabilities_until_the_registry() {
-    let book = post(1, SOMEONE, "book", Publish);
+fn other_post_types_follow_the_interim_rule_until_the_registry() {
+    // Ruling R24. An unregistered type needs `edit_others_posts`, as WordPress maps it.
+    let book = post(1, ME, "book", Draft);
+    for cap in ["edit_post", "delete_post", "read_post", "publish_post"] {
+        assert_eq!(
+            mapped(cap, Some(&Object::Post(&book))),
+            ["edit_others_posts"],
+            "{cap}"
+        );
+    }
+    assert!(!can(&user(AUTHOR), "edit_post", Some(&Object::Post(&book))));
+    assert!(can(&user(EDITOR), "edit_post", Some(&Object::Post(&book))));
+
+    // Attachments use the post capabilities.
+    let image = post(2, SOMEONE, "attachment", PostStatus::Inherit);
     assert_eq!(
-        mapped("edit_post", Some(&Object::Post(&book))),
-        ["edit_others_posts", "edit_published_posts"]
+        mapped("edit_post", Some(&Object::Post(&image))),
+        ["edit_others_posts"]
+    );
+
+    // WordPress's theme types need `edit_theme_options`.
+    for post_type in [
+        "nav_menu_item",
+        "wp_template",
+        "wp_template_part",
+        "wp_global_styles",
+        "wp_navigation",
+    ] {
+        let item = post(3, SOMEONE, post_type, Publish);
+        assert_eq!(
+            mapped("edit_post", Some(&Object::Post(&item))),
+            ["edit_theme_options"],
+            "{post_type}"
+        );
+        assert!(!can(&user(EDITOR), "edit_post", Some(&Object::Post(&item))));
+        assert!(can(
+            &user(ADMINISTRATOR),
+            "delete_post",
+            Some(&Object::Post(&item))
+        ));
+    }
+
+    // Changesets need `customize`, and a published one is never edited.
+    let draft = post(4, ME, "customize_changeset", Draft);
+    let published = post(5, ME, "customize_changeset", Publish);
+    assert_eq!(
+        mapped("edit_post", Some(&Object::Post(&draft))),
+        ["customize"]
+    );
+    assert_eq!(
+        mapped("edit_post", Some(&Object::Post(&published))),
+        [DO_NOT_ALLOW]
+    );
+    assert_eq!(
+        mapped("publish_post", Some(&Object::Post(&published))),
+        ["customize"]
     );
 }
 
@@ -415,11 +637,51 @@ fn attachments_read_their_status_as_get_post_status_does() {
 }
 
 #[test]
-fn post_meta_capabilities_map_to_edit_post() {
+fn post_meta_capabilities_map_to_edit_post_and_refuse_protected_keys() {
     let own = post(1, ME, "post", Draft);
+    let meta = |key| Object::PostMeta {
+        post: PostContext::new(&own),
+        key,
+    };
+    let author = user(AUTHOR);
     for cap in ["edit_post_meta", "add_post_meta", "delete_post_meta"] {
-        assert_eq!(mapped(cap, Some(&Object::Post(&own))), ["edit_posts"]);
+        assert_eq!(mapped(cap, Some(&meta("subtitle"))), ["edit_posts"]);
+        assert!(can(&author, cap, Some(&meta("subtitle"))));
+        // A protected key also needs the meta capability itself, which nobody holds.
+        assert_eq!(
+            mapped(cap, Some(&meta("_thumbnail_id"))),
+            ["edit_posts", cap]
+        );
+        assert!(!can(&author, cap, Some(&meta("_thumbnail_id"))));
+        // With no key given, the key is taken to be protected.
+        assert_eq!(mapped(cap, Some(&Object::Post(&own))), ["edit_posts", cap]);
+        assert!(!can(&author, cap, Some(&Object::Post(&own))));
     }
+    // `is_protected_meta` drops characters that are neither printable ASCII nor letters first.
+    assert!(!can(
+        &author,
+        "edit_post_meta",
+        Some(&meta("\u{200B}_secret"))
+    ));
+    assert!(can(&author, "edit_post_meta", Some(&meta(" _spaced"))));
+    assert!(can(&author, "edit_post_meta", Some(&meta(""))));
+
+    // Granting the meta capability by name allows a protected key, as a filter would.
+    let mut extra = BTreeMap::new();
+    extra.insert("edit_post_meta".to_owned(), true);
+    let trusted = UserCaps::with_default_roles(ME, &[AUTHOR], &extra);
+    assert!(can(
+        &trusted,
+        "edit_post_meta",
+        Some(&meta("_thumbnail_id"))
+    ));
+    // Someone else's post still needs `edit_others_posts`.
+    let others = post(2, SOMEONE, "post", Draft);
+    let others_meta = Object::PostMeta {
+        post: PostContext::new(&others),
+        key: "subtitle",
+    };
+    assert!(!can(&author, "edit_post_meta", Some(&others_meta)));
 }
 
 #[test]

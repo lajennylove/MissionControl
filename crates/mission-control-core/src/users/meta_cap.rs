@@ -6,22 +6,25 @@
 //! names, and `edit_post_meta`, `add_post_meta` and `delete_post_meta`. Every other
 //! capability maps to itself, so `edit_posts` or `read_private_posts` are checked as they are.
 //!
+//! The site's special pages count as WordPress counts them: deleting the front page or the
+//! posts page needs `manage_options`, and editing or deleting the privacy policy page needs it
+//! too (see [`SitePages`]). A protected meta key (one starting with `_`) is refused through
+//! `edit_post_meta` and its siblings unless the meta capability itself is granted by name, as
+//! WordPress refuses it unless a filter allows it.
+//!
+//! `read_post` does not look at a post's password, as WordPress's does not: the front end and
+//! the REST API must check it themselves (WordPress's `post_password_required`).
+//!
 //! What this port leaves out, for now:
 //!
 //! - **Post type capabilities.** WordPress derives a type's capability names from its
-//!   `capability_type` (see [`PostTypeCaps`]). There is no post type registry yet: `page` uses
-//!   the `page` names and every other type the `post` names.
-//!   TODO(Task 5.2): read `capability_type` from the post type registry, and map a custom type's
-//!   own meta capabilities (`edit_book`), as WordPress's `$post_type_meta_caps` does.
-//! - **Site options.** WordPress requires `manage_options` to delete the front page or the posts
-//!   page, and adds it to editing or deleting the privacy policy page. Those pages are options
-//!   this pure function does not read; the caller must check them until it does.
-//! - **Protected meta keys.** `edit_post_meta` with a meta key starting with `_` is refused
-//!   unless a filter allows it. The key is not part of [`Object`] yet, so only the `edit_post`
-//!   part is mapped.
-//! - **The `map_meta_cap` and `user_has_cap` filters**, and the user, comment, term, plugin,
-//!   theme and multisite meta capabilities: they map to themselves here, so they are refused
-//!   unless granted by name.
+//!   registration (see [`PostTypeCaps::for_post_type`]). There is no post type registry yet, so
+//!   an interim rule names them (ruling R24).
+//!   TODO(Task 5.2): read each type's capabilities from the post type registry, and map a custom
+//!   type's own meta capabilities (`edit_book`), as WordPress's `$post_type_meta_caps` does.
+//! - **The `map_meta_cap`, `user_has_cap` and `auth_post_meta_*` filters**, and the user,
+//!   comment, term, plugin, theme and multisite meta capabilities: they map to themselves here,
+//!   so they are refused unless granted by name.
 
 use crate::content::{Post, PostStatus};
 
@@ -34,9 +37,16 @@ pub enum Object<'a> {
     /// trashed from a draft (as WordPress does when `_wp_trash_meta_status` is missing), and a
     /// revision, or an attachment with a parent, cannot be checked (its parent is not given).
     Post(&'a Post),
-    /// A post with what WordPress reads beside its row: its status before trashing and its
-    /// parent.
+    /// A post with what WordPress reads beside its row: its status before trashing, its parent
+    /// and the site's special pages.
     PostWithContext(PostContext<'a>),
+    /// One meta key of a post, for `edit_post_meta`, `add_post_meta` and `delete_post_meta`.
+    PostMeta {
+        /// The post and its context.
+        post: PostContext<'a>,
+        /// The meta key, such as `_thumbnail_id` or `subtitle`.
+        key: &'a str,
+    },
 }
 
 impl<'a> Object<'a> {
@@ -44,9 +54,30 @@ impl<'a> Object<'a> {
     fn post(&self) -> PostContext<'a> {
         match *self {
             Self::Post(post) => PostContext::new(post),
-            Self::PostWithContext(context) => context,
+            Self::PostWithContext(context) | Self::PostMeta { post: context, .. } => context,
         }
     }
+}
+
+/// The ids of the site's special pages, from the options WordPress keeps them in. `None` means
+/// the option is not set (WordPress's 0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SitePages {
+    /// The static front page (`page_on_front`).
+    pub page_on_front: Option<i64>,
+    /// The page that lists the posts (`page_for_posts`).
+    pub page_for_posts: Option<i64>,
+    /// The privacy policy page (`wp_page_for_privacy_policy`).
+    pub privacy_policy: Option<i64>,
+}
+
+impl SitePages {
+    /// A site with none of the special pages set.
+    pub const NONE: Self = Self {
+        page_on_front: None,
+        page_for_posts: None,
+        privacy_policy: None,
+    };
 }
 
 /// A post and the facts `map_meta_cap` reads beside its row.
@@ -56,23 +87,29 @@ pub struct PostContext<'a> {
     pub post: &'a Post,
     /// For a trashed post, the status it had before, from its `_wp_trash_meta_status` meta.
     pub trash_meta_status: Option<PostStatus>,
-    /// The post's parent: the post a revision belongs to, or an attachment is attached to.
+    /// The post's parent: the post a revision belongs to, or an attachment is attached to. Used
+    /// only when its id is the post's `parent_id`.
     pub parent: Option<&'a PostContext<'a>>,
+    /// The site's special pages. When they are not given, a page is checked as if it might be
+    /// any of them: `manage_options` is added to editing or deleting it.
+    pub site_pages: Option<SitePages>,
 }
 
 impl<'a> PostContext<'a> {
-    /// `post` with no trash status and no parent known.
+    /// `post` with no trash status, no parent and no special pages known.
     pub fn new(post: &'a Post) -> Self {
         Self {
             post,
             trash_meta_status: None,
             parent: None,
+            site_pages: None,
         }
     }
 
-    /// The parent, when the post has one and it was given.
+    /// The parent, when the post has one and the one given is it.
     fn parent(&self) -> Option<&'a PostContext<'a>> {
-        self.parent.filter(|_| self.post.parent_id.is_some())
+        let parent_id = self.post.parent_id?;
+        self.parent.filter(|parent| parent.post.id == parent_id)
     }
 
     /// The post's status as WordPress's `get_post_status` reads it, or `None` when it depends
@@ -172,13 +209,50 @@ impl PostTypeCaps {
         }
     }
 
-    /// The capability names of `post_type`: `page` uses the `page` names, every other type the
-    /// `post` names.
+    /// Every capability name set to `cap`.
+    pub fn uniform(cap: &str) -> Self {
+        Self {
+            read: cap.to_owned(),
+            edit_posts: cap.to_owned(),
+            edit_others_posts: cap.to_owned(),
+            edit_published_posts: cap.to_owned(),
+            edit_private_posts: cap.to_owned(),
+            delete_posts: cap.to_owned(),
+            delete_others_posts: cap.to_owned(),
+            delete_published_posts: cap.to_owned(),
+            delete_private_posts: cap.to_owned(),
+            publish_posts: cap.to_owned(),
+            read_private_posts: cap.to_owned(),
+        }
+    }
+
+    /// The capability names of `post_type`, by the interim rule of ruling R24 until the post
+    /// type registry exists:
     ///
-    /// TODO(Task 5.2): read the type's `capability_type` (and any custom capability names) from
-    /// the post type registry.
+    /// - `post`, `attachment` and `revision` use the `post` names, and `page` the `page` names,
+    ///   as WordPress registers them.
+    /// - WordPress's theme types (`nav_menu_item`, `wp_template`, `wp_template_part`,
+    ///   `wp_global_styles`, `wp_navigation`) need `edit_theme_options` for everything. WordPress
+    ///   lets anyone with `read` read a menu item; here reading one needs `edit_theme_options`
+    ///   too.
+    /// - `customize_changeset` needs `customize` for everything, but editing a published
+    ///   changeset is never allowed, as WordPress registers it.
+    /// - Every other type is not registered, so everything on it needs `edit_others_posts`, as
+    ///   WordPress maps a post of an unregistered type.
+    ///
+    /// TODO(Task 5.2): read the type's capabilities from the post type registry.
     pub fn for_post_type(post_type: &str) -> Self {
-        Self::for_capability_type(if post_type == "page" { "page" } else { "post" })
+        match post_type {
+            "post" | "attachment" | "revision" => Self::for_capability_type("post"),
+            "page" => Self::for_capability_type("page"),
+            "nav_menu_item" | "wp_template" | "wp_template_part" | "wp_global_styles"
+            | "wp_navigation" => Self::uniform("edit_theme_options"),
+            "customize_changeset" => Self {
+                edit_published_posts: DO_NOT_ALLOW.to_owned(),
+                ..Self::uniform("customize")
+            },
+            _ => Self::uniform("edit_others_posts"),
+        }
     }
 }
 
@@ -187,7 +261,7 @@ impl PostTypeCaps {
 /// an object it cannot be checked on, maps to [`DO_NOT_ALLOW`]; a primitive capability maps to
 /// itself.
 pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<String> {
-    match cap {
+    let caps = match cap {
         "edit_post" | "edit_page" => {
             on_post(object, |post| edit_or_delete(user, post, Action::Edit))
         }
@@ -202,10 +276,52 @@ pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<
             vec![PostTypeCaps::for_post_type(&post.post.post_type).publish_posts]
         }),
         "edit_post_meta" | "add_post_meta" | "delete_post_meta" => {
-            map_meta_cap("edit_post", user, object)
+            on_post(object, |post| post_meta(cap, user, post, object))
         }
         _ => vec![cap.to_owned()],
+    };
+    dedup(caps)
+}
+
+/// `caps` without repeats, in order. A uniform type, such as an unregistered one, would
+/// otherwise name `edit_others_posts` twice.
+fn dedup(caps: Vec<String>) -> Vec<String> {
+    let mut seen = Vec::with_capacity(caps.len());
+    for cap in caps {
+        if !seen.contains(&cap) {
+            seen.push(cap);
+        }
     }
+    seen
+}
+
+/// Whether WordPress's `is_protected_meta` counts `key` as protected: its first character,
+/// once the characters that are neither printable ASCII nor letters are dropped, is `_`.
+fn is_protected_meta(key: &str) -> bool {
+    key.chars()
+        .find(|c| matches!(c, ' '..='~') || c.is_alphabetic())
+        == Some('_')
+}
+
+/// The `edit_post_meta`, `add_post_meta` and `delete_post_meta` branch of `map_meta_cap`:
+/// what editing the post needs, and, for a protected meta key, the meta capability itself,
+/// which nobody holds unless granted by name. With no key given (any object but
+/// [`Object::PostMeta`]), the key is taken to be protected, so the check fails closed.
+fn post_meta(
+    cap: &str,
+    user: &UserCaps,
+    post: PostContext,
+    object: Option<&Object>,
+) -> Vec<String> {
+    let mut caps = edit_or_delete(user, post, Action::Edit);
+    let protected = match object {
+        Some(Object::PostMeta { key, .. }) => is_protected_meta(key),
+        _ => true,
+    };
+    if protected {
+        caps.push(cap.to_owned());
+    }
+    caps
 }
 
 /// Whether `user` may do `cap`, on `object` when it is a meta capability: `cap` is mapped with
@@ -246,10 +362,40 @@ enum Action {
 /// `edit_published_posts` for a published, scheduled, or once published trashed post, and
 /// `edit_posts` otherwise; anyone else needs `edit_others_posts`, with `edit_published_posts`
 /// for a published or scheduled post or `edit_private_posts` for a private one.
+///
+/// The site's special pages come first, as in WordPress: deleting the front page or the posts
+/// page needs `manage_options` alone, and editing or deleting the privacy policy page adds
+/// `manage_options` (WordPress's `manage_privacy_options` on a single site). When the special
+/// pages are not given, a page might be any of them, so `manage_options` is added to both
+/// editing and deleting it: the strictest of WordPress's outcomes.
 fn edit_or_delete(user: &UserCaps, post: PostContext, action: Action) -> Vec<String> {
     let Some(post) = resolve_revision(post) else {
         return deny();
     };
+    let id = Some(post.post.id);
+    let front_or_posts_page = post
+        .site_pages
+        .is_some_and(|pages| pages.page_on_front == id || pages.page_for_posts == id);
+    if action == Action::Delete && front_or_posts_page {
+        return vec![MANAGE_OPTIONS.to_owned()];
+    }
+    let mut caps = primitive_caps(user, post, action);
+    let privacy = match post.site_pages {
+        Some(pages) => pages.privacy_policy == id,
+        None => post.post.post_type == "page",
+    };
+    if privacy {
+        caps.push(MANAGE_OPTIONS.to_owned());
+    }
+    caps
+}
+
+/// The capability WordPress requires for the site's special pages.
+const MANAGE_OPTIONS: &str = "manage_options";
+
+/// The post type capabilities `edit_post` or `delete_post` needs on `post`, before the special
+/// pages are counted.
+fn primitive_caps(user: &UserCaps, post: PostContext, action: Action) -> Vec<String> {
     let caps = PostTypeCaps::for_post_type(&post.post.post_type);
     let (own, published, others, private) = match action {
         Action::Edit => (
@@ -296,10 +442,13 @@ fn read(user: &UserCaps, post: PostContext) -> Vec<String> {
 }
 
 /// The post a check is made on: a revision's parent, or the post itself. `None` for a revision
-/// whose parent was not given, which WordPress refuses as a missing post.
+/// whose parent was not given, which WordPress refuses as a missing post. The parent keeps the
+/// revision's special pages when it was given none of its own.
 fn resolve_revision(post: PostContext) -> Option<PostContext> {
     if post.post.post_type == "revision" {
-        post.parent().copied()
+        let mut parent = *post.parent()?;
+        parent.site_pages = parent.site_pages.or(post.site_pages);
+        Some(parent)
     } else {
         Some(post)
     }
