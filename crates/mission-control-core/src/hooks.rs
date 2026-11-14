@@ -88,6 +88,10 @@ impl<V> fmt::Debug for Filter<V> {
     }
 }
 
+/// WordPress's `the_content` filter: a post's body on its way to the page. Shortcodes run on it
+/// at priority 11 (see `Shortcodes::register_the_content` in the `content` module).
+pub const THE_CONTENT: Filter<String> = Filter::new("the_content");
+
 /// Who registered a callback, so deactivating a plugin or theme can remove
 /// everything it added.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

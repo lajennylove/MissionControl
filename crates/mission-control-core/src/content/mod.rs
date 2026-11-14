@@ -23,6 +23,7 @@ mod meta;
 mod permalink;
 mod post;
 mod revision;
+mod shortcode;
 mod slug;
 mod taxonomy;
 
@@ -43,6 +44,7 @@ pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};
 pub use revision::{
     Revision, SaveError, create_post_autosave, get_post_autosave, get_post_revisions, save_revision,
 };
+pub use shortcode::{Attributes, InvalidShortcodeTag, Shortcodes};
 pub use slug::{
     MAX_SLUG_LENGTH, find_by_old_slug, is_hierarchical, make_slug, unique_slug, unique_slug_for,
 };
