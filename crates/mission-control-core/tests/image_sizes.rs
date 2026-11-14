@@ -110,7 +110,17 @@ fn format_of(storage: &LocalStorage, path: &str) -> ImageFormat {
 fn the_registry_starts_with_wordpress_default_sizes() {
     let sizes = ImageSizes::new();
     let names: Vec<String> = sizes.registered().into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["thumbnail", "medium", "medium_large", "large"]);
+    assert_eq!(
+        names,
+        [
+            "thumbnail",
+            "medium",
+            "medium_large",
+            "large",
+            "1536x1536",
+            "2048x2048"
+        ]
+    );
     assert_eq!(
         sizes.get("thumbnail"),
         Some(ImageSize {
@@ -143,6 +153,23 @@ fn the_registry_starts_with_wordpress_default_sizes() {
             crop: false
         })
     );
+    // WordPress 5.3 and later also register two larger sizes for srcset.
+    assert_eq!(
+        sizes.get("1536x1536"),
+        Some(ImageSize {
+            width: 1536,
+            height: 1536,
+            crop: false
+        })
+    );
+    assert_eq!(
+        sizes.get("2048x2048"),
+        Some(ImageSize {
+            width: 2048,
+            height: 2048,
+            crop: false
+        })
+    );
     assert!(ImageSizes::empty().registered().is_empty());
 }
 
@@ -163,6 +190,8 @@ fn add_image_size_replaces_in_place_and_remove_owner_drops_a_theme_sizes() {
             "medium",
             "medium_large",
             "large",
+            "1536x1536",
+            "2048x2048",
             "hero",
             "card"
         ]
@@ -239,6 +268,8 @@ fn a_jpeg_upload_creates_each_registered_size_with_proportions_kept() {
         ("medium", 300, 225, "photo-300x225.jpg"),
         ("medium_large", 768, 576, "photo-768x576.jpg"),
         ("large", 1024, 768, "photo-1024x768.jpg"),
+        // 2048x2048 is not made: the image is not larger than it.
+        ("1536x1536", 1536, 1152, "photo-1536x1152.jpg"),
     ];
     assert_eq!(meta.sizes.len(), expected.len());
     for (name, w, h, file) in expected {

@@ -99,7 +99,9 @@ impl Default for ImageSizes {
 impl ImageSizes {
     /// A registry with WordPress's default sizes, owned by
     /// [`Owner::Core`]: `thumbnail` (150×150, cropped), `medium` (300×300),
-    /// `medium_large` (768 wide) and `large` (1024×1024).
+    /// `medium_large` (768 wide), `large` (1024×1024), and the two sizes
+    /// WordPress 5.3 and later add for `srcset`, `1536x1536` and `2048x2048`
+    /// (fitted, not cropped).
     pub fn new() -> Self {
         let sizes = Self::empty();
         for (name, width, height, crop) in [
@@ -107,6 +109,8 @@ impl ImageSizes {
             ("medium", 300, 300, false),
             ("medium_large", 768, 0, false),
             ("large", 1024, 1024, false),
+            ("1536x1536", 1536, 1536, false),
+            ("2048x2048", 2048, 2048, false),
         ] {
             sizes.add_image_size(name, width, height, crop, Owner::Core);
         }
