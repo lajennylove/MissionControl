@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.database }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: sqlite
+            url: sqlite
+          - database: mariadb
+            url: mysql://root:ci-password@127.0.0.1:3306/mission_control_test
+          - database: mysql
+            url: mysql://root:ci-password@127.0.0.1:3307/mission_control_test
+          - database: postgres
+            url: postgres://postgres:ci-password@127.0.0.1:5432/mission_control_test
+    # All three service containers start for every entry (the matrix only picks the
+    # URL the tests use). Throwaway passwords: they exist only for the job.
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: ci-password
+          MARIADB_DATABASE: mission_control_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-password
+          MYSQL_DATABASE: mission_control_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pci-password"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: mission_control_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Select test database
+        env:
+          MATRIX_URL: ${{ matrix.url }}
+        run: |
+          if [ "${{ matrix.database }}" = "sqlite" ]; then
+            echo "MC_TEST_DATABASE_URL=sqlite://${RUNNER_TEMP}/mission-control-test.db?mode=rwc" >> "$GITHUB_ENV"
+          else
+            echo "MC_TEST_DATABASE_URL=${MATRIX_URL}" >> "$GITHUB_ENV"
+          fi
+      - name: Test
+        run: cargo test --workspace
+      - name: Test (release)
+        if: matrix.database == 'sqlite'
+        run: cargo test --workspace --release
