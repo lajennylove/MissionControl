@@ -8,3 +8,4 @@ repository.workspace = true
 publish.workspace = true
 [dependencies]
 dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
