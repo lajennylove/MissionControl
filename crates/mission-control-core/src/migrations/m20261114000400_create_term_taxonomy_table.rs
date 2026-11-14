@@ -8,11 +8,13 @@ use orbit_orm::schema::{self, Action};
 /// that defaults to 0. A term appears once per taxonomy (WordPress's `term_id_taxonomy` unique
 /// key).
 ///
-/// `parent_id` is the parent's `term_taxonomy` id, or null for a top-level term. WordPress stores
-/// the parent's term id, with 0 for none; Mission Control keeps the row id so that a foreign key
-/// guards it. Deleting a parent that still has children is refused, so the content API moves the
-/// children to the deleted term's parent first, as WordPress does. Deleting a term deletes its
-/// `term_taxonomy` rows.
+/// `parent_id` is the parent's term id (`terms.id`), as WordPress's `parent` column, so the REST
+/// API and WXR map onto it one to one; null, not WordPress's 0, means a top-level term, so that a
+/// foreign key can guard it. The key refuses (`RESTRICT`) deleting a term that still has children:
+/// the content API moves the children to the deleted term's parent first, as WordPress does, so
+/// the key never fires on that path and only stops a delete that would leave children pointing at
+/// nothing. `CASCADE` would delete the children and `SET NULL` would make them top-level, and
+/// both are wrong for WordPress. Deleting a term deletes its `term_taxonomy` rows.
 pub(super) fn migration() -> Migration {
     Migration::schema(
         "20261114000400_create_term_taxonomy_table",
@@ -30,7 +32,7 @@ pub(super) fn migration() -> Migration {
                 .references("terms", "id")
                 .on_delete(Action::Cascade);
             t.foreign("parent_id")
-                .references("term_taxonomy", "id")
+                .references("terms", "id")
                 .on_delete(Action::Restrict);
         })],
         vec![schema::drop_if_exists("term_taxonomy")],

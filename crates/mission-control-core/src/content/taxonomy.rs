@@ -2,7 +2,8 @@
 //! `wp_term_relationships`: a [`Term`] is a name and slug in `terms` plus its place in one
 //! taxonomy in `term_taxonomy`, and a post's terms are rows of `term_relationships`.
 //!
-//! A term is identified by its `term_taxonomy_id`: parents and post relationships refer to it.
+//! A parent is a term id (`term_id`), as in WordPress; post relationships refer to the
+//! `term_taxonomy_id`, as `wp_term_relationships` does.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -53,7 +54,7 @@ impl Taxonomy {
 pub struct Term {
     /// The `terms` id (`term_id`).
     pub term_id: i64,
-    /// The `term_taxonomy` id, which parents and post relationships refer to.
+    /// The `term_taxonomy` id, which post relationships refer to.
     pub term_taxonomy_id: i64,
     /// The name.
     pub name: String,
@@ -65,7 +66,7 @@ pub struct Term {
     pub taxonomy: String,
     /// The description.
     pub description: String,
-    /// The parent's `term_taxonomy_id`, or `None` for a top-level term.
+    /// The parent's `term_id`, or `None` for a top-level term.
     pub parent_id: Option<i64>,
     /// How many published posts have this term, kept up to date as WordPress does.
     pub count: i64,
@@ -80,7 +81,7 @@ pub struct NewTerm {
     pub slug: String,
     /// The description.
     pub description: String,
-    /// The parent's `term_taxonomy_id`, for a hierarchical taxonomy.
+    /// The parent's `term_id`, for a hierarchical taxonomy.
     pub parent_id: Option<i64>,
 }
 
@@ -233,7 +234,7 @@ impl Term {
         db.transaction(async |tx| {
             if let Some(parent) = new.parent_id {
                 let found = TermTaxonomyRow::query()
-                    .where_eq("id", parent)
+                    .where_eq("term_id", parent)
                     .where_eq("taxonomy", taxonomy.name)
                     .exists(tx.exec())
                     .await?;
@@ -337,7 +338,8 @@ impl Term {
     pub async fn children(&self, db: &Database) -> Result<Vec<Self>, Error> {
         let mut c = db;
         let rows = TermTaxonomyRow::query()
-            .where_eq("parent_id", self.term_taxonomy_id)
+            .where_eq("parent_id", self.term_id)
+            .where_eq("taxonomy", self.taxonomy.as_str())
             .get(c.exec())
             .await?;
         Ok(by_name(with_terms(&mut c, rows).await?))
@@ -361,8 +363,11 @@ impl Term {
             else {
                 return Ok(false);
             };
+            // Before the term goes: the foreign key on `parent_id` refuses to delete a term that
+            // still has children.
             TermTaxonomyRow::query()
-                .where_eq("parent_id", row.id)
+                .where_eq("parent_id", row.term_id)
+                .where_eq("taxonomy", row.taxonomy.as_str())
                 .update(tx.exec(), &[("parent_id", row.parent_id.into())])
                 .await?;
             // The foreign key deletes the term's `term_relationships` rows.
@@ -525,6 +530,20 @@ async fn find<C: Conn>(c: &mut C, term_taxonomy_id: i64) -> Result<Option<Term>,
     Ok(with_terms(c, vec![row]).await?.pop())
 }
 
+/// The term of `taxonomy` with this `term_id`, if there is one.
+async fn find_by_term_id<C: Conn>(
+    c: &mut C,
+    taxonomy: &Taxonomy,
+    term_id: i64,
+) -> Result<Option<Term>, Error> {
+    let rows = TermTaxonomyRow::query()
+        .where_eq("term_id", term_id)
+        .where_eq("taxonomy", taxonomy.name)
+        .get(c.exec())
+        .await?;
+    Ok(with_terms(c, rows).await?.pop())
+}
+
 /// The term of `taxonomy` with this slug, if there is one.
 async fn find_by_slug<C: Conn>(
     c: &mut C,
@@ -626,7 +645,7 @@ async fn unique_slug<C: Conn>(
         let mut suffix = String::new();
         let mut next = parent_id;
         while let Some(id) = next {
-            let Some(parent) = find(c, id).await? else {
+            let Some(parent) = find_by_term_id(c, taxonomy, id).await? else {
                 break;
             };
             suffix.push('-');

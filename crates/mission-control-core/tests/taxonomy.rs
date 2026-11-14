@@ -17,6 +17,15 @@ async fn setup(db: &Database) -> i64 {
         .run(db)
         .await
         .expect("runs the migrations");
+    // A `terms` row with no taxonomy, so that term ids and term_taxonomy ids differ by one and a
+    // test cannot pass by mixing them up.
+    raw::execute(
+        db,
+        "INSERT INTO terms (name, slug) VALUES (?, ?)",
+        &["Offset".into(), "offset".into()],
+    )
+    .await
+    .expect("inserts the offset term");
     raw::execute(
         db,
         "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
@@ -47,7 +56,7 @@ async fn category(db: &Database, name: &str, parent: Option<&Term>) -> Term {
         db,
         &Taxonomy::CATEGORY,
         NewTerm {
-            parent_id: parent.map(|p| p.term_taxonomy_id),
+            parent_id: parent.map(|p| p.term_id),
             ..NewTerm::new(name)
         },
     )
@@ -127,7 +136,7 @@ async fn create_stores_the_term_and_its_taxonomy_row() {
             .unwrap(),
         None
     );
-    assert_eq!(count_rows(db, "terms").await, 1);
+    assert_eq!(count_rows(db, "terms").await, 2);
     assert_eq!(count_rows(db, "term_taxonomy").await, 1);
 }
 
@@ -151,7 +160,7 @@ async fn an_empty_name_is_refused() {
         .await
         .unwrap_err();
     assert!(matches!(err, TermError::EmptyName), "{err:?}");
-    assert_eq!(count_rows(db, "terms").await, 0);
+    assert_eq!(count_rows(db, "terms").await, 1);
 }
 
 #[tokio::test]
@@ -163,14 +172,14 @@ async fn a_hierarchical_taxonomy_keeps_parent_and_child() {
     let food = category(db, "Food", None).await;
     let fruit = category(db, "Fruit", Some(&food)).await;
     let apple = category(db, "Apple", Some(&fruit)).await;
-    assert_eq!(fruit.parent_id, Some(food.term_taxonomy_id));
+    assert_eq!(fruit.parent_id, Some(food.term_id));
     assert_eq!(
         Term::find(db, apple.term_taxonomy_id)
             .await
             .unwrap()
             .unwrap()
             .parent_id,
-        Some(fruit.term_taxonomy_id)
+        Some(fruit.term_id)
     );
     assert_eq!(names(&food.children(db).await.unwrap()), ["Fruit"]);
     assert_eq!(names(&fruit.children(db).await.unwrap()), ["Apple"]);
@@ -193,7 +202,7 @@ async fn a_flat_taxonomy_refuses_a_parent() {
         db,
         &Taxonomy::POST_TAG,
         NewTerm {
-            parent_id: Some(rust.term_taxonomy_id),
+            parent_id: Some(rust.term_id),
             ..NewTerm::new("Rocket")
         },
     )
@@ -208,7 +217,7 @@ async fn a_flat_taxonomy_refuses_a_parent() {
         ),
         "{err:?}"
     );
-    assert_eq!(count_rows(db, "terms").await, 1);
+    assert_eq!(count_rows(db, "terms").await, 2);
 }
 
 #[tokio::test]
@@ -218,7 +227,7 @@ async fn a_parent_must_exist_in_the_same_taxonomy() {
     setup(db).await;
 
     let rust = tag(db, "Rust").await;
-    for parent in [rust.term_taxonomy_id, rust.term_taxonomy_id + 1000] {
+    for parent in [rust.term_id, rust.term_id + 1000] {
         let err = Term::create(
             db,
             &Taxonomy::CATEGORY,
@@ -231,7 +240,7 @@ async fn a_parent_must_exist_in_the_same_taxonomy() {
         .unwrap_err();
         assert!(matches!(err, TermError::MissingParent), "{err:?}");
     }
-    assert_eq!(count_rows(db, "terms").await, 1);
+    assert_eq!(count_rows(db, "terms").await, 2);
 }
 
 #[tokio::test]
@@ -269,7 +278,7 @@ async fn a_duplicate_name_is_refused_as_wordpress_does() {
         db,
         &Taxonomy::CATEGORY,
         NewTerm {
-            parent_id: Some(food.term_taxonomy_id),
+            parent_id: Some(food.term_id),
             ..NewTerm::new("Apple")
         },
     )
@@ -503,19 +512,14 @@ async fn deleting_a_term_removes_its_relationships_and_lifts_its_children() {
         ["Apple"]
     );
     assert_eq!(count_rows(db, "term_relationships").await, 1);
-    assert_eq!(count_rows(db, "terms").await, 3);
+    assert_eq!(count_rows(db, "terms").await, 4);
     // WordPress gives the children of a deleted term its parent.
     for child in [&apple, &pear] {
         let child = Term::find(db, child.term_taxonomy_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            child.parent_id,
-            Some(food.term_taxonomy_id),
-            "{}",
-            child.name
-        );
+        assert_eq!(child.parent_id, Some(food.term_id), "{}", child.name);
     }
     assert_eq!(names(&food.children(db).await.unwrap()), ["Apple", "Pear"]);
 
