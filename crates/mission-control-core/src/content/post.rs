@@ -63,6 +63,10 @@ pub struct Post {
     /// The password that protects it (`post_password`), if any.
     #[orbit(fillable)]
     pub password: Option<String>,
+    /// The MIME type (`post_mime_type`), such as `image/jpeg`. Set for attachments; empty for
+    /// every other post type.
+    #[orbit(fillable)]
+    pub mime_type: String,
 }
 
 /// The columns of a post to create: every column of [`Post`] but the id and `modified_at`,
@@ -92,11 +96,13 @@ pub struct NewPost {
     pub published_at: Option<NaiveDateTime>,
     /// The password that protects it.
     pub password: Option<String>,
+    /// The MIME type, for an attachment; empty otherwise.
+    pub mime_type: String,
 }
 
 impl NewPost {
-    /// An empty draft of `post_type` by `author_id`, with no parent, order 0, no publish date and
-    /// no password.
+    /// An empty draft of `post_type` by `author_id`, with no parent, order 0, no publish date, no
+    /// password and no MIME type.
     pub fn new(author_id: i64, post_type: &str) -> Self {
         Self {
             author_id,
@@ -110,6 +116,7 @@ impl NewPost {
             menu_order: 0,
             published_at: None,
             password: None,
+            mime_type: String::new(),
         }
     }
 }
@@ -143,6 +150,7 @@ impl Post {
             published_at: new.published_at,
             modified_at: now(),
             password: new.password,
+            mime_type: new.mime_type,
         };
         post.slug = wanted_slug(&post, None);
         db.transaction(async |tx| {
@@ -338,7 +346,7 @@ impl Post {
     }
 
     /// Every column but the id, with its value, for insert and update.
-    pub(super) fn columns(&self) -> [(&'static str, Value); 12] {
+    pub(super) fn columns(&self) -> [(&'static str, Value); 13] {
         [
             ("author_id", self.author_id.into()),
             ("post_type", self.post_type.clone().into()),
@@ -352,6 +360,7 @@ impl Post {
             ("published_at", self.published_at.into()),
             ("modified_at", self.modified_at.into()),
             ("password", self.password.clone().into()),
+            ("mime_type", self.mime_type.clone().into()),
         ]
     }
 }

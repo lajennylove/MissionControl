@@ -7,7 +7,8 @@ use orbit_orm::Migration;
 use orbit_orm::schema::{self, Action};
 
 /// Creates `posts`. Sizes follow `wp_posts`: `post_type` and `status` are 20 characters, `slug`
-/// is 200 (`post_name`), `password` is 255. `author_id` is a `BIGINT`, the type of Ignite's
+/// is 200 (`post_name`), `password` is 255, `mime_type` is 100 (`post_mime_type`, empty but for
+/// attachments). `author_id` is a `BIGINT`, the type of Ignite's
 /// `users.id`, so MySQL and MariaDB accept the foreign key; deleting a user who has posts is
 /// refused.
 ///
@@ -32,6 +33,7 @@ pub(super) fn migration() -> Migration {
             t.date_time("published_at").nullable();
             t.date_time("modified_at");
             t.string("password").nullable();
+            t.string("mime_type").length(100).default("");
             t.index(["post_type", "slug"]);
             t.index(["post_type", "status", "published_at", "id"]);
             t.index(["parent_id"]);

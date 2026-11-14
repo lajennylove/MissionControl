@@ -328,6 +328,7 @@ fn revision_of(post: &Post, author_id: i64, slug: String, at: NaiveDateTime) -> 
         published_at: Some(at),
         modified_at: at,
         password: None,
+        mime_type: String::new(),
     }
 }
 

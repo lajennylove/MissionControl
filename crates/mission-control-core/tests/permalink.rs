@@ -36,6 +36,7 @@ fn sample(post_type: &str) -> Post {
         published_at: Some(at(2026, 3, 7, 8, 5, 9)),
         modified_at: at(2026, 3, 8, 0, 0, 0),
         password: None,
+        mime_type: String::new(),
     }
 }
 

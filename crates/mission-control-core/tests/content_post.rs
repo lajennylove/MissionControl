@@ -76,6 +76,7 @@ fn post_writes_every_column_but_its_id() {
             "published_at",
             "modified_at",
             "password",
+            "mime_type",
         ]
     );
 }
@@ -113,6 +114,8 @@ async fn creates_reads_updates_and_trashes_a_post() {
     assert_eq!(read.parent_id, None);
     assert_eq!(read.menu_order, 0);
     assert_eq!(read.password, None);
+    // Only attachments have a MIME type (`post_mime_type`); other posts keep it empty.
+    assert_eq!(read.mime_type, "");
 
     // An old modification time, so the update visibly moves it.
     let old = at(2001, 1, 1, 0, 0, 0);
@@ -166,6 +169,58 @@ async fn every_status_round_trips_through_the_database() {
         let read = Post::query().find_or_fail(db, post.id).await.unwrap();
         assert_eq!(read.status, status);
     }
+}
+
+#[tokio::test]
+async fn the_mime_type_round_trips_and_defaults_to_empty() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+
+    let mut file = Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Inherit,
+            title: "photo".into(),
+            mime_type: "image/jpeg".into(),
+            ..NewPost::new(author, "attachment")
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(file.mime_type, "image/jpeg");
+    let stored: String = raw::fetch_scalar(
+        db,
+        "SELECT mime_type FROM posts WHERE id = ?",
+        &[file.id.into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(stored, "image/jpeg");
+    file.mime_type = "image/png".into();
+    file.save(db).await.unwrap();
+    let read = Post::query().find_or_fail(db, file.id).await.unwrap();
+    assert_eq!(read.mime_type, "image/png");
+
+    // A row inserted without the column gets the default, as `post_mime_type` does.
+    raw::execute(
+        db,
+        "INSERT INTO posts (author_id, title, content, excerpt, modified_at) VALUES (?, ?, ?, ?, ?)",
+        &[
+            author.into(),
+            "raw".into(),
+            "".into(),
+            "".into(),
+            at(2026, 11, 14, 0, 0, 0).into(),
+        ],
+    )
+    .await
+    .unwrap();
+    let id: i64 = raw::fetch_scalar(db, "SELECT MAX(id) FROM posts", &[])
+        .await
+        .unwrap();
+    let read = Post::query().find_or_fail(db, id).await.unwrap();
+    assert_eq!(read.mime_type, "");
 }
 
 #[tokio::test]
