@@ -10,11 +10,16 @@ publish.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 fs4 = "1.1.0"
+# The logging facade Rocket 0.5 logs through.
+log = "0.4"
 orbit-orm.workspace = true
 serde = { version = "1", features = ["derive"] }
+# Scheduled event payloads are stored as JSON.
+serde_json = "1"
 # The `Decode` and `Type` traits, so `PostStatus` reads from a row. Orbit's own sqlx version.
 sqlx = { version = "0.9", default-features = false }
+# The scheduler's background loop, and blocking threads for hook callbacks.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }
-tokio.workspace = true

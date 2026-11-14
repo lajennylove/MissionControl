@@ -13,6 +13,11 @@
 //! let posts = Post::of_type("post").get(&db).await?;
 //! ```
 
+mod future;
 mod post;
 
+pub use future::{
+    PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
+    schedule_future_post,
+};
 pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};

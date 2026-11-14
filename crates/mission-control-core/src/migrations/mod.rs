@@ -12,6 +12,7 @@ use orbit_orm::{Error, Migrator};
 
 mod m20261114000000_create_options_table;
 mod m20261114000100_create_posts_table;
+mod m20261114000200_create_scheduled_events_table;
 
 /// Every core migration, in order. `run` applies the pending ones as one batch, and `rollback`
 /// reverts the last batch.
@@ -23,5 +24,6 @@ pub fn migrator() -> Result<Migrator, Error> {
     Migrator::new(vec![
         m20261114000000_create_options_table::migration(),
         m20261114000100_create_posts_table::migration(),
+        m20261114000200_create_scheduled_events_table::migration(),
     ])
 }

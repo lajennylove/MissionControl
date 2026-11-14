@@ -750,9 +750,11 @@ dependencies = [
  "chrono",
  "dotenvy",
  "fs4",
+ "log",
  "mission-control-testing",
  "orbit-orm",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
 ]
