@@ -8,12 +8,16 @@ repository.workspace = true
 publish.workspace = true
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Reads legacy Office (OLE compound) files to check their type (MIT). The version `infer` uses.
+cfb = "0.14"
 # Transliterates titles to ASCII slugs (BSD-3-Clause).
 deunicode = "1.6"
 dotenvy = "0.15"
 fs4 = "1.1.0"
 # `catch_unwind` on the scheduler's tick future.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Detects a file's real type from its magic numbers (MIT; its `cfb` dependency is MIT).
+infer = "0.22"
 # The logging facade Rocket 0.5 logs through.
 log = "0.4"
 orbit-orm.workspace = true
