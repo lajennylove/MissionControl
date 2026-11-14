@@ -130,6 +130,15 @@ pub trait Storage: Send + Sync {
 
     /// Whether a file exists at `path`.
     fn exists(&self, path: &str) -> StorageResult<bool>;
+
+    /// The names of what `folder` holds (files and subfolders, not their
+    /// contents), in no particular order: names only, without the folder.
+    /// A folder that does not exist holds nothing. Names starting with `.`,
+    /// which sanitised upload names never do, are left out, so a storage's
+    /// own temp files are not listed. [`store`](super::store) reads it to
+    /// keep an image's future sub-size names free, as WordPress's
+    /// `wp_unique_filename` reads the upload folder.
+    fn list(&self, folder: &str) -> StorageResult<Vec<String>>;
 }
 
 /// The `YYYY/MM` folder an upload made on `date` goes in (WordPress's
@@ -358,5 +367,29 @@ impl Storage for LocalStorage {
             }
             Err(err) => Err(err.into()),
         }
+    }
+
+    fn list(&self, folder: &str) -> StorageResult<Vec<String>> {
+        let target = self.resolve_existing(folder)?;
+        let entries = match fs::read_dir(&target) {
+            Ok(entries) => entries,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if !name.starts_with('.') {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 }

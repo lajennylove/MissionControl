@@ -284,3 +284,42 @@ fn put_new_first_takes_the_first_free_path() {
     assert_eq!(names, ["a.txt", "b.txt", "c.txt"]);
     assert!(!s.root().join("other").exists());
 }
+
+#[test]
+fn list_names_what_a_folder_holds() {
+    let (_t, s) = setup("list");
+    // A folder that does not exist yet holds nothing.
+    assert!(s.list("2026/11").unwrap().is_empty());
+    s.put("2026/11/b.jpg", b"b").unwrap();
+    s.put("2026/11/a.jpg", b"a").unwrap();
+    s.put("2026/11/sub/c.jpg", b"c").unwrap();
+    s.put("2026/12/d.jpg", b"d").unwrap();
+    // The storage's own temp files (dot names) are not listed.
+    fs::write(s.root().join("2026/11/.mc-tmp.1.2"), b"t").unwrap();
+    let mut names = s.list("2026/11").unwrap();
+    names.sort();
+    assert_eq!(names, ["a.jpg", "b.jpg", "sub"]);
+    for path in ["", "../x", "/abs", "2026//11", "2026\\11"] {
+        assert!(
+            matches!(s.list(path), Err(StorageError::InvalidPath(_))),
+            "{path}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn list_refuses_a_folder_that_leaves_the_root() {
+    use std::os::unix::fs::symlink;
+
+    let (t, s) = setup("list-symlink");
+    let outside = t.0.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    s.put("keep.txt", b"keep").unwrap();
+    symlink(&outside, s.root().join("escape")).unwrap();
+    assert!(matches!(
+        s.list("escape"),
+        Err(StorageError::InvalidPath(_))
+    ));
+}

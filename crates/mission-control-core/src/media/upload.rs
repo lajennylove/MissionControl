@@ -666,24 +666,38 @@ pub fn sanitize_file_name(client_name: &str) -> String {
     format!("{stem}.{extension}")
 }
 
-/// Whether a file name stem could be taken for an image sub-size
-/// (`-150x150`, `-scaled`, `-rotated`), which WordPress always numbers.
-fn looks_like_sub_size(stem: &str) -> bool {
-    let Some((_, tail)) = stem.rsplit_once('-') else {
-        return false;
-    };
+/// Whether `tail`, the part after a stem's last `-`, is a sub-size suffix:
+/// `{w}x{h}`, `scaled` or `rotated`.
+fn is_sub_size_suffix(tail: &str) -> bool {
     if tail == "scaled" || tail == "rotated" {
         return true;
     }
-    match tail.split_once('x') {
-        Some((w, h)) => {
-            !w.is_empty()
-                && !h.is_empty()
-                && w.bytes().all(|b| b.is_ascii_digit())
-                && h.bytes().all(|b| b.is_ascii_digit())
-        }
-        None => false,
-    }
+    tail.split_once('x').is_some_and(|(w, h)| {
+        !w.is_empty()
+            && !h.is_empty()
+            && w.bytes().all(|b| b.is_ascii_digit())
+            && h.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Whether a file name stem could be taken for an image sub-size
+/// (`-150x150`, `-scaled`, `-rotated`), which WordPress always numbers.
+fn looks_like_sub_size(stem: &str) -> bool {
+    stem.rsplit_once('-')
+        .is_some_and(|(_, tail)| is_sub_size_suffix(tail))
+}
+
+/// Whether `file` (a name in the folder) is named like a sub-size of the
+/// file `stem.extension`: `stem-{w}x{h}.extension`, `stem-scaled.extension`
+/// or `stem-rotated.extension`, ignoring case, as WordPress's
+/// `_wp_check_existing_file_names` matches them.
+fn is_sub_size_of(file: &str, stem: &str, extension: &str) -> bool {
+    let file = file.to_lowercase();
+    let Some(rest) = file.strip_prefix(&format!("{}-", stem.to_lowercase())) else {
+        return false;
+    };
+    rest.strip_suffix(&format!(".{}", extension.to_lowercase()))
+        .is_some_and(is_sub_size_suffix)
 }
 
 /// Writes a validated upload into the `YYYY/MM` folder for `date` under a
@@ -697,6 +711,15 @@ fn looks_like_sub_size(stem: &str) -> bool {
 /// [`Storage::put_new_first`]: the bytes are written once, a taken name is
 /// never replaced, and a concurrent upload of the same name takes the next
 /// number instead of overwriting.
+///
+/// An image (`image/*`) also skips a name whose sub-size names are taken:
+/// `photo.jpg` is not used while `photo-150x150.jpg`, `photo-scaled.jpg` or
+/// `photo-rotated.jpg` is in the folder, as WordPress's
+/// `_wp_check_existing_file_names` does, so the image's own sub-sizes can be
+/// written. The folder is listed once ([`Storage::list`]) before names are
+/// claimed; a file named like a sub-size that appears after that is not
+/// seen, and that size is then left out (see
+/// [`create_image_subsizes`](super::create_image_subsizes)).
 pub fn store(
     storage: &dyn Storage,
     upload: &ValidatedUpload<'_>,
@@ -708,16 +731,29 @@ pub fn store(
         .rsplit_once('.')
         .unwrap_or((upload.file_name.as_str(), upload.extension.as_str()));
     let first = u32::from(looks_like_sub_size(stem));
-    let mut paths = (first..=MAX_UNIQUE_ATTEMPTS).map(|number| {
-        if number == 0 {
-            format!("{folder}/{stem}.{extension}")
+    let taken = if upload.mime_type.starts_with("image/") {
+        storage.list(&folder)?
+    } else {
+        Vec::new()
+    };
+    let mut paths = (first..=MAX_UNIQUE_ATTEMPTS).filter_map(|number| {
+        let candidate = if number == 0 {
+            stem.to_owned()
         } else {
-            format!("{folder}/{stem}-{number}.{extension}")
-        }
+            format!("{stem}-{number}")
+        };
+        let clashes = taken
+            .iter()
+            .any(|file| is_sub_size_of(file, &candidate, extension));
+        (!clashes).then(|| format!("{folder}/{candidate}.{extension}"))
     });
     match storage.put_new_first(&mut paths, upload.bytes) {
         Ok(path) => Ok(path),
+        // Every name taken, or (`InvalidPath` with no path) every name skipped.
         Err(StorageError::AlreadyExists(_)) => {
+            Err(UploadError::NoUniqueName(upload.file_name.clone()))
+        }
+        Err(StorageError::InvalidPath(path)) if path.is_empty() => {
             Err(UploadError::NoUniqueName(upload.file_name.clone()))
         }
         Err(err) => Err(err.into()),

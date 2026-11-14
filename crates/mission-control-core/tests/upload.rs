@@ -356,6 +356,54 @@ fn names_that_look_like_image_sizes_always_get_a_number() {
 }
 
 #[test]
+fn an_image_name_whose_sub_sizes_are_taken_gets_a_number() {
+    // WordPress's `_wp_check_existing_file_names`: `photo.jpg` must not be
+    // taken while files named like its sub-sizes are in the folder, or its
+    // own sub-sizes could not be written.
+    for (existing, want) in [
+        (&["photo-150x150.jpg"][..], "2026/11/photo-1.jpg"),
+        (&["photo-scaled.jpg"][..], "2026/11/photo-1.jpg"),
+        (&["photo-rotated.jpg"][..], "2026/11/photo-1.jpg"),
+        // Case does not matter, as in WordPress's `/i` match.
+        (&["PHOTO-300X200.JPG"][..], "2026/11/photo-1.jpg"),
+        // The numbered names are checked too.
+        (
+            &["photo.jpg", "photo-150x150.jpg", "photo-1-300x225.jpg"][..],
+            "2026/11/photo-2.jpg",
+        ),
+        // Not sub-size names: the name is free.
+        (
+            &[
+                "photo-150x150.png",
+                "photo-150.jpg",
+                "photo-x150.jpg",
+                "photos-150x150.jpg",
+                "photo-150x150-1.jpg",
+            ][..],
+            "2026/11/photo.jpg",
+        ),
+    ] {
+        let (_t, s) = setup("subsize-clash");
+        for name in existing {
+            s.put(&format!("2026/11/{name}"), b"taken").unwrap();
+        }
+        let upload = validate("photo.jpg", jpeg(), MAX).unwrap();
+        assert_eq!(store(&s, &upload, day()).unwrap(), want, "{existing:?}");
+        for name in existing {
+            assert_eq!(s.get(&format!("2026/11/{name}")).unwrap(), b"taken");
+        }
+    }
+}
+
+#[test]
+fn files_that_get_no_sub_sizes_ignore_sub_size_names() {
+    let (_t, s) = setup("subsize-text");
+    s.put("2026/11/notes-150x150.txt", b"taken").unwrap();
+    let upload = validate("notes.txt", b"hello", MAX).unwrap();
+    assert_eq!(store(&s, &upload, day()).unwrap(), "2026/11/notes.txt");
+}
+
+#[test]
 fn concurrent_uploads_of_one_name_never_overwrite() {
     let (_t, s) = setup("race");
     let s = Arc::new(s);
@@ -495,6 +543,9 @@ impl Storage for Counting {
     fn exists(&self, path: &str) -> StorageResult<bool> {
         self.inner.exists(path)
     }
+    fn list(&self, folder: &str) -> StorageResult<Vec<String>> {
+        self.inner.list(folder)
+    }
 }
 
 #[test]
@@ -544,6 +595,9 @@ impl Storage for Full {
     }
     fn exists(&self, _: &str) -> StorageResult<bool> {
         Ok(true)
+    }
+    fn list(&self, _: &str) -> StorageResult<Vec<String>> {
+        Ok(Vec::new())
     }
 }
 
