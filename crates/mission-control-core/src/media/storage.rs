@@ -88,6 +88,39 @@ pub trait Storage: Send + Sync {
     /// folders are created, and readers never see half a file.
     fn put_new(&self, path: &str, bytes: &[u8]) -> StorageResult<()>;
 
+    /// Writes `bytes` at the first of `paths` where no file exists yet, and
+    /// returns that path. Like [`Storage::put_new`], a taken path is never
+    /// replaced, but the bytes are sent once however many paths are taken.
+    /// Fails with [`StorageError::AlreadyExists`] (naming the last path)
+    /// when every path is taken, or [`StorageError::InvalidPath`] when there
+    /// are none.
+    ///
+    /// The default skips paths [`Storage::exists`] reports taken and uses
+    /// `put_new` only to close the race, so the bytes are written again only
+    /// when another writer takes a name in between. Implementations that can
+    /// write once and claim names cheaply (the local disk) override it.
+    fn put_new_first(
+        &self,
+        paths: &mut dyn Iterator<Item = String>,
+        bytes: &[u8],
+    ) -> StorageResult<String> {
+        let mut last = None;
+        for path in paths {
+            if !self.exists(&path)? {
+                match self.put_new(&path, bytes) {
+                    Ok(()) => return Ok(path),
+                    Err(StorageError::AlreadyExists(_)) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            last = Some(path);
+        }
+        Err(match last {
+            Some(path) => StorageError::AlreadyExists(path),
+            None => StorageError::InvalidPath(String::new()),
+        })
+    }
+
     /// Reads the file at `path`, or [`StorageError::NotFound`].
     fn get(&self, path: &str) -> StorageResult<Vec<u8>>;
 
@@ -181,6 +214,9 @@ impl LocalStorage {
 /// Distinguishes temp files of concurrent writers in one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// How many temp names [`LocalStorage::write_temp`] tries before giving up.
+const MAX_TEMP_ATTEMPTS: u32 = 1_000;
+
 impl LocalStorage {
     /// Checks `path`, creates its folders, and returns the target path.
     fn prepare_write(&self, path: &str) -> StorageResult<PathBuf> {
@@ -202,7 +238,9 @@ impl LocalStorage {
     /// It starts with a dot, which sanitised upload names never do.
     fn write_temp(target: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
         let parent = target.parent().unwrap_or(Path::new("."));
+        let mut attempts = 0;
         loop {
+            attempts += 1;
             let temp = parent.join(format!(
                 ".mc-tmp.{}.{}",
                 std::process::id(),
@@ -215,7 +253,12 @@ impl LocalStorage {
             {
                 Ok(file) => file,
                 // Left by an earlier process with the same id: try the next.
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err)
+                    if err.kind() == io::ErrorKind::AlreadyExists
+                        && attempts < MAX_TEMP_ATTEMPTS =>
+                {
+                    continue;
+                }
                 Err(err) => return Err(err),
             };
             let written = file.write_all(bytes).and_then(|()| file.sync_all());
@@ -240,20 +283,44 @@ impl Storage for LocalStorage {
     }
 
     fn put_new(&self, path: &str, bytes: &[u8]) -> StorageResult<()> {
-        let target = self.prepare_write(path)?;
-        let temp = Self::write_temp(&target, bytes)?;
-        // `hard_link` never replaces: it fails when anything (a file, a
-        // folder, a symlink) is already at the target. It is in `std` on
-        // Unix and Windows (NTFS).
-        let linked = fs::hard_link(&temp, &target);
-        let _ = fs::remove_file(&temp);
-        match linked {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                Err(StorageError::AlreadyExists(path.to_string()))
+        self.put_new_first(&mut std::iter::once(path.to_string()), bytes)
+            .map(|_| ())
+    }
+
+    /// Writes the bytes once to a temp file, then hard-links it to each path
+    /// in turn until one is free. `hard_link` never replaces: it fails when
+    /// anything (a file, a folder, a symlink) is already there. It is in
+    /// `std` on Unix and Windows (NTFS). All paths must share the first
+    /// one's folder, so the link never crosses file systems.
+    fn put_new_first(
+        &self,
+        paths: &mut dyn Iterator<Item = String>,
+        bytes: &[u8],
+    ) -> StorageResult<String> {
+        let Some(first) = paths.next() else {
+            return Err(StorageError::InvalidPath(String::new()));
+        };
+        let first_target = self.prepare_write(&first)?;
+        let folder = first_target.parent().map(Path::to_path_buf);
+        let temp = Self::write_temp(&first_target, bytes)?;
+
+        let claimed = (|| {
+            let mut last = first.clone();
+            for path in std::iter::once(first).chain(paths) {
+                let target = self.join(&path)?;
+                if target.parent().map(Path::to_path_buf) != folder {
+                    return Err(StorageError::InvalidPath(path));
+                }
+                match fs::hard_link(&temp, &target) {
+                    Ok(()) => return Ok(path),
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = path,
+                    Err(err) => return Err(err.into()),
+                }
             }
-            Err(err) => Err(err.into()),
-        }
+            Err(StorageError::AlreadyExists(last))
+        })();
+        let _ = fs::remove_file(&temp);
+        claimed
     }
 
     fn get(&self, path: &str) -> StorageResult<Vec<u8>> {

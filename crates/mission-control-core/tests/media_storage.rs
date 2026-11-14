@@ -239,3 +239,48 @@ fn exists_reports_io_errors() {
     assert!(!s.exists("missing.txt").unwrap());
     assert!(!s.exists("locked/a.txt/below").unwrap());
 }
+
+#[test]
+fn put_new_first_takes_the_first_free_path() {
+    let (_t, s) = setup("put-new-first");
+    s.put("d/a.txt", b"old").unwrap();
+    s.put("d/b.txt", b"old").unwrap();
+    let mut paths = ["d/a.txt", "d/b.txt", "d/c.txt", "d/e.txt"]
+        .into_iter()
+        .map(String::from);
+    assert_eq!(s.put_new_first(&mut paths, b"new").unwrap(), "d/c.txt");
+    assert_eq!(s.get("d/a.txt").unwrap(), b"old");
+    assert_eq!(s.get("d/c.txt").unwrap(), b"new");
+    assert!(!s.exists("d/e.txt").unwrap());
+
+    // Every path taken: the last one is named, nothing is replaced.
+    let mut paths = ["d/a.txt", "d/b.txt"].into_iter().map(String::from);
+    assert!(matches!(
+        s.put_new_first(&mut paths, b"x"),
+        Err(StorageError::AlreadyExists(path)) if path == "d/b.txt"
+    ));
+    // Paths in another folder, unsafe paths and no paths are refused.
+    let mut paths = ["d/a.txt", "other/x.txt"].into_iter().map(String::from);
+    assert!(matches!(
+        s.put_new_first(&mut paths, b"x"),
+        Err(StorageError::InvalidPath(_))
+    ));
+    let mut paths = ["d/a.txt", "d/../x.txt"].into_iter().map(String::from);
+    assert!(matches!(
+        s.put_new_first(&mut paths, b"x"),
+        Err(StorageError::InvalidPath(_))
+    ));
+    assert!(matches!(
+        s.put_new_first(&mut std::iter::empty(), b"x"),
+        Err(StorageError::InvalidPath(_))
+    ));
+
+    // No temp file is left behind.
+    let mut names: Vec<String> = fs::read_dir(s.root().join("d"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a.txt", "b.txt", "c.txt"]);
+    assert!(!s.root().join("other").exists());
+}

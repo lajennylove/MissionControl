@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use chrono::NaiveDate;
 use mission_control_core::media::{
-    LocalStorage, Storage, UploadError, sanitize_file_name, store, validate,
+    LocalStorage, Storage, StorageError, StorageResult, UploadError, sanitize_file_name, store,
+    validate,
 };
 
 /// A fresh temp folder, removed on drop.
@@ -414,5 +415,143 @@ fn nothing_is_written_outside_the_root() {
     for file in files {
         assert!(file.starts_with("2026/11/"), "{file}");
         assert!(!file["2026/11/".len()..].starts_with('.'), "{file}");
+    }
+}
+
+// ---- fix round 1 ----
+
+#[test]
+fn format_characters_are_removed() {
+    // Arabic letter mark, soft hyphen, Mongolian vowel separator, a tag
+    // character, the combining grapheme joiner, a word joiner.
+    assert_eq!(
+        sanitize_file_name("a\u{61c}b\u{ad}c\u{180e}d\u{e0041}e\u{34f}f\u{2060}g.jpg"),
+        "abcdefg.jpg"
+    );
+}
+
+#[test]
+fn trailing_windows_dots_and_spaces() {
+    // As WordPress: a lone `-` between dots is kept, trailing ones trimmed.
+    assert_eq!(sanitize_file_name("a. .jpg"), "a.-.jpg");
+    assert_eq!(sanitize_file_name("a.jpg. "), "a.jpg");
+    assert_eq!(sanitize_file_name("a.jpg . . "), "a.jpg");
+}
+
+#[test]
+fn a_cut_that_exposes_an_inner_extension_is_defused() {
+    // The cut lands right after `.phpx`, which then gets its `_`.
+    let name = sanitize_file_name(&format!("{}.phpxbbbbbbbbbb.jpg", "a".repeat(190)));
+    assert_eq!(name, format!("{}.phpx_.jpg", "a".repeat(190)));
+    assert!(name.len() <= 200);
+}
+
+#[test]
+fn unicode_lookalike_dots_are_kept_as_wordpress_does() {
+    // A fullwidth full stop is not a dot: the extension is `php．jpg`.
+    assert_eq!(sanitize_file_name("x.php\u{ff0e}jpg"), "x.php\u{ff0e}jpg");
+    assert!(matches!(
+        validate("x.php\u{ff0e}jpg", jpeg(), MAX),
+        Err(UploadError::TypeNotAllowed { .. })
+    ));
+}
+
+/// Wraps local storage and counts the bytes handed to it for writing.
+struct Counting {
+    inner: LocalStorage,
+    written: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn count(&self, bytes: &[u8]) {
+        self.written
+            .fetch_add(bytes.len(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Storage for Counting {
+    fn put(&self, path: &str, bytes: &[u8]) -> StorageResult<()> {
+        self.count(bytes);
+        self.inner.put(path, bytes)
+    }
+    fn put_new(&self, path: &str, bytes: &[u8]) -> StorageResult<()> {
+        self.count(bytes);
+        self.inner.put_new(path, bytes)
+    }
+    fn put_new_first(
+        &self,
+        paths: &mut dyn Iterator<Item = String>,
+        bytes: &[u8],
+    ) -> StorageResult<String> {
+        self.count(bytes);
+        self.inner.put_new_first(paths, bytes)
+    }
+    fn get(&self, path: &str) -> StorageResult<Vec<u8>> {
+        self.inner.get(path)
+    }
+    fn delete(&self, path: &str) -> StorageResult<()> {
+        self.inner.delete(path)
+    }
+    fn exists(&self, path: &str) -> StorageResult<bool> {
+        self.inner.exists(path)
+    }
+}
+
+#[test]
+fn the_bytes_are_written_once_however_many_names_are_taken() {
+    let (_t, s) = setup("count");
+    for name in [
+        "photo.jpg",
+        "photo-1.jpg",
+        "photo-2.jpg",
+        "photo-3.jpg",
+        "photo-4.jpg",
+    ] {
+        s.put(&format!("2026/11/{name}"), b"taken").unwrap();
+    }
+    let counting = Counting {
+        inner: s,
+        written: Default::default(),
+    };
+    let upload = validate("photo.jpg", jpeg(), MAX).unwrap();
+    assert_eq!(
+        store(&counting, &upload, day()).unwrap(),
+        "2026/11/photo-5.jpg"
+    );
+    assert_eq!(
+        counting.written.load(std::sync::atomic::Ordering::SeqCst),
+        jpeg().len()
+    );
+    // No temp file is left in the folder.
+    assert_eq!(files_under(counting.inner.root()).len(), 6);
+}
+
+/// Storage where every name is taken.
+struct Full;
+
+impl Storage for Full {
+    fn put(&self, _: &str, _: &[u8]) -> StorageResult<()> {
+        unreachable!()
+    }
+    fn put_new(&self, path: &str, _: &[u8]) -> StorageResult<()> {
+        Err(StorageError::AlreadyExists(path.to_string()))
+    }
+    fn get(&self, path: &str) -> StorageResult<Vec<u8>> {
+        Err(StorageError::NotFound(path.to_string()))
+    }
+    fn delete(&self, _: &str) -> StorageResult<()> {
+        Ok(())
+    }
+    fn exists(&self, _: &str) -> StorageResult<bool> {
+        Ok(true)
+    }
+}
+
+#[test]
+fn no_free_name_is_refused() {
+    let upload = validate("photo.jpg", jpeg(), MAX).unwrap();
+    match store(&Full, &upload, day()) {
+        Err(UploadError::NoUniqueName(name)) => assert_eq!(name, "photo.jpg"),
+        other => panic!("expected NoUniqueName, got {other:?}"),
     }
 }

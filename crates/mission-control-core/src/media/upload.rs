@@ -49,7 +49,7 @@ const MAX_EXTENSION_BYTES: usize = 16;
 const FALLBACK_NAME: &str = "unnamed-file";
 
 /// How many numbered names [`store`] tries before giving up.
-const MAX_UNIQUE_ATTEMPTS: u32 = 100_000;
+const MAX_UNIQUE_ATTEMPTS: u32 = 10_000;
 
 /// Characters removed from file names: WordPress's `sanitize_file_name`
 /// list, including its typographic quotes. NUL and other control
@@ -542,14 +542,36 @@ fn has_ole_stream(bytes: &[u8], streams: &[&str]) -> bool {
     }
 }
 
-/// Whether `c` is an invisible formatting character: bidirectional controls
-/// (which can show `exe.jpg` as `gpj.exe`), zero-width characters and the
-/// byte order mark.
+/// Whether `c` is an invisible formatting character: Unicode general
+/// category Cf (Unicode 15.1: bidirectional controls, which can show
+/// `exe.jpg` as `gpj.exe`, zero-width characters, the soft hyphen, the byte
+/// order mark, tag characters, ...), plus the combining grapheme joiner
+/// U+034F. `std` has no category lookup, so the Cf ranges are listed here.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
-        '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}' | '\u{feff}'
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61c}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{890}'..='\u{891}'
+            | '\u{8e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
     )
 }
 
@@ -588,7 +610,8 @@ fn defuse_inner_extensions(stem: &str) -> String {
 ///
 /// - Only the last component after `/` or `\` is kept, so the name is never
 ///   a path.
-/// - NUL, control characters, invisible formatting characters and
+/// - NUL, control characters, invisible formatting characters (category
+///   Cf) and
 ///   WordPress's special characters (`? [ ] / \ = < > : ; , ' " & $ # * ( )
 ///   | ~ ` ! { } % +` and typographic quotes) are removed.
 /// - Whitespace becomes `-`; runs of `-` and of `.` collapse to one.
@@ -669,9 +692,11 @@ fn looks_like_sub_size(stem: &str) -> bool {
 ///
 /// The name is the upload's name, then `name-1.ext`, `name-2.ext`, ... as
 /// WordPress's `wp_unique_filename` does; names that look like an image
-/// sub-size start at `-1`. Each try is a create-only write
-/// ([`Storage::put_new`]), so a concurrent upload of the same name takes the
-/// next number instead of overwriting.
+/// sub-size start at `-1`, and at most 10,000 numbers are tried
+/// ([`UploadError::NoUniqueName`] after that). The names are claimed with
+/// [`Storage::put_new_first`]: the bytes are written once, a taken name is
+/// never replaced, and a concurrent upload of the same name takes the next
+/// number instead of overwriting.
 pub fn store(
     storage: &dyn Storage,
     upload: &ValidatedUpload<'_>,
@@ -682,18 +707,19 @@ pub fn store(
         .file_name
         .rsplit_once('.')
         .unwrap_or((upload.file_name.as_str(), upload.extension.as_str()));
-    let mut number: u32 = u32::from(looks_like_sub_size(stem));
-    while number <= MAX_UNIQUE_ATTEMPTS {
-        let path = if number == 0 {
+    let first = u32::from(looks_like_sub_size(stem));
+    let mut paths = (first..=MAX_UNIQUE_ATTEMPTS).map(|number| {
+        if number == 0 {
             format!("{folder}/{stem}.{extension}")
         } else {
             format!("{folder}/{stem}-{number}.{extension}")
-        };
-        match storage.put_new(&path, upload.bytes) {
-            Ok(()) => return Ok(path),
-            Err(StorageError::AlreadyExists(_)) => number += 1,
-            Err(err) => return Err(err.into()),
         }
+    });
+    match storage.put_new_first(&mut paths, upload.bytes) {
+        Ok(path) => Ok(path),
+        Err(StorageError::AlreadyExists(_)) => {
+            Err(UploadError::NoUniqueName(upload.file_name.clone()))
+        }
+        Err(err) => Err(err.into()),
     }
-    Err(UploadError::NoUniqueName(upload.file_name.clone()))
 }
