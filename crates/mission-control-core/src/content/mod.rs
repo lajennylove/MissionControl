@@ -1,5 +1,6 @@
-//! The content model: posts of every type, after WordPress's `wp_posts`, and the terms of their
-//! taxonomies, after `wp_terms`, `wp_term_taxonomy` and `wp_term_relationships`.
+//! The content model: posts of every type, after WordPress's `wp_posts`, their revisions and
+//! autosaves, and the terms of their taxonomies, after `wp_terms`, `wp_term_taxonomy` and
+//! `wp_term_relationships`.
 //!
 //! ```ignore
 //! use mission_control_core::content::{NewPost, NewTerm, Post, PostStatus, Taxonomy, Term};
@@ -20,6 +21,7 @@
 mod future;
 mod meta;
 mod post;
+mod revision;
 mod taxonomy;
 
 pub use future::{
@@ -32,4 +34,7 @@ pub use meta::{
     set_post_meta_raw, set_term_meta, set_term_meta_raw, set_user_meta, set_user_meta_raw,
 };
 pub use post::{NewPost, Post, PostStatus, UnknownPostStatus};
+pub use revision::{
+    Revision, SaveError, create_post_autosave, get_post_autosave, get_post_revisions, save_revision,
+};
 pub use taxonomy::{MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermError, update_term_counts};

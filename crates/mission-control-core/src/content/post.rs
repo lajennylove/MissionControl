@@ -230,7 +230,7 @@ impl Post {
     }
 
     /// Every column but the id, with its value, for insert and update.
-    fn columns(&self) -> [(&'static str, Value); 12] {
+    pub(super) fn columns(&self) -> [(&'static str, Value); 12] {
         [
             ("author_id", self.author_id.into()),
             ("post_type", self.post_type.clone().into()),
@@ -263,7 +263,7 @@ async fn write(
 
 /// The current time in UTC, to the second: what MySQL's `DATETIME` and PostgreSQL's
 /// `TIMESTAMP(0)` store, so the value read back equals the one written.
-fn now() -> NaiveDateTime {
+pub(super) fn now() -> NaiveDateTime {
     Utc::now().naive_utc().trunc_subsecs(0)
 }
 
