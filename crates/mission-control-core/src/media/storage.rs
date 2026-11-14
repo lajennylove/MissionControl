@@ -38,6 +38,8 @@ pub enum StorageError {
     InvalidPath(String),
     /// No file exists at the path.
     NotFound(String),
+    /// A file already exists at the path ([`Storage::put_new`] only).
+    AlreadyExists(String),
     /// The underlying disk (or network) call failed.
     Io(io::Error),
 }
@@ -47,6 +49,7 @@ impl fmt::Display for StorageError {
         match self {
             StorageError::InvalidPath(path) => write!(f, "invalid storage path {path:?}"),
             StorageError::NotFound(path) => write!(f, "no file at {path:?}"),
+            StorageError::AlreadyExists(path) => write!(f, "a file already exists at {path:?}"),
             StorageError::Io(err) => write!(f, "storage I/O error: {err}"),
         }
     }
@@ -76,8 +79,14 @@ pub trait Storage: Send + Sync {
     /// Writes `bytes` at `path`, replacing any file already there. Parent
     /// folders are created. The write is atomic: readers see the old file or
     /// the whole new one, never half a file. Callers that must not overwrite
-    /// check [`Storage::exists`] first.
+    /// use [`Storage::put_new`].
     fn put(&self, path: &str, bytes: &[u8]) -> StorageResult<()>;
+
+    /// Writes `bytes` at `path` only when no file is there yet, or fails with
+    /// [`StorageError::AlreadyExists`]. The check and the write are one step,
+    /// so two writers racing for one name never overwrite each other. Parent
+    /// folders are created, and readers never see half a file.
+    fn put_new(&self, path: &str, bytes: &[u8]) -> StorageResult<()>;
 
     /// Reads the file at `path`, or [`StorageError::NotFound`].
     fn get(&self, path: &str) -> StorageResult<Vec<u8>>;
@@ -172,8 +181,9 @@ impl LocalStorage {
 /// Distinguishes temp files of concurrent writers in one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-impl Storage for LocalStorage {
-    fn put(&self, path: &str, bytes: &[u8]) -> StorageResult<()> {
+impl LocalStorage {
+    /// Checks `path`, creates its folders, and returns the target path.
+    fn prepare_write(&self, path: &str) -> StorageResult<PathBuf> {
         let target = self.join(path)?;
         let parent = target
             .parent()
@@ -183,27 +193,67 @@ impl Storage for LocalStorage {
         self.check_inside(path, &target)?;
         fs::create_dir_all(parent)?;
         self.check_inside(path, &target)?;
+        Ok(target)
+    }
 
-        let name = target.file_name().unwrap_or_default().to_string_lossy();
-        let temp = parent.join(format!(
-            ".{name}.{}.{}.tmp",
-            std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = (|| {
-            let mut file = fs::OpenOptions::new()
+    /// Writes `bytes` to a new temp file beside `target` and syncs it. The
+    /// temp name is a short fixed prefix plus the process id and a counter,
+    /// not the target name, so targets near the 255-byte name limit work.
+    /// It starts with a dot, which sanitised upload names never do.
+    fn write_temp(target: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        let parent = target.parent().unwrap_or(Path::new("."));
+        loop {
+            let temp = parent.join(format!(
+                ".mc-tmp.{}.{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut file = match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&temp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temp, &target)
-        })();
-        if let Err(err) = written {
+                .open(&temp)
+            {
+                Ok(file) => file,
+                // Left by an earlier process with the same id: try the next.
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            };
+            let written = file.write_all(bytes).and_then(|()| file.sync_all());
+            if let Err(err) = written {
+                let _ = fs::remove_file(&temp);
+                return Err(err);
+            }
+            return Ok(temp);
+        }
+    }
+}
+
+impl Storage for LocalStorage {
+    fn put(&self, path: &str, bytes: &[u8]) -> StorageResult<()> {
+        let target = self.prepare_write(path)?;
+        let temp = Self::write_temp(&target, bytes)?;
+        if let Err(err) = fs::rename(&temp, &target) {
             let _ = fs::remove_file(&temp);
             return Err(err.into());
         }
         Ok(())
+    }
+
+    fn put_new(&self, path: &str, bytes: &[u8]) -> StorageResult<()> {
+        let target = self.prepare_write(path)?;
+        let temp = Self::write_temp(&target, bytes)?;
+        // `hard_link` never replaces: it fails when anything (a file, a
+        // folder, a symlink) is already at the target. It is in `std` on
+        // Unix and Windows (NTFS).
+        let linked = fs::hard_link(&temp, &target);
+        let _ = fs::remove_file(&temp);
+        match linked {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                Err(StorageError::AlreadyExists(path.to_string()))
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     fn get(&self, path: &str) -> StorageResult<Vec<u8>> {
@@ -228,6 +278,18 @@ impl Storage for LocalStorage {
 
     fn exists(&self, path: &str) -> StorageResult<bool> {
         let target = self.resolve_existing(path)?;
-        Ok(target.is_file())
+        match fs::metadata(&target) {
+            Ok(meta) => Ok(meta.is_file()),
+            // Nothing there, or a file where a folder was expected.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 }

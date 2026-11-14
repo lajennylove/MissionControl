@@ -1,4 +1,4 @@
-//! Local-disk storage: round trips, path safety, atomic writes.
+//! Local-disk storage: round trips, path safety, atomic and create-only writes.
 
 use std::fs;
 use std::path::PathBuf;
@@ -189,4 +189,53 @@ fn storage_is_object_safe_and_shareable() {
     let boxed: std::sync::Arc<dyn Storage> = std::sync::Arc::new(s);
     boxed.put("x.txt", b"x").unwrap();
     assert_eq!(boxed.get("x.txt").unwrap(), b"x");
+}
+
+#[test]
+fn put_new_refuses_an_existing_file() {
+    let (_t, s) = setup("put-new");
+    s.put_new("a/b.txt", b"one").unwrap();
+    assert!(matches!(
+        s.put_new("a/b.txt", b"two"),
+        Err(StorageError::AlreadyExists(_))
+    ));
+    assert_eq!(s.get("a/b.txt").unwrap(), b"one");
+    // No temp file is left behind.
+    let names: Vec<String> = fs::read_dir(s.root().join("a"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["b.txt"]);
+    assert!(matches!(
+        s.put_new("../x.txt", b"x"),
+        Err(StorageError::InvalidPath(_))
+    ));
+}
+
+#[test]
+fn names_near_the_file_system_limit_can_be_written() {
+    let (_t, s) = setup("long");
+    let name = format!("{}.txt", "a".repeat(250));
+    s.put(&name, b"x").unwrap();
+    s.put(&name, b"y").unwrap();
+    assert_eq!(s.get(&name).unwrap(), b"y");
+    let other = format!("{}.txt", "b".repeat(250));
+    s.put_new(&other, b"z").unwrap();
+    assert_eq!(s.get(&other).unwrap(), b"z");
+}
+
+#[cfg(unix)]
+#[test]
+fn exists_reports_io_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_t, s) = setup("exists-err");
+    s.put("locked/a.txt", b"a").unwrap();
+    let locked = s.root().join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = s.exists("locked/a.txt");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(result, Err(StorageError::Io(_))), "{result:?}");
+    assert!(!s.exists("missing.txt").unwrap());
+    assert!(!s.exists("locked/a.txt/below").unwrap());
 }
