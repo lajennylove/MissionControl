@@ -19,7 +19,7 @@ pub(crate) type Json = (Status, (ContentType, String));
 /// The REST routes, at `rank`: before the public site's catch-all, after every route with a
 /// path of its own (those rank below zero).
 pub(crate) fn routes(rank: isize) -> Vec<Route> {
-    let mut routes = rocket::routes![wp_json, rest_route, auth::refused];
+    let mut routes = rocket::routes![wp_json, rest_route];
     for route in &mut routes {
         route.rank = rank;
     }

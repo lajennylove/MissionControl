@@ -66,6 +66,13 @@ fn open() -> &'static str {
     "ran"
 }
 
+/// A site route that answers any two-segment path, at Rocket's default rank: it must not answer
+/// a request the central check refused.
+#[rocket::get("/<a>/<b>")]
+fn any_two_segments(a: &str, b: &str) -> String {
+    format!("caught by the site: {a}/{b}")
+}
+
 /// Non-REST routes that fail, to compare their answers with Rocket's own.
 #[rocket::get("/test-status/<code>")]
 fn failing(code: u16) -> Status {
@@ -170,8 +177,10 @@ async fn site_with(
         database: Some(test.shared()),
         user_roles,
     };
-    let rocket = rocket_with_options(config(environment, trusted_proxies), options)
-        .mount("/", rocket::routes![whoami, me, open, failing]);
+    let rocket = rocket_with_options(config(environment, trusted_proxies), options).mount(
+        "/",
+        rocket::routes![whoami, me, open, failing, any_two_segments],
+    );
     let client = Client::tracked(rocket).await.expect("the app ignites");
     Site {
         _test: test,
@@ -635,4 +644,41 @@ async fn errors_outside_the_rest_api_keep_rockets_answers() {
         response.headers().get_one("Content-Type"),
         Some("application/json; charset=UTF-8")
     );
+}
+
+#[rocket::async_test]
+async fn a_refused_request_is_not_caught_by_a_site_route() {
+    let site = local_site().await;
+    for uri in ["/wp-json/no/such/route", "/wp-json/test/v1/whoami"] {
+        let response = site
+            .client
+            .get(uri)
+            .header(basic(&site.email, "wrong"))
+            .dispatch()
+            .await;
+        assert_error(
+            response,
+            Status::Unauthorized,
+            "incorrect_password",
+            INCORRECT_PASSWORD,
+        )
+        .await;
+    }
+}
+
+#[rocket::async_test]
+async fn a_refused_head_request_gets_401_and_no_body() {
+    let site = local_site().await;
+    let response = site
+        .client
+        .head("/wp-json/")
+        .header(basic(&site.email, "wrong"))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+    assert_eq!(
+        response.headers().get_one("Content-Type"),
+        Some("application/json; charset=UTF-8")
+    );
+    assert_eq!(response.into_string().await.unwrap_or_default(), "");
 }

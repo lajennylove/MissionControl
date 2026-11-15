@@ -146,7 +146,10 @@ impl Fairing for RestAuthFairing {
             return;
         };
         let _ = request.local_cache(PendingError::default).0.set(error);
-        request.set_method(Method::Get);
+        // HEAD stays HEAD: Rocket answers it with the GET route and drops the body.
+        if request.method() != Method::Head {
+            request.set_method(Method::Get);
+        }
         request.set_uri(Origin::parse(AUTH_ERROR_PATH).expect("a valid path"));
     }
 }
@@ -164,6 +167,16 @@ impl<'r> FromRequest<'r> for RefusedRequest {
             None => Outcome::Forward(Status::NotFound),
         }
     }
+}
+
+/// The route that answers a request the fairing refused, at the lowest rank Rocket has, so no
+/// other route, however general (`/<a>/<b>`, `/<path..>`), answers it first.
+pub(crate) fn refused_routes() -> Vec<rocket::Route> {
+    let mut routes = rocket::routes![refused];
+    for route in &mut routes {
+        route.rank = isize::MIN;
+    }
+    routes
 }
 
 /// Answers a request the fairing refused with its error.
