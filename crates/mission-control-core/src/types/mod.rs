@@ -2,9 +2,12 @@
 //!
 //! [`definition`] holds the one definition format the admin's manager screens, Rust code and
 //! plugins all produce (design 5.3). [`registry`] holds the definitions in use: those made in
-//! code and by plugins in memory, the admin's in the database.
+//! code and by plugins in memory, the admin's in the database. [`code`] builds definitions in
+//! Rust, as Poet and ACF Composer do, and [`get_field`] reads a field's value, typed.
 
+pub mod code;
 pub mod definition;
+pub mod field_value;
 pub mod location;
 pub mod registry;
 
@@ -16,5 +19,6 @@ pub use definition::{
     PostTypeDef, PostTypeLabels, Rewrite, RewriteRules, ShowInMenu, Support, TaxonomyCapabilities,
     TaxonomyDef, TaxonomyLabels,
 };
+pub use field_value::{FieldError, FieldOwner, get_field};
 pub use location::{Rule, ScreenContext, matches};
 pub use registry::{Definition, DefinitionKind, Registry, RegistryError};

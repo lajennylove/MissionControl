@@ -220,6 +220,23 @@ pub enum DefinitionError {
     /// The definition was made in code or by a plugin, so it cannot be changed or deleted
     /// from the admin.
     Locked(Origin),
+    /// A key a [code builder](super::code) made from the names is used twice (names with `_`
+    /// can make the same key) or passes [`MAX_KEY_LEN`]. Setting the key with `.key()` fixes
+    /// it.
+    GeneratedKey {
+        /// The key made.
+        key: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
+    /// An option set with a [code builder](super::code) on a field whose type does not take
+    /// it, such as `choices` on a text field.
+    MisplacedOption {
+        /// The field's key.
+        key: String,
+        /// The option, such as `choices` or `step`.
+        option: &'static str,
+    },
 }
 
 impl fmt::Display for DefinitionError {
@@ -282,6 +299,13 @@ impl fmt::Display for DefinitionError {
                     _ => "code".to_owned(),
                 }
             ),
+            Self::GeneratedKey { key, reason } => write!(
+                f,
+                "the key `{key}`, made from the names, {reason}: set the key with `.key()`"
+            ),
+            Self::MisplacedOption { key, option } => {
+                write!(f, "the field `{key}` does not take the option `{option}`")
+            }
         }
     }
 }
@@ -600,6 +624,63 @@ string_enum! {
 
 // ---------------------------------------------------------------------------------------------
 // Lenient values, as WordPress and ACF export them
+
+/// A field's `default_value` as the value its kind stores, for `get_field`: as ACF exports a
+/// default, a `true_false`'s may be `0`/`1` or `"0"`/`"1"` and a number's a numeric string.
+/// `None` for no default: `null`, an empty string (ACF's empty default), and `false` for a
+/// select or radio (ACF's "no choice"), and an empty list for a select or radio (ACF 5 exports
+/// `"default_value": []`).
+///
+/// - `true_false`: read with [`php_bool`]'s rules, a boolean.
+/// - `number`: a numeric string is a number, whole when it reads as one.
+/// - `number` with a step (decimal): a numeric string is a number with a fraction (`f64`).
+/// - `select` or `radio`: a one-item list is that item unless the field's `multiple` setting is
+///   true, as ACF's select formatting unwraps it.
+///
+/// Any other value is kept as written, so a default that does not fit the type asked for is
+/// still a type error.
+fn typed_default_value(
+    kind: &FieldKindDef,
+    value: &Value,
+    settings: &Map<String, Value>,
+) -> Option<Value> {
+    let float = |s: &str| {
+        s.trim()
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+    };
+    match (kind, value) {
+        (_, Value::Null) => None,
+        (_, Value::String(s)) if s.is_empty() => None,
+        (FieldKindDef::Checkbox, v) => Some(php_bool(v).map_or_else(|| v.clone(), Value::Bool)),
+        (FieldKindDef::Number, Value::String(s)) => Some(
+            s.trim()
+                .parse::<i64>()
+                .map(Value::from)
+                .ok()
+                .or_else(|| float(s))
+                .unwrap_or_else(|| value.clone()),
+        ),
+        (FieldKindDef::Decimal(_), Value::String(s)) => {
+            Some(float(s).unwrap_or_else(|| value.clone()))
+        }
+        (FieldKindDef::Select(_) | FieldKindDef::Radio(_), Value::Bool(false)) => None,
+        (FieldKindDef::Select(_) | FieldKindDef::Radio(_), Value::Array(items))
+            if items.is_empty() =>
+        {
+            None
+        }
+        (FieldKindDef::Select(_) | FieldKindDef::Radio(_), Value::Array(items))
+            if items.len() == 1
+                && !settings.get("multiple").and_then(php_bool).unwrap_or(false) =>
+        {
+            typed_default_value(kind, &items[0], settings)
+        }
+        (_, v) => Some(v.clone()),
+    }
+}
 
 /// A PHP scalar read as a boolean, as PHP's truthiness reads it: `true`/`false`, a number
 /// (0 is false), and the strings `"1"`, `"true"`, `"0"`, `"false"` and `""` (false). `None`
@@ -2193,6 +2274,12 @@ impl FieldDef {
         }
         self.layouts = layouts;
         self
+    }
+
+    /// The default value as the field's kind stores it, or `None` without one: see
+    /// [`get_field`](super::get_field), which gives it for a post with no value.
+    pub fn typed_default(&self) -> Option<Value> {
+        typed_default_value(&self.kind, &self.default_value, &self.settings)
     }
 
     /// The field as Ignite's forms take it.
