@@ -13,6 +13,8 @@ mission-control-core = { path = "../mission-control-core" }
 rocket = "0.5.2"
 
 [dev-dependencies]
+# Encodes HTTP Basic credentials in the REST authentication tests.
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 mission-control-testing = { path = "../mission-control-testing" }
 orbit-orm.workspace = true

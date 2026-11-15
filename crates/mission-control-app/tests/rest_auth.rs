@@ -1,0 +1,448 @@
+//! REST authentication (Task 10.5): application passwords by HTTP Basic auth, as WordPress's
+//! `wp_validate_application_password` and `rest_application_password_check_errors`, and the
+//! request guards for the current REST user.
+//!
+//! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
+//! The plain passwords are secrets even in tests: assertions never print them.
+
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use mission_control::{AppOptions, RestAuth, RestUser, rocket_with_options};
+use mission_control_core::config::{Config, Environment, TrustedProxies};
+use mission_control_core::migrations::migrator;
+use mission_control_core::rest::auth::AuthMethod;
+use mission_control_core::users::app_password::{self, PlainPassword};
+use mission_control_core::users::{EDITOR, InMemoryUserRoles, RoleAssignment, UserRoles, has_cap};
+use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
+use orbit_orm::{Database, raw};
+use rocket::http::{Header, Status};
+use rocket::local::asynchronous::{Client, LocalResponse};
+use serde_json::{Value, json};
+
+/// A route that answers for anyone, with the current user's id and roles (0 and none for a
+/// visitor).
+#[rocket::get("/wp-json/test/v1/whoami")]
+fn whoami(auth: RestAuth) -> String {
+    let caps = auth.caps();
+    json!({
+        "id": caps.id(),
+        "roles": caps.roles(),
+        "edit_others_posts": has_cap(&caps, "edit_others_posts"),
+    })
+    .to_string()
+}
+
+/// A route that needs a signed-in user.
+#[rocket::get("/wp-json/test/v1/me")]
+fn me(user: RestUser) -> String {
+    assert!(matches!(
+        user.method(),
+        AuthMethod::ApplicationPassword { .. }
+    ));
+    json!({
+        "id": user.caps().id(),
+        "roles": user.caps().roles(),
+        "app_password": user.app_password_uuid(),
+    })
+    .to_string()
+}
+
+/// One test site: its database, a user with an application password, and a client.
+struct Site {
+    _test: TestDatabase,
+    client: Client,
+    user_id: i64,
+    email: String,
+    password: PlainPassword,
+    uuid: String,
+}
+
+fn config(environment: Environment, trusted_proxies: TrustedProxies) -> Config {
+    Config {
+        database_url: "unused: the database is passed in".to_owned(),
+        secret_key: "unused".to_owned(),
+        debug: false,
+        upload_max_bytes: 1024,
+        themes_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../themes")
+            .to_path_buf(),
+        environment,
+        trusted_proxies,
+    }
+}
+
+/// Inserts a user and returns its id and email.
+async fn new_user(db: &Database, name: &str) -> (i64, String) {
+    let email = unique_email(name);
+    raw::execute(
+        db,
+        "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+        &[name.into(), email.clone().into(), "hash".into()],
+    )
+    .await
+    .expect("inserts the user");
+    let id = raw::fetch_scalar(
+        db,
+        "SELECT id FROM users WHERE email = ?",
+        &[email.clone().into()],
+    )
+    .await
+    .expect("reads the user id");
+    (id, email)
+}
+
+/// A site in `environment`, whose user is an editor when `roles` says so.
+async fn site_with(
+    environment: Environment,
+    trusted_proxies: TrustedProxies,
+    with_roles: bool,
+) -> Site {
+    let test = database().await;
+    let db = test.db();
+    create_users_table(db).await;
+    migrator()
+        .unwrap()
+        .run(db)
+        .await
+        .expect("runs the migrations");
+    let (user_id, email) = new_user(db, "ann").await;
+    let (password, item) = app_password::create(db, user_id, "Laptop", None)
+        .await
+        .expect("creates the application password");
+    let user_roles: Option<Arc<dyn UserRoles>> = with_roles.then(|| {
+        let roles = InMemoryUserRoles::new();
+        roles.assign(user_id, RoleAssignment::new([EDITOR], BTreeMap::new()));
+        Arc::new(roles) as Arc<dyn UserRoles>
+    });
+    let options = AppOptions {
+        database: Some(test.shared()),
+        user_roles,
+    };
+    let rocket = rocket_with_options(config(environment, trusted_proxies), options)
+        .mount("/", rocket::routes![whoami, me]);
+    let client = Client::tracked(rocket).await.expect("the app ignites");
+    Site {
+        _test: test,
+        client,
+        user_id,
+        email,
+        password,
+        uuid: item.uuid,
+    }
+}
+
+async fn local_site() -> Site {
+    site_with(Environment::Local, TrustedProxies::None, true).await
+}
+
+/// The `Authorization` header for `user:password`.
+fn basic(user: &str, password: &str) -> Header<'static> {
+    Header::new(
+        "Authorization",
+        format!("Basic {}", STANDARD.encode(format!("{user}:{password}"))),
+    )
+}
+
+async fn body(response: LocalResponse<'_>) -> (Status, Value) {
+    let status = response.status();
+    let text = response.into_string().await.unwrap_or_default();
+    let json = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{status}: {e}: {text}"));
+    (status, json)
+}
+
+/// Asserts that `response` is WordPress's REST error `code` with `status`, and no
+/// `WWW-Authenticate` header (WordPress sends none for application passwords).
+async fn assert_error(response: LocalResponse<'_>, status: Status, code: &str, message: &str) {
+    assert_eq!(
+        response.headers().get_one("Content-Type"),
+        Some("application/json; charset=UTF-8")
+    );
+    assert_eq!(response.headers().get_one("WWW-Authenticate"), None);
+    let (got, json) = body(response).await;
+    assert_eq!(got, status);
+    assert_eq!(
+        json,
+        json!({"code": code, "message": message, "data": {"status": status.code}})
+    );
+}
+
+const INCORRECT_PASSWORD: &str = "The provided password is an invalid application password.";
+
+#[rocket::async_test]
+async fn a_valid_application_password_signs_the_user_in_with_the_providers_roles() {
+    let site = local_site().await;
+    // The grouped form WordPress shows works too.
+    let response = site
+        .client
+        .get("/wp-json/test/v1/me")
+        .header(basic(&site.email, &site.password.chunked()))
+        .dispatch()
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        json,
+        json!({"id": site.user_id, "roles": ["editor"], "app_password": site.uuid})
+    );
+
+    let response = site
+        .client
+        .get("/wp-json/test/v1/whoami")
+        .header(basic(&site.email, site.password.as_str()))
+        .dispatch()
+        .await;
+    let (_, json) = body(response).await;
+    assert_eq!(json["id"], site.user_id);
+    assert_eq!(json["edit_others_posts"], true);
+
+    // Usage is recorded, as WordPress's `record_application_password_usage`.
+    let item = app_password::find(site._test.db(), site.user_id, &site.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(item.last_used_at.is_some());
+}
+
+#[rocket::async_test]
+async fn with_no_provider_a_signed_in_user_has_no_role() {
+    let site = site_with(Environment::Local, TrustedProxies::None, false).await;
+    let response = site
+        .client
+        .get("/wp-json/test/v1/whoami")
+        .header(basic(&site.email, site.password.as_str()))
+        .dispatch()
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        json,
+        json!({"id": site.user_id, "roles": [], "edit_others_posts": false})
+    );
+}
+
+#[rocket::async_test]
+async fn a_wrong_password_is_refused_with_wordpresss_error_on_every_rest_route() {
+    let site = local_site().await;
+    for uri in [
+        "/wp-json/test/v1/me",
+        "/wp-json/test/v1/whoami",
+        "/wp-json/",
+        "/wp-json/wp/v2",
+        "/?rest_route=/",
+    ] {
+        let response = site
+            .client
+            .get(uri)
+            .header(basic(&site.email, "abcd efgh ijkl mnop qrst uvwx"))
+            .dispatch()
+            .await;
+        assert_error(
+            response,
+            Status::Unauthorized,
+            "incorrect_password",
+            INCORRECT_PASSWORD,
+        )
+        .await;
+    }
+}
+
+#[rocket::async_test]
+async fn a_revoked_password_is_refused() {
+    let site = local_site().await;
+    assert!(
+        app_password::revoke(site._test.db(), site.user_id, &site.uuid)
+            .await
+            .unwrap()
+    );
+    let response = site
+        .client
+        .get("/wp-json/test/v1/whoami")
+        .header(basic(&site.email, site.password.as_str()))
+        .dispatch()
+        .await;
+    assert_error(
+        response,
+        Status::Unauthorized,
+        "incorrect_password",
+        INCORRECT_PASSWORD,
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn an_unknown_user_is_refused_with_wordpresss_codes() {
+    let site = local_site().await;
+    let response = site
+        .client
+        .get("/wp-json/")
+        .header(basic(&unique_email("nobody"), site.password.as_str()))
+        .dispatch()
+        .await;
+    assert_error(
+        response,
+        Status::Unauthorized,
+        "invalid_email",
+        "<strong>Error:</strong> Unknown email address. Check again or try your username.",
+    )
+    .await;
+
+    let response = site
+        .client
+        .get("/wp-json/")
+        .header(basic("nobody", site.password.as_str()))
+        .dispatch()
+        .await;
+    assert_error(
+        response,
+        Status::Unauthorized,
+        "invalid_username",
+        "<strong>Error:</strong> Unknown username. Check again or try your email address.",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn a_request_without_credentials_is_anonymous() {
+    let site = local_site().await;
+    let (status, json) = body(site.client.get("/wp-json/test/v1/whoami").dispatch().await).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        json,
+        json!({"id": 0, "roles": [], "edit_others_posts": false})
+    );
+
+    // Credentials that are not Basic (a bearer token for another plugin) are not application
+    // passwords: the request is anonymous, as in WordPress.
+    let (status, json) = body(
+        site.client
+            .get("/wp-json/test/v1/whoami")
+            .header(Header::new("Authorization", "Bearer abc"))
+            .dispatch()
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json["id"], 0);
+
+    let (status, _) = body(site.client.get("/wp-json/").dispatch().await).await;
+    assert_eq!(status, Status::Ok);
+}
+
+#[rocket::async_test]
+async fn a_route_that_needs_a_user_refuses_a_visitor() {
+    let site = local_site().await;
+    let response = site.client.get("/wp-json/test/v1/me").dispatch().await;
+    assert_error(
+        response,
+        Status::Unauthorized,
+        "rest_not_logged_in",
+        "You are not currently logged in.",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn an_oversized_authorization_header_is_not_tried() {
+    let site = local_site().await;
+    let name = "a".repeat(4096);
+    let response = site
+        .client
+        .get("/wp-json/test/v1/whoami")
+        .header(basic(&name, site.password.as_str()))
+        .dispatch()
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json["id"], 0);
+}
+
+#[rocket::async_test]
+async fn over_plain_http_outside_a_local_environment_the_credentials_are_ignored() {
+    // WordPress's `wp_validate_application_password` skips application passwords when
+    // `wp_is_application_passwords_available` is false (no HTTPS, not `local`): the request is
+    // anonymous, even with the right password.
+    for environment in [
+        Environment::Development,
+        Environment::Staging,
+        Environment::Production,
+    ] {
+        let site = site_with(environment, TrustedProxies::None, true).await;
+        let response = site
+            .client
+            .get("/wp-json/test/v1/me")
+            .header(basic(&site.email, site.password.as_str()))
+            .dispatch()
+            .await;
+        assert_error(
+            response,
+            Status::Unauthorized,
+            "rest_not_logged_in",
+            "You are not currently logged in.",
+        )
+        .await;
+        // A wrong password is not even checked.
+        let response = site
+            .client
+            .get("/wp-json/")
+            .header(basic(&site.email, "wrong"))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+    }
+}
+
+#[rocket::async_test]
+async fn https_is_believed_only_from_a_trusted_proxy() {
+    let proxy: SocketAddr = "10.0.0.5:4000".parse().unwrap();
+    let site = site_with(
+        Environment::Production,
+        TrustedProxies::Addresses(vec![proxy.ip()]),
+        true,
+    )
+    .await;
+    let response = site
+        .client
+        .get("/wp-json/test/v1/me")
+        .remote(proxy)
+        .header(Header::new("X-Forwarded-Proto", "https"))
+        .header(basic(&site.email, site.password.as_str()))
+        .dispatch()
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json["id"], site.user_id);
+
+    // The same header from a peer that is not the proxy is not believed.
+    let response = site
+        .client
+        .get("/wp-json/test/v1/me")
+        .remote("10.0.0.6:4000".parse().unwrap())
+        .header(Header::new("X-Forwarded-Proto", "https"))
+        .header(basic(&site.email, site.password.as_str()))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+
+    // Nor a proxy saying the client came over plain HTTP somewhere along the way.
+    let response = site
+        .client
+        .get("/wp-json/test/v1/me")
+        .remote(proxy)
+        .header(Header::new("X-Forwarded-Proto", "https, http"))
+        .header(basic(&site.email, site.password.as_str()))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+}
+
+#[rocket::async_test]
+async fn the_index_lists_no_authentication_until_the_authorize_screen_exists() {
+    let site = local_site().await;
+    let (_, index) = body(site.client.get("/wp-json/").dispatch().await).await;
+    assert_eq!(index["authentication"], json!({}));
+}

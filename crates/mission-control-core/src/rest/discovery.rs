@@ -4,8 +4,10 @@
 //! Both are plain JSON values built from the options and a [`RestRoutes`] registry.
 //!
 //! The differences from WordPress, on purpose: `namespaces` lists only the namespaces that
-//! exist (WordPress also lists `oembed/1.0`), `authentication` is empty until application
-//! passwords are served, `site_icon_url` is empty until the media library can resolve an
+//! exist (WordPress also lists `oembed/1.0`), `authentication` is empty until the authorize
+//! screen exists (WordPress's `rest_add_application_passwords_to_index` lists
+//! `application-passwords` with its `authorize-application.php` address; Mission Control serves
+//! application passwords but has no such screen yet), `site_icon_url` is empty until the media library can resolve an
 //! attachment's URL, and links always use `/wp-json/` (WordPress falls back to `?rest_route=`
 //! when permalinks are plain).
 
@@ -67,7 +69,9 @@ pub async fn index(db: &Database, routes: &RestRoutes) -> Result<Value, MetaErro
         }),
     );
     put("namespaces", json!(routes.namespaces()));
-    // Filled by the application passwords route (Task 10.5).
+    // WordPress adds `{"application-passwords": {"endpoints": {"authorization": ...}}}` when
+    // application passwords are available. Its address is the authorize-application screen, which
+    // Mission Control does not have yet, so nothing is listed.
     put("authentication", json!({}));
     put("routes", routes_document(&home, &routes.routes()));
     put("site_logo", json!(integer(db, "site_logo").await?));

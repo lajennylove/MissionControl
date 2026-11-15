@@ -1,9 +1,11 @@
-//! The REST API: the route registry and the discovery documents, in WordPress's shape.
+//! The REST API: the route registry, the discovery documents and authentication, in WordPress's
+//! shape.
 //!
 //! [`RestRoutes`] lists every route the API serves. Each route group (posts, users, a plugin's
 //! namespace) registers its routes on it, and [`discovery`] builds `GET /wp-json/` and each
-//! namespace index from it, so discovery never changes when a route is added. The core types
-//! here hold no Rocket types: the `mission-control` crate mounts them.
+//! namespace index from it, so discovery never changes when a route is added. [`auth`] decides
+//! who a request runs as, and [`RestError`] is WordPress's error body. The core types here hold
+//! no Rocket types: the `mission-control` crate mounts them.
 //!
 //! ```
 //! use mission_control_core::rest::{Endpoint, RestRoutes, RouteSpec};
@@ -17,15 +19,72 @@
 //! assert_eq!(routes.namespaces(), ["acme/v1", "wp/v2"]);
 //! ```
 
+pub mod auth;
 pub mod discovery;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 /// The namespace of WordPress's own routes. It is always listed, as `oembed/1.0` is not.
 pub const CORE_NAMESPACE: &str = "wp/v2";
+
+/// An error a REST request ends with, as WordPress's `WP_Error` once `WP_REST_Server` turns it
+/// into a response: `{"code": ..., "message": ..., "data": {"status": ...}}` with that status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestError {
+    /// WordPress's error code, such as `rest_no_route` or `incorrect_password`.
+    pub code: Cow<'static, str>,
+    /// The message for people, as WordPress words it.
+    pub message: Cow<'static, str>,
+    /// The HTTP status, such as 401.
+    pub status: u16,
+}
+
+impl RestError {
+    /// The error `code` with `message` and HTTP `status`.
+    pub fn new(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+        status: u16,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            status,
+        }
+    }
+
+    /// WordPress's answer when the site itself fails, such as a database error: status 500. The
+    /// cause is logged, never sent.
+    pub fn internal() -> Self {
+        Self::new(
+            "internal_server_error",
+            "The site is experiencing technical difficulties.",
+            500,
+        )
+    }
+
+    /// The JSON body: `code`, `message` and `data.status`.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "code": self.code,
+            "message": self.message,
+            "data": {"status": self.status},
+        })
+    }
+}
+
+impl fmt::Display for RestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({}): {}", self.code, self.status, self.message)
+    }
+}
+
+impl std::error::Error for RestError {}
 
 /// One way to call a route: the HTTP methods it takes and its arguments, as WordPress's
 /// `register_rest_route` endpoint (`methods` and `args`).

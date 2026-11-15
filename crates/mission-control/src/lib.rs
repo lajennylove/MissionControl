@@ -23,11 +23,15 @@
 //! (`Arc<Frontend>`). The scheduler's loop starts
 //! at liftoff, once the server listens, and runs due events every minute.
 //!
-//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`. Not mounted yet: the admin
-//! (Ignite).
+//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`. REST clients sign in with
+//! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
+//! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
+//! role). Not mounted yet: the admin (Ignite).
 
 mod front;
 mod rest;
+
+pub use rest::auth::{RestAuth, RestUser};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +42,7 @@ use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
 use mission_control_core::rest::RestRoutes;
 use mission_control_core::scheduler::Scheduler;
+use mission_control_core::users::{NoUserRoles, UserRoles};
 use orbit_orm::Database;
 use rocket::fairing::AdHoc;
 use rocket::fs::{FileServer, Options};
@@ -58,19 +63,43 @@ const REST_RANK: isize = 5;
 /// answers with the theme's 404.
 const ASSET_RANK: isize = 10;
 
+/// What a site's own binary, or a test, can give the app besides its configuration.
+#[derive(Default, Clone)]
+pub struct AppOptions {
+    /// A database the caller has opened already, such as a test database. `None` opens the one
+    /// at `config.database_url`.
+    pub database: Option<Arc<Database>>,
+    /// Where signed-in users' roles come from. `None` gives every user no role
+    /// ([`NoUserRoles`]), so a signed-in user can do nothing a visitor cannot, until Ignite's
+    /// roles provide them (Task 8.2b).
+    pub user_roles: Option<Arc<dyn UserRoles>>,
+}
+
 /// The Mission Control app for `config`. The database at `config.database_url` is opened at
 /// ignition; ignition fails when it cannot be reached or no theme can be loaded.
 pub fn rocket(config: Config) -> Rocket<Build> {
-    build(config, None)
+    rocket_with_options(config, AppOptions::default())
 }
 
 /// The Mission Control app on a database the caller has opened already, such as a test
 /// database. `config.database_url` is not read.
 pub fn rocket_with_database(config: Config, db: Arc<Database>) -> Rocket<Build> {
-    build(config, Some(db))
+    rocket_with_options(
+        config,
+        AppOptions {
+            database: Some(db),
+            ..AppOptions::default()
+        },
+    )
 }
 
-fn build(config: Config, db: Option<Arc<Database>>) -> Rocket<Build> {
+/// The Mission Control app for `config` with `options`: a database opened already, a provider
+/// of users' roles.
+pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build> {
+    let AppOptions {
+        database: db,
+        user_roles,
+    } = options;
     // Design 5.7: theme templates are capped in size and render work. Propel's defaults: a
     // template of at most 1 MiB, and a budget of 100,000 loop iterations and template entries
     // per render. Set once for the process, before any theme renders.
@@ -80,12 +109,19 @@ fn build(config: Config, db: Option<Arc<Database>>) -> Rocket<Build> {
     let shortcodes = Arc::new(Shortcodes::new());
     shortcodes.register_the_content(&hooks);
     let rest_routes = Arc::new(RestRoutes::new());
+    let auth = rest::auth::AuthSettings {
+        environment: config.environment,
+        trusted_proxies: config.trusted_proxies.clone(),
+        user_roles: user_roles.unwrap_or_else(|| Arc::new(NoUserRoles)),
+    };
 
     rocket::build()
         .manage(Arc::clone(&hooks))
         .manage(shortcodes)
         .manage(rest_routes)
+        .manage(auth)
         .mount("/", rest::routes(REST_RANK))
+        .register("/", rest::auth::catchers())
         .attach(AdHoc::try_on_ignite("Mission Control", move |rocket| {
             ignite(rocket, config, db, hooks)
         }))

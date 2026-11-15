@@ -1359,6 +1359,7 @@ dependencies = [
 name = "mission-control-app"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "mission-control",
  "mission-control-core",

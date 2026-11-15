@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mission_control::rocket_with_database;
-use mission_control_core::config::Config;
+use mission_control_core::config::{Config, Environment, TrustedProxies};
 use mission_control_core::content::{
     NewPost, NewTerm, Post, PostStatus, Shortcodes, Taxonomy, Term, set_option,
 };
@@ -109,6 +109,8 @@ impl Site {
             debug: false,
             upload_max_bytes: 1024,
             themes_dir,
+            environment: Environment::Production,
+            trusted_proxies: TrustedProxies::None,
         };
         Client::tracked(rocket_with_database(config, self.test.shared()))
             .await

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use mission_control::rocket_with_database;
-use mission_control_core::config::Config;
+use mission_control_core::config::{Config, Environment, TrustedProxies};
 use mission_control_core::content::{NewPost, Post, PostStatus, set_option};
 use mission_control_core::migrations::migrator;
 use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
@@ -44,6 +44,8 @@ async fn site() -> (TestDatabase, Client) {
         themes_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../themes")
             .to_path_buf(),
+        environment: Environment::Production,
+        trusted_proxies: TrustedProxies::None,
     };
     let client = Client::tracked(rocket_with_database(config, test.shared()))
         .await
@@ -177,6 +179,8 @@ async fn an_unset_site_uses_wordpresss_defaults() {
         debug: false,
         upload_max_bytes: 1024,
         themes_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../themes"),
+        environment: Environment::Production,
+        trusted_proxies: TrustedProxies::None,
     };
     let client = Client::tracked(rocket_with_database(config, test.shared()))
         .await

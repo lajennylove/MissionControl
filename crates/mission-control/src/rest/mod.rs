@@ -1,5 +1,8 @@
 //! The REST API's routes. Discovery for now: `GET /wp-json/`, the namespace indexes and
-//! WordPress's `?rest_route=` form on the site root.
+//! WordPress's `?rest_route=` form on the site root. Every route takes a guard from [`auth`], so
+//! refused credentials end any REST request with WordPress's error.
+
+pub mod auth;
 
 use std::sync::Arc;
 
@@ -23,7 +26,7 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes
 }
 
-fn json(status: Status, body: &serde_json::Value) -> Json {
+pub(crate) fn json(status: Status, body: &serde_json::Value) -> Json {
     let content_type = ContentType::new("application", "json").with_params(("charset", "UTF-8"));
     (status, (content_type, body.to_string()))
 }
@@ -60,6 +63,7 @@ async fn answer(db: &Database, routes: &RestRoutes, route: &str) -> Json {
 #[rocket::get("/wp-json/<_..>")]
 async fn wp_json(
     origin: &Origin<'_>,
+    _auth: auth::RestAuth,
     db: &State<Arc<Database>>,
     routes: &State<Arc<RestRoutes>>,
 ) -> Json {
@@ -89,6 +93,7 @@ impl<'r> FromRequest<'r> for RestRouteQuery {
 #[rocket::get("/")]
 async fn rest_route(
     route: RestRouteQuery,
+    _auth: auth::RestAuth,
     db: &State<Arc<Database>>,
     routes: &State<Arc<RestRoutes>>,
 ) -> Json {

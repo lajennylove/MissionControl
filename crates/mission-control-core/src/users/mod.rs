@@ -1,7 +1,8 @@
 //! Users' roles and capabilities, after WordPress: the five default roles and their
 //! capabilities ([`capabilities`]), and the meta capabilities that map a check on one object to
 //! primitive capabilities ([`meta_cap`]). Users sign REST API clients in with application
-//! passwords ([`app_password`]).
+//! passwords ([`app_password`]); a signed-in user's roles come from a [`UserRoles`] provider
+//! ([`user_roles`]).
 //!
 //! ```
 //! use std::collections::BTreeMap;
@@ -16,6 +17,7 @@
 pub mod app_password;
 pub mod capabilities;
 pub mod meta_cap;
+pub mod user_roles;
 
 pub use app_password::{
     AppPasswordError, ApplicationPassword, BasicAuthError, ByEmail, PlainPassword, RandomError,
@@ -26,3 +28,4 @@ pub use capabilities::{
     default_role, default_roles, has_cap,
 };
 pub use meta_cap::{Object, PostContext, PostTypeCaps, SitePages, can, map_meta_cap};
+pub use user_roles::{InMemoryUserRoles, NoUserRoles, RoleAssignment, RolesFuture, UserRoles};
