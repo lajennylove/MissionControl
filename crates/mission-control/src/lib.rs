@@ -122,6 +122,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(auth)
         .mount("/", rest::routes(REST_RANK))
         .register("/", rest::auth::catchers())
+        .attach(rest::auth::RestAuthFairing)
         .attach(AdHoc::try_on_ignite("Mission Control", move |rocket| {
             ignite(rocket, config, db, hooks)
         }))

@@ -1,15 +1,18 @@
 //! The request guards for the current REST user, over the core's
 //! [`authenticate`](mission_control_core::rest::auth::authenticate).
 //!
-//! Every REST route takes one of them, so a request whose credentials are refused ends with
-//! WordPress's error on every route, as WordPress checks authentication before any route runs:
+//! As WordPress checks authentication before any route runs (`rest_authentication_errors`), the
+//! [`RestAuthFairing`] authenticates every REST request when it arrives, whichever route answers
+//! it, even an unknown path or one whose route takes no guard. Refused credentials end the
+//! request there: it is sent to an internal route that answers with WordPress's error, so no REST
+//! route runs. Routes then take a guard for the user:
 //!
-//! - [`RestAuth`]: the signed-in user or a visitor. Refused credentials end the request.
+//! - [`RestAuth`]: the signed-in user or a visitor.
 //! - [`RestUser`]: a signed-in user only. A visitor gets 401 `rest_not_logged_in`.
 //!
 //! The user is worked out once per request and cached. A guard that ends the request leaves its
 //! [`RestError`] for the catchers ([`catchers`]), which answer with WordPress's JSON body and the
-//! error's status.
+//! error's status; any other error keeps Rocket's own answer.
 //!
 //! ```ignore
 //! #[rocket::get("/wp-json/acme/v1/secret")]
@@ -18,6 +21,7 @@
 //! }
 //! ```
 
+use std::io::Cursor;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
@@ -28,13 +32,19 @@ use mission_control_core::rest::auth::{
 };
 use mission_control_core::users::{UserCaps, UserRoles};
 use orbit_orm::Database;
-use rocket::Request;
 use rocket::catcher::{BoxFuture, Catcher};
-use rocket::http::Status;
+use rocket::fairing::{Fairing, Info, Kind};
+use rocket::http::uri::Origin;
+use rocket::http::{ContentType, Method, Status};
 use rocket::request::{FromRequest, Outcome};
 use rocket::response::Responder;
+use rocket::{Data, Request, Response};
 
-use super::json;
+use super::{Json, json};
+
+/// The internal path a request whose credentials are refused is sent to. Only answers a request
+/// the fairing sent; anything else goes on to the public site.
+const AUTH_ERROR_PATH: &str = "/__mission-control/rest-auth-error";
 
 /// What authentication needs from the app's configuration, managed by the app.
 pub(crate) struct AuthSettings {
@@ -114,6 +124,55 @@ impl<'r> FromRequest<'r> for RestUser {
     }
 }
 
+/// Authenticates every REST request on arrival, as WordPress's `rest_authentication_errors` runs
+/// before any route. Refused credentials send the request to the internal error route, so the
+/// route it asked for never runs, whatever its method or path.
+pub(crate) struct RestAuthFairing;
+
+#[rocket::async_trait]
+impl Fairing for RestAuthFairing {
+    fn info(&self) -> Info {
+        Info {
+            name: "REST authentication",
+            kind: Kind::Request,
+        }
+    }
+
+    async fn on_request(&self, request: &mut Request<'_>, _: &mut Data<'_>) {
+        if !is_rest_request(request) {
+            return;
+        }
+        let Some(error) = current_user(request).await.as_ref().err().cloned() else {
+            return;
+        };
+        let _ = request.local_cache(PendingError::default).0.set(error);
+        request.set_method(Method::Get);
+        request.set_uri(Origin::parse(AUTH_ERROR_PATH).expect("a valid path"));
+    }
+}
+
+/// The error the fairing ended a request with.
+pub(crate) struct RefusedRequest(RestError);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for RefusedRequest {
+    type Error = ();
+
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, ()> {
+        match request.local_cache(PendingError::default).0.get() {
+            Some(error) => Outcome::Success(Self(error.clone())),
+            None => Outcome::Forward(Status::NotFound),
+        }
+    }
+}
+
+/// Answers a request the fairing refused with its error.
+#[rocket::get("/__mission-control/rest-auth-error")]
+pub(crate) fn refused(refused: RefusedRequest) -> Json {
+    let status = Status::from_code(refused.0.status).unwrap_or(Status::InternalServerError);
+    json(status, &refused.0.to_json())
+}
+
 /// The request's authentication, worked out once.
 struct CachedAuth(Result<Option<CurrentUser>, RestError>);
 
@@ -157,17 +216,16 @@ async fn authenticate_request(request: &Request<'_>) -> Result<Option<CurrentUse
     authenticate(db, settings.user_roles.as_ref(), &credentials).await
 }
 
-/// Whether the request is for the REST API: a path under `/wp-json`, or the site root with a
-/// `rest_route` query, as the REST routes answer them.
+/// Whether the request is for the REST API: a path whose first segment, percent-decoded, is
+/// `wp-json`, or the site root with a `rest_route` query starting with `/`.
 fn is_rest_request(request: &Request<'_>) -> bool {
-    let path = request.uri().path().as_str();
-    path == "/wp-json"
-        || path.starts_with("/wp-json/")
-        || (path == "/"
-            && matches!(
-                request.query_value::<&str>("rest_route"),
-                Some(Ok(route)) if route.starts_with('/')
-            ))
+    match request.uri().path().segments().next() {
+        Some(first) => first == "wp-json",
+        None => matches!(
+            request.query_value::<&str>("rest_route"),
+            Some(Ok(route)) if route.starts_with('/')
+        ),
+    }
 }
 
 /// Whether every `X-Forwarded-Proto` value is `https`. A proxy chain that went over plain HTTP
@@ -183,7 +241,7 @@ fn forwarded_https(request: &Request<'_>) -> bool {
 }
 
 /// The catchers that answer a REST guard's error with WordPress's JSON body: 401, 403 and 500.
-/// Another error with one of these statuses gets Rocket's plain answer.
+/// Another error with one of these statuses gets Rocket's own default answer.
 pub(crate) fn catchers() -> Vec<Catcher> {
     [401, 403, 500]
         .into_iter()
@@ -195,9 +253,62 @@ fn rest_catcher<'r>(status: Status, request: &'r Request<'_>) -> BoxFuture<'r> {
     Box::pin(async move {
         match request.local_cache(PendingError::default).0.get() {
             Some(error) => json(status, &error.to_json()).respond_to(request),
-            // A 500 that is not a REST error: Rocket's own catcher answers it.
-            None if status == Status::InternalServerError => Err(status),
-            None => (status, status.reason_lossy()).respond_to(request),
+            None => Ok(rocket_default(status, request)),
         }
     })
+}
+
+/// Rocket 0.5's default catcher's answer for 401, 403 and 500 (`rocket::catcher::default_handler`
+/// is not public): HTML, or JSON when the client prefers it.
+fn rocket_default<'r>(status: Status, request: &Request<'_>) -> Response<'r> {
+    let (reason, description) = match status.code {
+        401 => ("Unauthorized", "The request requires user authentication."),
+        403 => ("Forbidden", "The server refused to authorize the request."),
+        500 => (
+            "Internal Server Error",
+            "The server encountered an internal error while processing this request.",
+        ),
+        _ => ("Unknown Error", "An unknown error has occurred."),
+    };
+    let code = status.code;
+    let prefers_json = request
+        .accept()
+        .is_some_and(|accept| accept.preferred().is_json());
+    let (content_type, text) = if prefers_json {
+        (
+            ContentType::JSON,
+            format!(
+                "{{\n  \"error\": {{\n    \"code\": {code},\n    \"reason\": \"{reason}\",\n    \"description\": \"{description}\"\n  }}\n}}"
+            ),
+        )
+    } else {
+        (
+            ContentType::HTML,
+            format!(
+                r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <title>{code} {reason}</title>
+</head>
+<body align="center">
+    <div role="main" align="center">
+        <h1>{code}: {reason}</h1>
+        <p>{description}</p>
+        <hr />
+    </div>
+    <div role="contentinfo" align="center">
+        <small>Rocket</small>
+    </div>
+</body>
+</html>"#
+            ),
+        )
+    };
+    Response::build()
+        .status(status)
+        .header(content_type)
+        .sized_body(text.len(), Cursor::new(text))
+        .finalize()
 }

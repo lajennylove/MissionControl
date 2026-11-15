@@ -195,13 +195,22 @@ pub async fn authenticate(
 
 /// The REST error for refused Basic credentials, as `rest_application_password_check_errors`
 /// gives it: WordPress's code and message with status 401. A database error is a 500, logged.
+///
+/// [`BasicAuthError::Malformed`] is not a refusal: credentials that are not Basic are no
+/// credentials, and the caller treats the request as a visitor's without calling this (as
+/// [`authenticate`] does). Passed anyway, it fails closed with a 500.
 pub fn basic_auth_error(error: &BasicAuthError) -> RestError {
     let message = match error {
         BasicAuthError::InvalidEmail => INVALID_EMAIL,
         BasicAuthError::InvalidUsername => INVALID_USERNAME,
         BasicAuthError::IncorrectPassword => INCORRECT_PASSWORD,
-        BasicAuthError::Malformed | BasicAuthError::Database(_) => {
-            log::error!("Could not check an application password: {error}");
+        // The caller's job, see above: reaching here is a bug, refused rather than let through.
+        BasicAuthError::Malformed => {
+            log::error!("Malformed Basic credentials were passed as a refusal");
+            return RestError::internal();
+        }
+        BasicAuthError::Database(e) => {
+            log::error!("Could not check an application password: {e}");
             return RestError::internal();
         }
     };

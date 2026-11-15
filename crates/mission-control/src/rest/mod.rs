@@ -14,12 +14,12 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::{Request, Route, State};
 
 /// A JSON body with WordPress's content type, `application/json; charset=UTF-8`.
-type Json = (Status, (ContentType, String));
+pub(crate) type Json = (Status, (ContentType, String));
 
 /// The REST routes, at `rank`: before the public site's catch-all, after every route with a
 /// path of its own (those rank below zero).
 pub(crate) fn routes(rank: isize) -> Vec<Route> {
-    let mut routes = rocket::routes![wp_json, rest_route];
+    let mut routes = rocket::routes![wp_json, rest_route, auth::refused];
     for route in &mut routes {
         route.rank = rank;
     }
