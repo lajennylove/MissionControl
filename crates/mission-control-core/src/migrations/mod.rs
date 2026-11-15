@@ -36,6 +36,10 @@ mod m20261115120300_create_field_group_locations_table;
 /// Every core migration, in order. `run` applies the pending ones as one batch, and `rollback`
 /// reverts the last batch.
 ///
+/// The installer records the panel's and the core migrations of one run as one batch, which this
+/// migrator's `rollback` refuses (it does not know the panel's versions); roll those back with
+/// `mission_control_app::install::run::rollback_last_batch`.
+///
 /// # Errors
 ///
 /// Fails when two migrations share a timestamp or a name lacks one, which a test catches.
