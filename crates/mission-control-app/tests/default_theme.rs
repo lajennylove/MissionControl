@@ -476,3 +476,127 @@ async fn a_missing_active_theme_falls_back_to_the_default_theme() {
     assert_eq!(status, Status::Ok, "{body}");
     assert!(body.contains(&marker("home")), "{body}");
 }
+
+#[rocket::async_test]
+async fn a_manual_excerpt_is_escaped_on_lists() {
+    let site = Site::new().await;
+    let news = Term::create(site.db(), &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .expect("creates the category");
+    let mut post = site.published("Excerpted", "excerpted").await;
+    post.excerpt = "<script>alert('x')</script> Short & sweet".to_owned();
+    post.save(site.db()).await.expect("saves the excerpt");
+    post.sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .expect("adds the category");
+    let client = site.client().await;
+
+    for uri in ["/", "/category/news/"] {
+        let (status, body) = get(&client, uri).await;
+        assert_eq!(status, Status::Ok, "{uri}: {body}");
+        assert!(
+            body.contains("&lt;script&gt;alert(&#039;x&#039;)&lt;/script&gt; Short &amp; sweet"),
+            "{uri}: {body}"
+        );
+        assert!(!body.contains("<script>alert("), "{uri}: {body}");
+    }
+}
+
+#[rocket::async_test]
+async fn a_search_query_is_escaped_where_it_is_reflected() {
+    let site = Site::new().await;
+    let client = site.client().await;
+
+    let (status, body) = get(&client, "/?s=%22%3E%3Cscript%3Ealert(1)%3C/script%3E").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(!body.contains("<script>alert(1)"), "{body}");
+    assert!(!body.contains("\"><script"), "{body}");
+    assert!(
+        body.contains("value=\"&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "<title>Search Results for “&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;”"
+        ),
+        "{body}"
+    );
+}
+
+#[rocket::async_test]
+async fn a_javascript_site_address_never_reaches_a_link() {
+    let site = Site::new().await;
+    site.option("home", json!("javascript:alert(1)")).await;
+    site.published("Hello world", "hello-world").await;
+    let client = site.client().await;
+
+    for uri in ["/", "/hello-world/"] {
+        let (status, body) = get(&client, uri).await;
+        assert_eq!(status, Status::Ok, "{uri}: {body}");
+        assert!(!body.contains("javascript:"), "{uri}: {body}");
+    }
+}
+
+#[rocket::async_test]
+async fn a_hostile_term_description_is_escaped() {
+    let site = Site::new().await;
+    let news = Term::create(
+        site.db(),
+        &Taxonomy::CATEGORY,
+        NewTerm {
+            description: "<img src=x onerror=alert(1)>".to_owned(),
+            ..NewTerm::new("News")
+        },
+    )
+    .await
+    .expect("creates the category");
+    let post = site.published("In the news", "in-the-news").await;
+    post.sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    let client = site.client().await;
+
+    let (status, body) = get(&client, "/category/news/").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(!body.contains("<img src=x"), "{body}");
+    assert!(
+        body.contains("&lt;img src=x onerror=alert(1)&gt;"),
+        "{body}"
+    );
+}
+
+#[rocket::async_test]
+async fn a_page_with_a_custom_template_gets_its_body_classes() {
+    let site = Site::new().await;
+    let wide = site
+        .post("page", PostStatus::Publish, "Wide", "wide", "Wide page.")
+        .await;
+    mission_control_core::content::set_post_meta(
+        site.db(),
+        wide.id,
+        "_wp_page_template",
+        &json!("templates/full-width.php"),
+    )
+    .await
+    .expect("sets the page template");
+    site.post("page", PostStatus::Publish, "Plain", "plain", "Plain page.")
+        .await;
+    let client = site.client().await;
+
+    let (status, body) = get(&client, "/wide/").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(
+        body.contains(
+            "class=\"page-template page-template-templates page-template-full-width \
+             page-template-templatesfull-width-php page"
+        ),
+        "{body}"
+    );
+    assert!(!body.contains("page-template-default"), "{body}");
+
+    let (_, body) = get(&client, "/plain/").await;
+    assert!(
+        body.contains("class=\"page-template-default page"),
+        "{body}"
+    );
+}

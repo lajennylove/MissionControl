@@ -11,6 +11,12 @@
 //! echoes it. Sanitising content (WordPress's kses) belongs to the save path, so the HTML here
 //! is what an author saved.
 //!
+//! # The active theme
+//!
+//! The active theme is the `stylesheet` option, as WordPress stores it. Its parent comes from
+//! the theme's own `theme.toml` (`template = "parent"`), so the `template` option, which
+//! WordPress keeps in step with that header, is not read (ruling R36).
+//!
 //! # The template context
 //!
 //! Every template gets the same variables (a value that does not apply is empty, `null` or
@@ -31,7 +37,7 @@
 //! | `theme.slug`, `theme.name`, `theme.version` | the active theme | `wp_get_theme` |
 //!
 //! A post has `id`, `post_type`, `slug`, `title`, `url`, `content` (filtered by `the_content`;
-//! output raw), `excerpt` (HTML; output raw), `date`, `datetime` (ISO 8601), `author`,
+//! output raw), `excerpt` (HTML-safe: an auto excerpt is tag-stripped, a manual one escaped; output raw), `date`, `datetime` (ISO 8601), `author`,
 //! `classes` and `password_required`.
 
 use std::collections::HashMap;
@@ -313,7 +319,16 @@ impl Frontend {
                 .ok_or_else(|| FrontError::MissingTemplate {
                     theme: self.theme.slug().to_owned(),
                 })?;
-        let context = self.context(&options, &resolved, main, path, query).await?;
+        let context = self
+            .context(
+                &options,
+                &resolved,
+                main,
+                page_template.as_deref(),
+                path,
+                query,
+            )
+            .await?;
         let html = render_with_assets(&self.loader, &self.assets, &located.view, &context)?;
         let status = if resolved == Resolved::NotFound {
             404
@@ -329,6 +344,7 @@ impl Frontend {
         options: &Options,
         resolved: &Resolved,
         main: MainQuery,
+        page_template: Option<&str>,
         path: &str,
         query: &str,
     ) -> Result<Context, FrontError> {
@@ -356,7 +372,7 @@ impl Frontend {
         };
         let manifest = self.theme.manifest();
         let document_title = document_title(options, resolved, &archive);
-        let body_class = body_class(resolved, main.found_posts);
+        let body_class = body_class(resolved, main.found_posts, page_template);
         Ok(Context {
             site: SiteView {
                 name: options.name.clone(),
@@ -430,7 +446,9 @@ impl Frontend {
                     let excerpt = if post.excerpt.trim().is_empty() {
                         trim_excerpt(&content)
                     } else {
-                        post.excerpt.clone()
+                        // Ruling R34: kses does not run on save yet, so a manual excerpt is
+                        // text, escaped here, until it does.
+                        escape_html(&post.excerpt)
                     };
                     (post.title.clone(), content, excerpt)
                 };
@@ -581,6 +599,22 @@ fn trim_excerpt(content: &str) -> String {
     }
 }
 
+/// `text` with `&`, `<`, `>`, `"` and `'` escaped, as `esc_html`.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#039;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// `post_class`: `post-{id}`, the type, `type-{type}`, `status-{status}` and `hentry`.
 fn post_class(post: &Post) -> String {
     let post_type = html_class(&post.post_type);
@@ -597,16 +631,56 @@ fn post_class(post: &Post) -> String {
     classes.join(" ")
 }
 
-/// `sanitize_html_class`: only ASCII letters, digits, `_` and `-` (and `%` from an encoded
-/// slug) are kept.
+/// `sanitize_html_class`: percent-encoded octets are removed, then every character but ASCII
+/// letters, digits, `_` and `-`.
 fn html_class(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '%'))
-        .collect()
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+        {
+            i += 3;
+            continue;
+        }
+        let b = bytes[i];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            out.push(b as char);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The `{type}-template...` classes of a singular post, as `get_body_class`: for a chosen
+/// template (`templates/full-width.php`), `{type}-template`, one class per path part without
+/// `.php`, and one for the whole name with `.` as `-`; otherwise `{type}-template-default`.
+fn template_classes(post_type: &str, page_template: Option<&str>) -> Vec<String> {
+    let post_type = html_class(post_type);
+    match page_template.filter(|t| !t.is_empty() && *t != "default") {
+        Some(template) => {
+            let mut classes = vec![format!("{post_type}-template")];
+            for part in template.split('/') {
+                let base = part.strip_suffix(".php").unwrap_or(part);
+                classes.push(format!(
+                    "{post_type}-template-{}",
+                    html_class(&base.replace(['.', '/'], "-"))
+                ));
+            }
+            classes.push(format!(
+                "{post_type}-template-{}",
+                html_class(&template.replace('.', "-"))
+            ));
+            classes
+        }
+        None => vec![format!("{post_type}-template-default")],
+    }
 }
 
 /// `get_body_class`'s classes for the request.
-fn body_class(resolved: &Resolved, found_posts: i64) -> String {
+fn body_class(resolved: &Resolved, found_posts: i64, page_template: Option<&str>) -> String {
     let mut classes: Vec<String> = Vec::new();
     let mut push = |class: String| classes.push(class);
     match resolved {
@@ -614,7 +688,9 @@ fn body_class(resolved: &Resolved, found_posts: i64) -> String {
             push("home".to_owned());
             match page {
                 Some(page) => {
-                    push("page-template-default".to_owned());
+                    template_classes("page", page_template)
+                        .into_iter()
+                        .for_each(&mut push);
                     push("page".to_owned());
                     push(format!("page-id-{}", page.id));
                 }
@@ -623,16 +699,24 @@ fn body_class(resolved: &Resolved, found_posts: i64) -> String {
         }
         Resolved::Home { .. } => push("blog".to_owned()),
         Resolved::Single(post) => {
+            template_classes(&post.post_type, page_template)
+                .into_iter()
+                .for_each(&mut push);
             push("single".to_owned());
             push(format!("single-{}", html_class(&post.post_type)));
             push(format!("postid-{}", post.id));
         }
         Resolved::Page(post) => {
-            push("page-template-default".to_owned());
+            template_classes("page", page_template)
+                .into_iter()
+                .for_each(&mut push);
             push("page".to_owned());
             push(format!("page-id-{}", post.id));
         }
         Resolved::Attachment(post) => {
+            template_classes(&post.post_type, page_template)
+                .into_iter()
+                .for_each(&mut push);
             push("attachment".to_owned());
             push(format!("attachmentid-{}", post.id));
         }
@@ -764,6 +848,23 @@ fn pagenum_link(
     link
 }
 
+/// The `home` option as a link prefix: an `http` or `https` address without its trailing
+/// slash, as `esc_url` keeps it. Anything else (a `javascript:` URL, a relative path) is logged
+/// and ignored, so links and redirects start from the root instead.
+fn site_address(home: &str) -> String {
+    let home = home.trim().trim_end_matches('/');
+    let lower = home.to_ascii_lowercase();
+    let is_web = ["http://", "https://"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
+    if home.is_empty() || (is_web && !home.contains(['"', '<', '>', ' ', '\\'])) {
+        home.to_owned()
+    } else {
+        log::warn!("The home option is not an http or https address; links start from the root.");
+        String::new()
+    }
+}
+
 /// The options a page reads, once per request.
 struct Options {
     /// `permalink_structure`; plain when unset or not valid.
@@ -801,7 +902,7 @@ impl Options {
             .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero is a valid offset"));
         Ok(Self {
             structure,
-            home: text_option("home").await?.trim_end_matches('/').to_owned(),
+            home: site_address(&text_option("home").await?),
             name: text_option("blogname").await?,
             description: text_option("blogdescription").await?,
             offset,
@@ -990,6 +1091,42 @@ mod tests {
         assert_eq!(
             pagenum_link("", "//evil.example/", "", 2, &s),
             "/evil.example/page/2/"
+        );
+    }
+
+    #[test]
+    fn template_classes_follow_get_body_class() {
+        assert_eq!(template_classes("page", None), ["page-template-default"]);
+        assert_eq!(
+            template_classes("page", Some("default")),
+            ["page-template-default"]
+        );
+        assert_eq!(
+            template_classes("page", Some("templates/full-width.php")),
+            [
+                "page-template",
+                "page-template-templates",
+                "page-template-full-width",
+                "page-template-templatesfull-width-php",
+            ]
+        );
+        assert_eq!(html_class("caf%c3%a9-x y"), "caf-xy");
+    }
+
+    #[test]
+    fn site_addresses_are_web_urls_only() {
+        assert_eq!(site_address("https://example.com/"), "https://example.com");
+        assert_eq!(site_address("javascript:alert(1)"), "");
+        assert_eq!(site_address("JavaScript:alert(1)"), "");
+        assert_eq!(site_address("//evil.example"), "");
+        assert_eq!(site_address(""), "");
+    }
+
+    #[test]
+    fn manual_excerpts_are_escaped() {
+        assert_eq!(
+            escape_html("<b>\"a\" & 'b'</b>"),
+            "&lt;b&gt;&quot;a&quot; &amp; &#039;b&#039;&lt;/b&gt;"
         );
     }
 
