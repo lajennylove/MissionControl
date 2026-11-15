@@ -177,9 +177,9 @@ impl Changes {
             r.invalid.wrong_type("meta", "object");
         }
         for taxonomy in &post_type.taxonomies {
-            if r.has(taxonomy.rest_base) {
-                let ids = r.integers(taxonomy.rest_base, 0);
-                changes.terms.push((*taxonomy, ids));
+            if r.has(&taxonomy.rest_base) {
+                let ids = r.integers(&taxonomy.rest_base, 0);
+                changes.terms.push((taxonomy.clone(), ids));
             }
         }
         r.invalid.finish()?;
@@ -471,7 +471,7 @@ async fn write_extras(
         && let Some(default) = site.default_category
     {
         terms.retain(|(t, _)| t.rest_base != categories.rest_base);
-        terms.push((*categories, vec![default]));
+        terms.push((categories.clone(), vec![default]));
     }
     for (taxonomy, ids) in terms {
         let known = terms_by_term_id(db, &taxonomy.taxonomy, &ids)
@@ -903,7 +903,7 @@ pub(super) fn schema_args(post_type: &PostType) -> Map<String, Value> {
     );
     for taxonomy in &post_type.taxonomies {
         put(
-            taxonomy.rest_base,
+            &taxonomy.rest_base,
             json!({"description": format!("The terms assigned to the post in the {} taxonomy.", taxonomy.taxonomy.name), "type": "array", "items": {"type": "integer"}, "required": false}),
         );
     }

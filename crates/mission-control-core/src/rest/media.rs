@@ -61,7 +61,7 @@ use serde_json::{Map, Value, json};
 use super::meta::{MetaKeys, MetaObject, MetaUpdate};
 use super::params::{Params, Reader, as_integer};
 use super::posts::prepare::{ATTACHED_FILE, ATTACHMENT_ALT, ATTACHMENT_METADATA, Batch};
-use super::posts::{PostType, PostsController, invalid_id};
+use super::posts::{PostType, PostTypes, PostsController, invalid_id};
 use super::shared::{Context, Fields, Site, database_error};
 use super::{Endpoint, KsesLimiter, RestError, RestResponse, RestRoutes, RouteSpec};
 use crate::content::{Post, PostFields};
@@ -247,6 +247,7 @@ pub fn filename_from_disposition(header: &str) -> Option<String> {
 ///     sizes: &sizes,
 ///     upload_max_bytes: config.upload_max_bytes,
 ///     meta: &meta_keys,
+///     post_types: &post_types,
 /// };
 /// let response = controller.list("media_type=image").await?;
 /// ```
@@ -267,6 +268,8 @@ pub struct MediaController<'a> {
     pub upload_max_bytes: u64,
     /// The registered meta keys, shown and written under `meta`.
     pub meta: &'a MetaKeys,
+    /// The registered post types, for the capability names of the post media is attached to.
+    pub post_types: &'a PostTypes,
 }
 
 /// The fields an upload or an update writes. `None` leaves a field as it is.
@@ -340,6 +343,7 @@ impl MediaController<'_> {
             theme: None,
             image_sizes: Some(self.sizes),
             meta: self.meta,
+            post_types: self.post_types,
         }
     }
 

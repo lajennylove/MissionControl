@@ -57,7 +57,11 @@ async fn a_new_database_gets_the_panel_and_core_tables_once() {
         raw::fetch_scalar(&db, "SELECT COUNT(*) FROM __diesel_schema_migrations", &[])
             .await
             .expect("reads the history");
-    assert_eq!(recorded, 19, "one row per migration");
+    assert_eq!(
+        recorded as usize,
+        summary.panel.len() + summary.core.len(),
+        "one row per migration"
+    );
     // Each set is its own batch, the panel's first.
     let batches: Vec<(i32,)> = raw::fetch_all(
         &db,

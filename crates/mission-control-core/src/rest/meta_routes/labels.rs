@@ -261,9 +261,9 @@ pub(super) fn post_type(post_type: &PostType) -> Value {
 /// The labels of `taxonomy`: `category` and `post_tag` are the defaults; any other taxonomy is
 /// named after itself.
 pub(super) fn taxonomy(taxonomy: &TaxonomySpec) -> Value {
-    let tax = taxonomy.taxonomy;
+    let tax = &taxonomy.taxonomy;
     let labels = defaults(TAXONOMY_DEFAULTS, tax.hierarchical);
-    Value::Object(match tax.name {
+    Value::Object(match &*tax.name {
         "category" | "post_tag" => labels,
         other => named(labels, other),
     })

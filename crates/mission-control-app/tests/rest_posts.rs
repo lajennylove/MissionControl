@@ -20,9 +20,12 @@ use mission_control_core::content::{
 use mission_control_core::migrations::migrator;
 use mission_control_core::rest::RestRoutes;
 use mission_control_core::rest::posts::{PostType, PostTypes, Supports};
+use mission_control_core::rest::terms::Taxonomies;
+use mission_control_core::types::{Origin, PostTypeDef, Registry, TaxonomyDef};
 use mission_control_core::users::app_password::{self, PlainPassword};
 use mission_control_core::users::{
-    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, InMemoryUserRoles, RoleAssignment, UserRoles,
+    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, InMemoryUserRoles, RoleAssignment, SUBSCRIBER,
+    UserRoles,
 };
 use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
 use orbit_orm::{Database, Model, raw};
@@ -105,6 +108,7 @@ struct Site {
     test: TestDatabase,
     client: Client,
     users: BTreeMap<&'static str, User>,
+    roles: Arc<InMemoryUserRoles>,
 }
 
 impl Site {
@@ -195,6 +199,24 @@ impl Site {
         .await
     }
 
+    /// The `Authorization` header of a new subscriber `name` granted `cap` by name.
+    async fn subscriber_with(&self, name: &str, cap: &str) -> Header<'static> {
+        let (id, email) = new_user(self.db(), name).await;
+        let (password, _) = app_password::create(self.db(), id, "Tests", None)
+            .await
+            .expect("creates the application password");
+        let granted = BTreeMap::from([(cap.to_owned(), true)]);
+        self.roles
+            .assign(id, RoleAssignment::new([SUBSCRIBER], granted));
+        Header::new(
+            "Authorization",
+            format!(
+                "Basic {}",
+                STANDARD.encode(format!("{email}:{}", password.as_str()))
+            ),
+        )
+    }
+
     async fn reload(&self, id: i64) -> Option<Post> {
         Post::query().find(self.db(), id).await.expect("reads")
     }
@@ -259,7 +281,7 @@ async fn site() -> Site {
     ] {
         set_option(db, name, &value).await.expect("sets the option");
     }
-    let roles = InMemoryUserRoles::new();
+    let roles = Arc::new(InMemoryUserRoles::new());
     let mut users = BTreeMap::new();
     for (name, role) in [
         ("admin", ADMINISTRATOR),
@@ -282,7 +304,7 @@ async fn site() -> Site {
             },
         );
     }
-    let user_roles: Arc<dyn UserRoles> = Arc::new(roles);
+    let user_roles: Arc<dyn UserRoles> = Arc::clone(&roles) as Arc<dyn UserRoles>;
     let options = AppOptions {
         database: Some(test.shared()),
         user_roles: Some(user_roles),
@@ -295,6 +317,7 @@ async fn site() -> Site {
         test,
         client,
         users,
+        roles,
     }
 }
 
@@ -1794,6 +1817,7 @@ async fn a_type_registered_on_the_app_is_served_only_when_shown() {
         show_in_rest: false,
         supports: Supports::ALL,
         taxonomies: Vec::new(),
+        caps: mission_control_core::users::PostTypeCaps::for_post_type("book"),
     };
     types.register(book.clone());
     types.register_routes(routes);
@@ -1818,6 +1842,65 @@ async fn a_type_registered_on_the_app_is_served_only_when_shown() {
     assert_eq!(ids(&json), [novel.id]);
     let (_, index) = body(site.get("/wp-json/wp/v2", None).await).await;
     assert!(keys(&index["routes"]).contains("/wp/v2/books"));
+}
+
+/// A post type from the type registry (Task 5.2) is served at its `rest_base`, with the
+/// capability names of its definition: with `capability_type` `post`, an author edits and
+/// publishes their own books, where the interim rule for an unknown type would ask for
+/// `edit_others_posts`. Removed (its plugin deactivated), it is no longer served.
+#[rocket::async_test]
+async fn a_type_from_the_registry_is_served_with_its_capabilities() {
+    let site = site().await;
+    let rocket = site.client.rocket();
+    let routes = rocket
+        .state::<Arc<RestRoutes>>()
+        .expect("the app manages its routes");
+    let registry = Registry::new(
+        Arc::clone(rocket.state::<Arc<PostTypes>>().expect("the post types")),
+        Arc::clone(rocket.state::<Arc<Taxonomies>>().expect("the taxonomies")),
+    );
+    let book = PostTypeDef::from_json(
+        r#"{"slug": "book", "public": true, "show_in_rest": true, "rest_base": "books",
+            "labels": {"name": "Books", "singular_name": "Book"},
+            "supports": ["title", "editor", "author"]}"#,
+        Origin::Plugin("library".into()),
+    )
+    .unwrap();
+    registry.register(book).unwrap();
+    registry.post_types().register_routes(routes);
+
+    let response = site
+        .post(
+            "/wp-json/wp/v2/books",
+            Some("author"),
+            json!({"title": "A novel", "status": "publish"}),
+        )
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Created, "{json}");
+    assert_eq!(json["type"], json!("book"));
+    let id = json["id"].as_i64().unwrap();
+    let (status, json) = body(
+        site.post(
+            &format!("/wp-json/wp/v2/books/{id}"),
+            Some("author"),
+            json!({"title": "A better novel"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    let (status, json) = body(site.get("/wp-json/wp/v2/books", None).await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(ids(&json), [id]);
+
+    assert_eq!(registry.remove_plugin("library"), 1);
+    assert_error(
+        site.get("/wp-json/wp/v2/books", None).await,
+        Status::NotFound,
+        "rest_no_route",
+    )
+    .await;
 }
 
 #[rocket::async_test]
@@ -1891,4 +1974,155 @@ async fn an_attachment_like_inherit_post_reads_as_its_parent() {
     )
     .await;
     assert_eq!(status, Status::Ok);
+}
+
+#[rocket::async_test]
+async fn a_stored_admin_post_type_is_served_after_a_restart() {
+    let site = site().await;
+    let registry = site
+        .client
+        .rocket()
+        .state::<Arc<Registry>>()
+        .expect("the app manages the type registry");
+    let story = PostTypeDef::from_json(
+        r#"{"slug": "story", "public": true, "show_in_rest": true, "rest_base": "stories",
+            "capability_type": ["story", "stories"],
+            "labels": {"name": "Stories", "singular_name": "Story"}}"#,
+        Origin::Admin,
+    )
+    .unwrap();
+    registry
+        .save_admin_definition(site.db(), story)
+        .await
+        .expect("saves the admin's type");
+    let published = site.published("author", "story", "Once upon a time").await;
+
+    // A fresh app on the same database reads the stored type at ignition.
+    let options = AppOptions {
+        database: Some(site.test.shared()),
+        user_roles: Some(Arc::clone(&site.roles) as Arc<dyn UserRoles>),
+        ..AppOptions::default()
+    };
+    let client = Client::tracked(rocket_with_options(config(), options))
+        .await
+        .expect("the app ignites");
+    let get = |uri: &'static str| client.get(uri).dispatch();
+    let (status, json) = body(get("/wp-json/wp/v2/stories").await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(ids(&json), [published.id]);
+    let (_, discovery) = body(get("/wp-json/").await).await;
+    assert!(
+        discovery["routes"].get("/wp/v2/stories").is_some(),
+        "discovery lists the stored type"
+    );
+
+    // `/wp/v2/types` names the meta capabilities by the irregular singular.
+    let writer = site.subscriber_with("writer", "edit_stories").await;
+    let request = client
+        .get("/wp-json/wp/v2/types/story?context=edit")
+        .header(writer);
+    let (status, json) = body(request.dispatch().await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    let caps = &json["capabilities"];
+    assert_eq!(caps["edit_post"], "edit_story", "{caps}");
+    assert_eq!(caps["read_post"], "read_story");
+    assert_eq!(caps["delete_post"], "delete_story");
+    assert_eq!(caps["edit_posts"], "edit_stories");
+}
+
+#[rocket::async_test]
+async fn a_private_custom_post_follows_its_types_read_private_capability() {
+    let site = site().await;
+    let rocket = site.client.rocket();
+    let registry = rocket.state::<Arc<Registry>>().unwrap();
+    let routes = rocket.state::<Arc<RestRoutes>>().unwrap();
+    registry
+        .register(
+            PostTypeDef::from_json(
+                r#"{"slug": "book", "public": true, "show_in_rest": true, "rest_base": "books",
+                    "capability_type": "book",
+                    "labels": {"name": "Books", "singular_name": "Book"}}"#,
+                Origin::Code,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    registry
+        .register(
+            TaxonomyDef::from_json(
+                r#"{"slug": "genre", "object_type": ["book"], "show_in_rest": true,
+                    "rest_base": "genres", "labels": {"name": "Genres", "singular_name": "Genre"}}"#,
+                Origin::Code,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    registry.post_types().register_routes(routes);
+    registry.taxonomies().register_routes(routes);
+
+    let librarian = site
+        .subscriber_with("librarian", "read_private_books")
+        .await;
+
+    let book = site
+        .create(
+            "author",
+            "book",
+            NewPost {
+                status: PostStatus::Private,
+                title: "A private book".into(),
+                ..NewPost::new(0, "book")
+            },
+        )
+        .await;
+    let scan = site
+        .create(
+            "author",
+            "attachment",
+            NewPost {
+                status: PostStatus::Inherit,
+                title: "A scan".into(),
+                parent_id: Some(book.id),
+                mime_type: "image/png".into(),
+                ..NewPost::new(0, "attachment")
+            },
+        )
+        .await;
+
+    for uri in [
+        format!("/wp-json/wp/v2/genres?post={}", book.id),
+        format!("/wp-json/wp/v2/media/{}", scan.id),
+    ] {
+        // The librarian holds the type's capability, the editor only `read_private_posts`.
+        let response = site
+            .client
+            .get(uri.clone())
+            .header(librarian.clone())
+            .dispatch()
+            .await;
+        let (status, json) = body(response).await;
+        assert_eq!(status, Status::Ok, "{uri}: {json}");
+        let (status, json) = body(site.get(&uri, Some("editor")).await).await;
+        assert_eq!(status, Status::Forbidden, "{uri}: {json}");
+    }
+}
+
+#[rocket::async_test]
+async fn the_site_starts_when_the_type_tables_cannot_be_read() {
+    let site = site().await;
+    // A database installed before the field group tables.
+    for table in ["field_group_locations", "field_groups"] {
+        raw::execute(site.db(), &format!("DROP TABLE {table}"), &[])
+            .await
+            .expect("drops the table");
+    }
+    let options = AppOptions {
+        database: Some(site.test.shared()),
+        ..AppOptions::default()
+    };
+    let client = Client::tracked(rocket_with_options(config(), options))
+        .await
+        .expect("the app ignites without the stored types");
+    let response = client.get("/wp-json/wp/v2/posts").dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
 }

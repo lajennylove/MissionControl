@@ -341,14 +341,14 @@ fn origin_code_and_plugin_are_locked() {
 fn post_type_converts_to_the_rest_descriptor_and_caps() {
     let def = book();
     let genre = RestTaxonomy {
-        taxonomy: mission_control_core::content::Taxonomy {
-            name: "genre",
-            hierarchical: true,
-            object_types: &["book"],
-        },
-        rest_base: "genres",
+        taxonomy: mission_control_core::content::Taxonomy::new(
+            "genre",
+            true,
+            vec!["book".to_owned()],
+        ),
+        rest_base: "genres".into(),
     };
-    let known = [RestTaxonomy::CATEGORIES, RestTaxonomy::TAGS, genre];
+    let known = [RestTaxonomy::CATEGORIES, RestTaxonomy::TAGS, genre.clone()];
     let post_type = def.to_post_type(&known);
     assert_eq!(post_type.name, "book");
     assert_eq!(post_type.rest_base, "books");

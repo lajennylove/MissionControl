@@ -13,7 +13,7 @@ use crate::rest::shared::{
     Context, Fields, Site, database_error, page_links, position_case, read_context, read_envelope,
 };
 use crate::rest::{RestError, RestResponse};
-use crate::users::{Object, can};
+use crate::users::{Object, PostContext, can};
 
 /// The `orderby` values, as WordPress's terms controller lists them.
 const ORDERBY: &[&str] = &[
@@ -130,14 +130,19 @@ async fn check_list_permission(
                 400,
             ));
         };
-        let allowed = {
-            ctl.taxonomy
-                .taxonomy
-                .object_types
-                .contains(&post.post_type.as_str())
-                && (post.status == PostStatus::Publish
-                    || can(ctl.user, "read_post", Some(&Object::Post(&post))))
+        // `read_post` with the post's own type's capability names, as WordPress maps it.
+        let post_type = ctl.post_types.registered(&post.post_type);
+        let context = PostContext {
+            post_type_caps: post_type.as_ref().map(|t| &t.caps),
+            ..PostContext::new(&post)
         };
+        let allowed = ctl.taxonomy.taxonomy.is_for(&post.post_type)
+            && (post.status == PostStatus::Publish
+                || can(
+                    ctl.user,
+                    "read_post",
+                    Some(&Object::PostWithContext(context)),
+                ));
         if !allowed {
             return Err(ctl.forbidden(
                 "rest_forbidden_context",
@@ -224,7 +229,7 @@ fn count_sql(filter: &Filter) -> String {
 
 /// The filter of a list, as `get_terms` builds its `WHERE`.
 fn filter(ctl: &TermsController<'_>, list: &ListParams) -> (Filter, Vec<orbit_orm::Value>) {
-    let taxonomy = ctl.taxonomy.taxonomy;
+    let taxonomy = &ctl.taxonomy.taxonomy;
     let marks = |n: usize| vec!["?"; n].join(", ");
     let mut with = String::new();
     let mut binds: Vec<orbit_orm::Value> = Vec::new();
@@ -239,13 +244,13 @@ fn filter(ctl: &TermsController<'_>, list: &ListParams) -> (Filter, Vec<orbit_or
              SELECT up.parent_id FROM term_taxonomy up INNER JOIN kept ON up.term_id = kept.id \
              WHERE up.taxonomy = ? AND up.parent_id IS NOT NULL) ",
         );
-        binds.push(taxonomy.name.into());
-        binds.push(taxonomy.name.into());
+        binds.push((&*taxonomy.name).into());
+        binds.push((&*taxonomy.name).into());
     }
     let mut from = String::from(
         "FROM term_taxonomy tt INNER JOIN terms t ON t.id = tt.term_id WHERE tt.taxonomy = ?",
     );
-    binds.push(taxonomy.name.into());
+    binds.push((&*taxonomy.name).into());
     for (values, negate) in [(&list.include, false), (&list.exclude, true)] {
         if values.is_empty() {
             continue;

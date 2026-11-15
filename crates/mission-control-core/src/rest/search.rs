@@ -77,7 +77,7 @@ fn term_subtypes(taxonomies: &Taxonomies) -> Vec<String> {
     taxonomies
         .shown_in_rest()
         .into_iter()
-        .map(|t| t.taxonomy.name.to_owned())
+        .map(|t| t.taxonomy.name.into_owned())
         .collect()
 }
 
@@ -353,6 +353,7 @@ impl SearchController<'_> {
                 theme: self.theme,
                 image_sizes: None,
                 meta: self.meta,
+                post_types: self.post_types,
             }
             .get(found.id, "context=embed")
             .await
@@ -500,8 +501,10 @@ impl SearchController<'_> {
              WHERE tt.taxonomy IN ({})",
             marks(taxonomies.len())
         );
-        let mut binds: Vec<orbit_orm::Value> =
-            taxonomies.iter().map(|t| t.taxonomy.name.into()).collect();
+        let mut binds: Vec<orbit_orm::Value> = taxonomies
+            .iter()
+            .map(|t| (&*t.taxonomy.name).into())
+            .collect();
         params.filter_ids("tt.term_id", &mut filter, &mut binds);
         if let Some(search) = &params.search {
             // As `get_terms`: the whole search text, in the name or the slug.

@@ -15,13 +15,17 @@
 //! themes folder (`MC_THEMES_DIR`, default `themes`; the theme is the `stylesheet` option, or
 //! `default`), mounts the public site and serves each theme's built assets at
 //! `/themes/{slug}/build/`. The database must already be installed: the app does not run
-//! migrations. Switching the theme takes effect at the next start.
+//! migrations. Switching the theme takes effect at the next start. The post types, taxonomies
+//! and field groups made in the admin are read from the database at ignition
+//! ([`Registry::load_from_db`]) and served; when their tables cannot be read (a database
+//! installed before them), the error is logged and the site starts without them.
 //!
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
 //! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
 //! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the
-//! registered meta keys shown under `meta` (`Arc<MetaKeys>`, empty at start), the settings the
+//! registry of custom post types, taxonomies and field groups (`Arc<Registry>`, which feeds
+//! those two), the registered meta keys shown under `meta` (`Arc<MetaKeys>`, empty at start), the settings the
 //! REST API reads and writes (`Arc<Settings>`, WordPress's core settings at start), the kses
 //! limiter (`Arc<KsesLimiter>`), the uploads' storage (`Arc<dyn Storage>`, on the local disk in
 //! the uploads folder, `MC_UPLOADS_DIR`), the image size registry (`Arc<ImageSizes>`, WordPress's
@@ -60,6 +64,7 @@ use mission_control_core::rest::settings::Settings;
 use mission_control_core::rest::terms::Taxonomies;
 use mission_control_core::rest::{KsesLimiter, RestRoutes};
 use mission_control_core::scheduler::Scheduler;
+use mission_control_core::types::Registry;
 use mission_control_core::users::{NoUserRoles, UserRoles};
 use orbit_orm::Database;
 use rocket::fairing::AdHoc;
@@ -140,6 +145,10 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     mission_control_core::rest::media::register_routes(&rest_routes);
     mission_control_core::rest::meta_routes::register_routes(&rest_routes);
     mission_control_core::rest::search::register_routes(&rest_routes, &post_types, &taxonomies);
+    let registry = Arc::new(Registry::new(
+        Arc::clone(&post_types),
+        Arc::clone(&taxonomies),
+    ));
     let settings = Arc::new(Settings::new());
     settings.register_routes(&rest_routes);
     let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(config.uploads_dir.clone()));
@@ -156,12 +165,17 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         user_roles: user_roles.unwrap_or_else(|| Arc::new(NoUserRoles)),
     };
 
+    let types = Types {
+        registry: Arc::clone(&registry),
+        rest_routes: Arc::clone(&rest_routes),
+    };
     rocket::build()
         .manage(Arc::clone(&hooks))
         .manage(shortcodes)
         .manage(rest_routes)
         .manage(post_types)
         .manage(taxonomies)
+        .manage(registry)
         .manage(meta_keys)
         .manage(settings)
         .manage(kses)
@@ -175,7 +189,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .register("/", rest::auth::catchers())
         .attach(rest::auth::RestAuthFairing)
         .attach(AdHoc::try_on_ignite("Mission Control", move |rocket| {
-            ignite(rocket, config, db, hooks)
+            ignite(rocket, config, db, hooks, types)
         }))
         .attach(AdHoc::on_liftoff("Mission Control scheduler", |rocket| {
             Box::pin(async move {
@@ -187,14 +201,48 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         }))
 }
 
-/// Opens the database, loads the active theme and mounts the public site. The result is what
-/// `AdHoc::try_on_ignite` takes: the app to go on with, or back on failure.
+/// The type registry and the route registry it registers the stored types' routes on.
+struct Types {
+    registry: Arc<Registry>,
+    rest_routes: Arc<RestRoutes>,
+}
+
+impl Types {
+    /// Loads the admin's post types, taxonomies and field groups from `db` into the registry,
+    /// which registers them on the REST registries, and lists their routes in discovery. A
+    /// table that cannot be read is logged, and the site starts without them; a stored
+    /// definition that does not read is logged and skipped by the registry.
+    async fn load(&self, db: &Database) {
+        match self.registry.load_from_db(db).await {
+            Ok(loaded) => log::debug!("Loaded {loaded} stored type definitions"),
+            Err(e) => {
+                log::error!(
+                    "The stored post types, taxonomies and field groups were not loaded: {e}"
+                );
+                return;
+            }
+        }
+        let (post_types, taxonomies) = (self.registry.post_types(), self.registry.taxonomies());
+        post_types.register_routes(&self.rest_routes);
+        taxonomies.register_routes(&self.rest_routes);
+        mission_control_core::rest::search::register_routes(
+            &self.rest_routes,
+            post_types,
+            taxonomies,
+        );
+    }
+}
+
+/// Opens the database, loads the stored type definitions and the active theme, and mounts the
+/// public site. The result is what `AdHoc::try_on_ignite` takes: the app to go on with, or back
+/// on failure.
 #[allow(clippy::result_large_err)]
 async fn ignite(
     rocket: Rocket<Build>,
     config: Config,
     db: Option<Arc<Database>>,
     hooks: Arc<Hooks>,
+    types: Types,
 ) -> Result<Rocket<Build>, Rocket<Build>> {
     let db = match db {
         Some(db) => db,
@@ -208,6 +256,7 @@ async fn ignite(
             }
         },
     };
+    types.load(&db).await;
     let theme = match load_active_theme(&db, &config.themes_dir).await {
         Ok(theme) => theme,
         Err(e) => {

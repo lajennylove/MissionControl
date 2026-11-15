@@ -1522,7 +1522,7 @@ async fn first_categories(db: &Database, post_ids: &[i64]) -> Result<HashMap<i64
     for chunk in post_ids.chunks(IN_CHUNK) {
         count_link_query();
         let marks = vec!["?"; chunk.len()].join(", ");
-        let mut binds = vec![Sql::from(Taxonomy::CATEGORY.name)];
+        let mut binds = vec![Sql::from(&*Taxonomy::CATEGORY.name)];
         binds.extend(chunk.iter().map(|&id| Sql::from(id)));
         let rows: Vec<(i64, i64)> = raw::fetch_all(
             db,

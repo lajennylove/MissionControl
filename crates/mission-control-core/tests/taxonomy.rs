@@ -88,12 +88,12 @@ fn builtin_taxonomies_are_category_and_post_tag() {
     assert_eq!(category, Taxonomy::CATEGORY);
     assert_eq!(category.name, "category");
     assert!(category.hierarchical);
-    assert_eq!(category.object_types, ["post"]);
+    assert_eq!(*category.object_types, ["post"]);
     let tag = Taxonomy::builtin("post_tag").expect("post_tag is built in");
     assert_eq!(tag, Taxonomy::POST_TAG);
     assert_eq!(tag.name, "post_tag");
     assert!(!tag.hierarchical);
-    assert_eq!(tag.object_types, ["post"]);
+    assert_eq!(*tag.object_types, ["post"]);
     assert_eq!(Taxonomy::builtin("genre"), None);
 }
 
@@ -243,10 +243,8 @@ async fn a_flat_taxonomy_refuses_a_parent() {
     .unwrap_err();
     assert!(
         matches!(
-            err,
-            TermError::NotHierarchical {
-                taxonomy: "post_tag"
-            }
+            &err,
+            TermError::NotHierarchical { taxonomy } if taxonomy == "post_tag"
         ),
         "{err:?}"
     );

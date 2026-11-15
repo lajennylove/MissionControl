@@ -21,15 +21,18 @@
 //! What this port leaves out, for now:
 //!
 //! - **Post type capabilities.** WordPress derives a type's capability names from its
-//!   registration (see [`PostTypeCaps::for_post_type`]). There is no post type registry yet, so
-//!   an interim rule names them (ruling R24).
-//!   TODO(Task 5.2): read each type's capabilities from the post type registry, and map a custom
-//!   type's own meta capabilities (`edit_book`), as WordPress's `$post_type_meta_caps` does.
+//!   registration. A check that gives the type's names ([`PostContext::post_type_caps`], which
+//!   the REST controllers fill from the type registry) uses them, and maps the type's own meta
+//!   capability names (`edit_book`, `read_book`, `delete_book`) as `edit_post`, `read_post` and
+//!   `delete_post`, as WordPress's `$post_type_meta_caps` does for a type with `map_meta_cap`. A
+//!   check that does not give them falls back to the interim rule of ruling R24
+//!   ([`PostTypeCaps::for_post_type`]), and a custom meta capability name then maps to itself.
 //! - **The `map_meta_cap`, `user_has_cap` and `auth_post_meta_*` filters**, and the user,
 //!   comment, term meta (`edit_term_meta`), plugin, theme and multisite meta capabilities: they
 //!   map to themselves here, so they are refused unless granted by name.
-//! - **Taxonomy capabilities.** As for post types, a taxonomy's capability names come from an
-//!   interim rule (see [`TaxonomyCaps::for_taxonomy`]) until taxonomies are registered.
+//! - **Taxonomy capabilities.** As for post types: a check that gives the taxonomy's names
+//!   ([`TermContext::caps`]) uses them, and one that does not falls back to
+//!   [`TaxonomyCaps::for_taxonomy`].
 
 use crate::content::{Post, PostStatus};
 
@@ -78,6 +81,9 @@ pub struct TermContext<'a> {
     /// `default_{taxonomy}` option (`default_category`) and the `default_term_{taxonomy}` option,
     /// as [`default_term_ids`](crate::content::default_term_ids) reads them.
     pub default_terms: &'a [i64],
+    /// The taxonomy's capability names, from its registration. `None` takes
+    /// [`TaxonomyCaps::for_taxonomy`].
+    pub caps: Option<&'a TaxonomyCaps>,
 }
 
 /// The primitive capability names of one taxonomy, as `register_taxonomy` sets its `cap`.
@@ -104,7 +110,8 @@ impl TaxonomyCaps {
     /// - `nav_menu`: `edit_theme_options` for everything.
     /// - Any other taxonomy: `register_taxonomy`'s defaults, as for categories.
     ///
-    /// TODO(Task 5.x): read a custom taxonomy's capabilities from its registration.
+    /// A registered custom taxonomy's names come from its definition
+    /// ([`TaxonomyDef::caps`](crate::types::TaxonomyDef::caps)).
     pub fn for_taxonomy(taxonomy: &str) -> Self {
         let caps = |manage: &str, edit: &str, delete: &str, assign: &str| Self {
             manage_terms: manage.to_owned(),
@@ -175,6 +182,10 @@ pub struct PostContext<'a> {
     /// The site's special pages. When they are not given, a page is checked as if it might be
     /// any of them: `manage_options` is added to editing or deleting it.
     pub site_pages: Option<SitePages>,
+    /// The capability names of the post's type, from its registration. `None` takes
+    /// [`PostTypeCaps::for_post_type`]. A revision is checked as its parent, with the parent's
+    /// own `post_type_caps`.
+    pub post_type_caps: Option<&'a PostTypeCaps>,
 }
 
 impl<'a> PostContext<'a> {
@@ -185,7 +196,15 @@ impl<'a> PostContext<'a> {
             trash_meta_status: None,
             parent: None,
             site_pages: None,
+            post_type_caps: None,
         }
+    }
+
+    /// The capability names of the post's type: those given, or the interim rule's.
+    fn type_caps(&self) -> PostTypeCaps {
+        self.post_type_caps
+            .cloned()
+            .unwrap_or_else(|| PostTypeCaps::for_post_type(&self.post.post_type))
     }
 
     /// The parent, when the post has one and the one given is it.
@@ -247,6 +266,13 @@ impl<'a> PostContext<'a> {
 /// `post` gives `edit_posts`, `edit_others_posts`, ...; `page` gives `edit_pages`, ...
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostTypeCaps {
+    /// The meta capability `edit_{singular}`, such as `edit_book`: mapped as `edit_post` on a
+    /// post whose [`PostContext::post_type_caps`] name it (WordPress's `$post_type_meta_caps`).
+    pub edit_post: String,
+    /// The meta capability `read_{singular}`, mapped as `read_post`.
+    pub read_post: String,
+    /// The meta capability `delete_{singular}`, mapped as `delete_post`.
+    pub delete_post: String,
     /// `read`.
     pub read: String,
     /// `edit_{plural}`.
@@ -275,8 +301,17 @@ impl PostTypeCaps {
     /// The capability names for a `capability_type` such as `post` or `page`, whose plural is
     /// the name with an `s`, as WordPress makes it.
     pub fn for_capability_type(capability_type: &str) -> Self {
-        let plural = format!("{capability_type}s");
+        Self::for_singular_and_plural(capability_type, &format!("{capability_type}s"))
+    }
+
+    /// The capability names for a `capability_type` given as `[singular, plural]`, such as
+    /// `["story", "stories"]`: the meta capabilities take the singular (`edit_story`), the
+    /// primitive ones the plural (`edit_stories`).
+    pub fn for_singular_and_plural(singular: &str, plural: &str) -> Self {
         Self {
+            edit_post: format!("edit_{singular}"),
+            read_post: format!("read_{singular}"),
+            delete_post: format!("delete_{singular}"),
             read: "read".to_owned(),
             edit_posts: format!("edit_{plural}"),
             edit_others_posts: format!("edit_others_{plural}"),
@@ -291,9 +326,12 @@ impl PostTypeCaps {
         }
     }
 
-    /// Every capability name set to `cap`.
+    /// Every capability name set to `cap`, the meta capability names included.
     pub fn uniform(cap: &str) -> Self {
         Self {
+            edit_post: cap.to_owned(),
+            read_post: cap.to_owned(),
+            delete_post: cap.to_owned(),
             read: cap.to_owned(),
             edit_posts: cap.to_owned(),
             edit_others_posts: cap.to_owned(),
@@ -308,8 +346,39 @@ impl PostTypeCaps {
         }
     }
 
-    /// The capability names of `post_type`, by the interim rule of ruling R24 until the post
-    /// type registry exists:
+    /// The post meta capability (`edit_post`, `read_post` or `delete_post`) that `cap` names
+    /// on this type, when `cap` is one of the type's meta capability names (`edit_book`) and not
+    /// also one of its primitive names (a [`uniform`](Self::uniform) type's single name).
+    fn meta_cap(&self, cap: &str) -> Option<&'static str> {
+        let primitive = [
+            &self.read,
+            &self.edit_posts,
+            &self.edit_others_posts,
+            &self.edit_published_posts,
+            &self.edit_private_posts,
+            &self.delete_posts,
+            &self.delete_others_posts,
+            &self.delete_published_posts,
+            &self.delete_private_posts,
+            &self.publish_posts,
+            &self.read_private_posts,
+        ];
+        if primitive.iter().any(|name| *name == cap) {
+            return None;
+        }
+        if cap == self.edit_post {
+            Some("edit_post")
+        } else if cap == self.read_post {
+            Some("read_post")
+        } else if cap == self.delete_post {
+            Some("delete_post")
+        } else {
+            None
+        }
+    }
+
+    /// The capability names of `post_type` when its registration is not given, by the interim
+    /// rule of ruling R24:
     ///
     /// - `post`, `attachment` and `revision` use the `post` names, and `page` the `page` names,
     ///   as WordPress registers them.
@@ -319,10 +388,12 @@ impl PostTypeCaps {
     ///   too.
     /// - `customize_changeset` needs `customize` for everything, but editing a published
     ///   changeset is never allowed, as WordPress registers it.
-    /// - Every other type is not registered, so everything on it needs `edit_others_posts`, as
-    ///   WordPress maps a post of an unregistered type.
+    /// - Every other type is taken as not registered, so everything on it needs
+    ///   `edit_others_posts`, as WordPress maps a post of an unregistered type.
     ///
-    /// TODO(Task 5.2): read the type's capabilities from the post type registry.
+    /// A registered custom type's names come from its definition
+    /// ([`PostTypeDef::caps`](crate::types::PostTypeDef::caps)); a check that gives them in
+    /// [`PostContext::post_type_caps`] uses them instead.
     pub fn for_post_type(post_type: &str) -> Self {
         match post_type {
             "post" | "attachment" | "revision" => Self::for_capability_type("post"),
@@ -354,9 +425,7 @@ pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<
             edit_or_delete(user, post, Action::Delete)
         }),
         "read_post" | "read_page" => on_post(object, |post| read(user, post)),
-        "publish_post" => on_post(object, |post| {
-            vec![PostTypeCaps::for_post_type(&post.post.post_type).publish_posts]
-        }),
+        "publish_post" => on_post(object, |post| vec![post.type_caps().publish_posts]),
         "edit_post_meta" | "add_post_meta" | "delete_post_meta" => {
             on_post(object, |post| post_meta(cap, user, post, object))
         }
@@ -368,7 +437,10 @@ pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<
                 if cap == "delete_term" && term.default_terms.contains(&term.term_id) {
                     deny()
                 } else {
-                    let caps = TaxonomyCaps::for_taxonomy(term.taxonomy);
+                    let caps = term
+                        .caps
+                        .cloned()
+                        .unwrap_or_else(|| TaxonomyCaps::for_taxonomy(term.taxonomy));
                     let primitive = match cap {
                         "edit_term" => caps.edit_terms,
                         "delete_term" => caps.delete_terms,
@@ -379,7 +451,17 @@ pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<
             }
             _ => deny(),
         },
-        _ => vec![cap.to_owned()],
+        // A custom type's own meta capability names (`edit_book`), as WordPress's
+        // `$post_type_meta_caps` maps them for a type registered with `map_meta_cap`: the same
+        // as `edit_post`, `read_post` or `delete_post` on the post.
+        _ => match object
+            .and_then(Object::post)
+            .and_then(|post| post.post_type_caps)
+            .and_then(|caps| caps.meta_cap(cap))
+        {
+            Some(meta) => return map_meta_cap(meta, user, object),
+            None => vec![cap.to_owned()],
+        },
     };
     dedup(caps)
 }
@@ -499,7 +581,7 @@ const MANAGE_OPTIONS: &str = "manage_options";
 /// The post type capabilities `edit_post` or `delete_post` needs on `post`, before the special
 /// pages are counted.
 fn primitive_caps(user: &UserCaps, post: PostContext, action: Action) -> Vec<String> {
-    let caps = PostTypeCaps::for_post_type(&post.post.post_type);
+    let caps = post.type_caps();
     let (own, published, others, private) = match action {
         Action::Edit => (
             caps.edit_posts,
@@ -534,7 +616,7 @@ fn read(user: &UserCaps, post: PostContext) -> Vec<String> {
     let Some(status) = post.status() else {
         return deny();
     };
-    let caps = PostTypeCaps::for_post_type(&post.post.post_type);
+    let caps = post.type_caps();
     if status == PostStatus::Publish || post.is_by(user.id()) {
         return vec![caps.read];
     }

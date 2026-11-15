@@ -269,7 +269,7 @@ pub async fn add_menu_item(
         let is_menu: i64 = raw::fetch_scalar(
             &mut *tx,
             "SELECT COUNT(*) FROM term_taxonomy WHERE id = ? AND taxonomy = ?",
-            &[menu_tt.into(), Taxonomy::NAV_MENU.name.into()],
+            &[menu_tt.into(), (&*Taxonomy::NAV_MENU.name).into()],
         )
         .await?;
         if is_menu == 0 {
@@ -491,7 +491,7 @@ pub async fn nav_menu(
         db,
         "SELECT tt.id, t.name, t.slug FROM term_taxonomy tt INNER JOIN terms t ON t.id = tt.term_id \
          WHERE tt.term_id = ? AND tt.taxonomy = ?",
-        &[menu_term_id.into(), Taxonomy::NAV_MENU.name.into()],
+        &[menu_term_id.into(), (&*Taxonomy::NAV_MENU.name).into()],
     )
     .await?;
     let Some((menu_tt, name, slug)) = rows.into_iter().next() else {

@@ -68,6 +68,7 @@ struct App<'r> {
     kses: &'r KsesLimiter,
     frontend: Option<&'r Frontend>,
     meta: &'r MetaKeys,
+    post_types: &'r PostTypes,
 }
 
 #[rocket::async_trait]
@@ -81,14 +82,18 @@ impl<'r> FromRequest<'r> for App<'r> {
             rocket.state::<Arc<Hooks>>(),
             rocket.state::<Arc<KsesLimiter>>(),
             rocket.state::<Arc<MetaKeys>>(),
+            rocket.state::<Arc<PostTypes>>(),
         ) {
-            (Some(db), Some(hooks), Some(kses), Some(meta)) => Outcome::Success(Self {
-                db,
-                hooks,
-                kses,
-                frontend: rocket.state::<Arc<Frontend>>().map(|f| &**f),
-                meta,
-            }),
+            (Some(db), Some(hooks), Some(kses), Some(meta), Some(post_types)) => {
+                Outcome::Success(Self {
+                    db,
+                    hooks,
+                    kses,
+                    frontend: rocket.state::<Arc<Frontend>>().map(|f| &**f),
+                    meta,
+                    post_types,
+                })
+            }
             _ => {
                 log::error!("The posts routes ran before the app was ready");
                 Outcome::Error((Status::InternalServerError, ()))
@@ -113,6 +118,7 @@ impl<'r> App<'r> {
             theme: self.frontend.map(Frontend::theme),
             image_sizes: None,
             meta: self.meta,
+            post_types: self.post_types,
         }
     }
 }

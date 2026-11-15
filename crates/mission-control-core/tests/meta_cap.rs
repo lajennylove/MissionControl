@@ -7,9 +7,10 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDateTime;
 use mission_control_core::content::{Post, PostStatus};
+use mission_control_core::types::{Origin, PostTypeDef};
 use mission_control_core::users::{
-    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, Object, PostContext, SUBSCRIBER,
-    SitePages, TaxonomyCaps, TermContext, UserCaps, can, map_meta_cap,
+    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, Object, PostContext, PostTypeCaps,
+    SUBSCRIBER, SitePages, TaxonomyCaps, TermContext, UserCaps, can, map_meta_cap,
 };
 
 /// `post` on a site with none of the special pages set.
@@ -721,6 +722,7 @@ fn term(term_id: i64, taxonomy: &str) -> Object<'_> {
         term_id,
         taxonomy,
         default_terms: &[1],
+        caps: None,
     })
 }
 
@@ -780,6 +782,7 @@ fn term_capabilities_map_as_wordpress_maps_them() {
         term_id: 7,
         taxonomy: "genre",
         default_terms: &[3, 7],
+        caps: None,
     });
     assert_eq!(mapped("delete_term", Some(&by_term_option)), [DO_NOT_ALLOW]);
 }
@@ -810,4 +813,116 @@ fn editors_manage_terms_and_authors_assign_them() {
             "{role}"
         );
     }
+}
+
+/// The capability names of `book`, registered with `capability_type` `book`.
+fn book_caps() -> PostTypeCaps {
+    PostTypeDef::from_json(
+        r#"{"slug": "book", "capability_type": "book",
+            "labels": {"name": "Books", "singular_name": "Book"}}"#,
+        Origin::Code,
+    )
+    .unwrap()
+    .caps()
+}
+
+/// `post` with the capability names of its type and no special pages.
+fn typed<'a>(post: &'a Post, caps: &'a PostTypeCaps) -> Object<'a> {
+    Object::PostWithContext(PostContext {
+        site_pages: Some(SitePages::NONE),
+        post_type_caps: Some(caps),
+        ..PostContext::new(post)
+    })
+}
+
+#[test]
+fn a_custom_types_meta_capabilities_map_as_edit_post_does() {
+    let caps = book_caps();
+    assert_eq!(
+        (&*caps.edit_post, &*caps.read_post, &*caps.delete_post),
+        ("edit_book", "read_book", "delete_book")
+    );
+    let own_draft = post(1, ME, "book", Draft);
+    let own_published = post(2, ME, "book", Publish);
+    let others_draft = post(3, SOMEONE, "book", Draft);
+    let others_published = post(4, SOMEONE, "book", Publish);
+    let others_private = post(5, SOMEONE, "book", Private);
+    let cases: [(&str, &Post, &[&str]); 9] = [
+        ("edit_book", &own_draft, &["edit_books"]),
+        ("edit_book", &own_published, &["edit_published_books"]),
+        ("edit_book", &others_draft, &["edit_others_books"]),
+        (
+            "edit_book",
+            &others_published,
+            &["edit_others_books", "edit_published_books"],
+        ),
+        (
+            "edit_book",
+            &others_private,
+            &["edit_others_books", "edit_private_books"],
+        ),
+        ("read_book", &others_published, &["read"]),
+        ("read_book", &others_private, &["read_private_books"]),
+        ("read_book", &own_draft, &["read"]),
+        (
+            "delete_book",
+            &others_private,
+            &["delete_others_books", "delete_private_books"],
+        ),
+    ];
+    for (cap, post, want) in cases {
+        let object = typed(post, &caps);
+        assert_eq!(mapped(cap, Some(&object)), want, "{cap} on {}", post.id);
+        // The same as the generic meta capability.
+        let generic = cap.replace("book", "post");
+        assert_eq!(
+            mapped(&generic, Some(&object)),
+            want,
+            "{generic} on {}",
+            post.id
+        );
+    }
+
+    // A user granted the book capabilities by name may edit someone else's private book; an
+    // editor, who holds only the post ones, may not.
+    let granted: BTreeMap<String, bool> = ["edit_books", "edit_others_books", "edit_private_books"]
+        .into_iter()
+        .map(|cap| (cap.to_owned(), true))
+        .collect();
+    let librarian = UserCaps::with_default_roles(ME, &[SUBSCRIBER], &granted);
+    let object = typed(&others_private, &caps);
+    assert!(can(&librarian, "edit_book", Some(&object)));
+    assert!(!can(&user(EDITOR), "edit_book", Some(&object)));
+
+    // Without the type's names, or on a post, `edit_book` is a capability of its own.
+    assert_eq!(
+        mapped("edit_book", Some(&known(&others_private))),
+        ["edit_book"]
+    );
+    assert_eq!(mapped("edit_book", None), ["edit_book"]);
+}
+
+#[test]
+fn an_irregular_plural_names_the_meta_capabilities_by_the_singular() {
+    let caps = PostTypeDef::from_json(
+        r#"{"slug": "story", "capability_type": ["story", "stories"],
+            "labels": {"name": "Stories", "singular_name": "Story"}}"#,
+        Origin::Code,
+    )
+    .unwrap()
+    .caps();
+    assert_eq!(caps.edit_post, "edit_story");
+    assert_eq!(caps.edit_posts, "edit_stories");
+    let others = post(1, SOMEONE, "story", Private);
+    assert_eq!(
+        mapped("read_story", Some(&typed(&others, &caps))),
+        ["read_private_stories"]
+    );
+    // A uniform type's single name stays a primitive capability.
+    let menu = PostTypeCaps::for_post_type("nav_menu_item");
+    let item = post(2, SOMEONE, "nav_menu_item", Publish);
+    assert_eq!(
+        mapped("edit_theme_options", Some(&typed(&item, &menu))),
+        ["edit_theme_options"]
+    );
 }

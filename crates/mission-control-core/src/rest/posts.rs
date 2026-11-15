@@ -4,7 +4,7 @@
 //! A [`PostType`] describes what the controller reads from a post type's registration: its
 //! `rest_base`, whether it is hierarchical, what it supports and its taxonomies. [`PostTypes`]
 //! holds the types the API serves; it starts with `post` and `page`, and the post type registry
-//! (Task 5.2) registers the rest. A type whose `show_in_rest` is false has no route and is not
+//! ([`Registry`](crate::types::Registry)) registers the rest. A type whose `show_in_rest` is false has no route and is not
 //! listed in discovery. [`PostsController`] answers one request for one type, with no Rocket
 //! types: the `mission-control` crate mounts it.
 //!
@@ -56,6 +56,7 @@ mod write;
 
 pub(crate) use query::{collection_args, relevance};
 
+use std::borrow::Cow;
 use std::sync::{RwLock, RwLockReadGuard};
 
 use orbit_orm::{Database, Model};
@@ -72,26 +73,26 @@ use crate::theme::Theme;
 use crate::users::{Object, PostContext, PostTypeCaps, UserCaps, can, has_cap};
 
 /// A taxonomy as a post type shows it in the REST API: the taxonomy and the name of its field
-/// and route (`rest_base`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// and route (`rest_base`). Owned, so a custom taxonomy's can be made (Ruling R80).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestTaxonomy {
     /// The taxonomy.
     pub taxonomy: Taxonomy,
     /// Its `rest_base`: the post's field and the taxonomy's route, such as `categories`.
-    pub rest_base: &'static str,
+    pub rest_base: Cow<'static, str>,
 }
 
 impl RestTaxonomy {
     /// Categories, at `categories`.
     pub const CATEGORIES: Self = Self {
         taxonomy: Taxonomy::CATEGORY,
-        rest_base: "categories",
+        rest_base: Cow::Borrowed("categories"),
     };
 
     /// Tags, at `tags`.
     pub const TAGS: Self = Self {
         taxonomy: Taxonomy::POST_TAG,
-        rest_base: "tags",
+        rest_base: Cow::Borrowed("tags"),
     };
 }
 
@@ -153,6 +154,10 @@ pub struct PostType {
     pub supports: Supports,
     /// The taxonomies shown in the REST API, in order.
     pub taxonomies: Vec<RestTaxonomy>,
+    /// The type's capability names: from its registration (its definition's
+    /// [`caps`](crate::types::PostTypeDef::caps)), or [`PostTypeCaps::for_post_type`] for
+    /// WordPress's own types.
+    pub caps: PostTypeCaps,
 }
 
 impl PostType {
@@ -169,6 +174,7 @@ impl PostType {
                 ..Supports::ALL
             },
             taxonomies: vec![RestTaxonomy::CATEGORIES, RestTaxonomy::TAGS],
+            caps: PostTypeCaps::for_post_type("post"),
         }
     }
 
@@ -185,6 +191,7 @@ impl PostType {
                 ..Supports::ALL
             },
             taxonomies: Vec::new(),
+            caps: PostTypeCaps::for_post_type("page"),
         }
     }
 
@@ -210,6 +217,7 @@ impl PostType {
                 custom_fields: true,
             },
             taxonomies: Vec::new(),
+            caps: PostTypeCaps::for_post_type("attachment"),
         }
     }
 
@@ -218,10 +226,9 @@ impl PostType {
         self.name == "attachment"
     }
 
-    /// The type's capability names.
-    // TODO(Task 5.2): from the registered type.
+    /// The type's capability names: [`caps`](Self::caps).
     pub fn caps(&self) -> PostTypeCaps {
-        PostTypeCaps::for_post_type(&self.name)
+        self.caps.clone()
     }
 
     /// Whether the type has `parent` and `menu_order`.
@@ -289,6 +296,15 @@ impl PostTypes {
             .iter()
             .find(|t| t.show_in_rest && t.name == name)
             .cloned()
+    }
+
+    /// Removes the type named `name`. True when there was one. Its routes stay in a
+    /// [`RestRoutes`] they were registered on, but no request is served on them.
+    pub fn unregister(&self, name: &str) -> bool {
+        let mut types = self.types.write().unwrap_or_else(|e| e.into_inner());
+        let before = types.len();
+        types.retain(|t| t.name != name);
+        types.len() != before
     }
 
     /// The type named `name`, whether the REST API shows it or not.
@@ -384,6 +400,7 @@ fn route_specs(post_type: &PostType) -> [RouteSpec; 2] {
 ///     theme: Some(&theme),
 ///     image_sizes: None,
 ///     meta: &meta_keys,
+///     post_types: &post_types,
 /// };
 /// let response = controller.list("per_page=5").await?;
 /// ```
@@ -406,6 +423,9 @@ pub struct PostsController<'a> {
     pub image_sizes: Option<&'a ImageSizes>,
     /// The registered meta keys, shown and written under `meta`.
     pub meta: &'a MetaKeys,
+    /// The registered post types, for the capability names of a post of another type the
+    /// controller checks: a parent up an `inherit` chain, or the post media is attached to.
+    pub post_types: &'a PostTypes,
 }
 
 impl PostsController<'_> {
@@ -507,11 +527,21 @@ impl PostsController<'_> {
         trash: Option<PostStatus>,
         site: &Site,
     ) -> bool {
+        // A parent read up an `inherit` chain, or the post media is attached to, may be of
+        // another type: it takes its own type's names, from the registry.
+        let other_type;
+        let post_type_caps = if post.post_type == self.post_type.name {
+            Some(&self.post_type.caps)
+        } else {
+            other_type = self.post_types.registered(&post.post_type);
+            other_type.as_ref().map(|t| &t.caps)
+        };
         let context = PostContext {
             post,
             trash_meta_status: trash,
             parent: None,
             site_pages: Some(site.pages),
+            post_type_caps,
         };
         can(self.user, cap, Some(&Object::PostWithContext(context)))
     }
@@ -590,6 +620,7 @@ mod tests {
             show_in_rest: false,
             supports: Supports::ALL,
             taxonomies: Vec::new(),
+            caps: PostTypeCaps::for_capability_type("post"),
         });
         assert!(types.by_rest_base("books").is_none());
         assert_eq!(

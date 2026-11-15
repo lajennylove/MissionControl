@@ -38,6 +38,10 @@ pub const DATABASE_URL_VAR: &str = "MC_TEST_DATABASE_URL";
 /// core table here, above the tables it references; a test in `mission-control-core` checks that
 /// this list matches what the migrations create.
 pub const CORE_TABLES: &[&str] = &[
+    "field_group_locations",
+    "field_groups",
+    "taxonomies",
+    "post_types",
     "application_passwords",
     "term_meta",
     "user_meta",

@@ -5,6 +5,7 @@
 //! A parent is a term id (`term_id`), as in WordPress; post relationships refer to the
 //! `term_taxonomy_id`, as `wp_term_relationships` does.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -13,47 +14,62 @@ use orbit_orm::{Database, Error, Executor, Model, OrbitModel, Transaction, Value
 use super::post::{Post, PostStatus};
 use super::slug::{make_slug, sanitize_title};
 
-/// A taxonomy: its name and whether its terms nest. A minimal stand-in for the taxonomy
-/// definitions that custom taxonomies bring later; for now the built-ins are
-/// [`CATEGORY`](Self::CATEGORY), [`POST_TAG`](Self::POST_TAG) and [`NAV_MENU`](Self::NAV_MENU).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A taxonomy: its name, whether its terms nest, and its post types. The built-ins are
+/// [`CATEGORY`](Self::CATEGORY), [`POST_TAG`](Self::POST_TAG) and [`NAV_MENU`](Self::NAV_MENU);
+/// a custom taxonomy comes from its definition ([`TaxonomyDef`](crate::types::TaxonomyDef)),
+/// with owned names (Ruling R80), so the fields are [`Cow`]s.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Taxonomy {
     /// The name stored in `term_taxonomy.taxonomy`, at most 32 characters.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// Whether a term may have a parent, as categories do and tags do not.
     pub hierarchical: bool,
     /// The post types whose published posts a term's `count` counts.
-    pub object_types: &'static [&'static str],
+    pub object_types: Cow<'static, [Cow<'static, str>]>,
 }
 
 impl Taxonomy {
     /// Categories: hierarchical, for posts.
     pub const CATEGORY: Self = Self {
-        name: "category",
+        name: Cow::Borrowed("category"),
         hierarchical: true,
-        object_types: &["post"],
+        object_types: Cow::Borrowed(&[Cow::Borrowed("post")]),
     };
 
     /// Tags: flat, for posts.
     pub const POST_TAG: Self = Self {
-        name: "post_tag",
+        name: Cow::Borrowed("post_tag"),
         hierarchical: false,
-        object_types: &["post"],
+        object_types: Cow::Borrowed(&[Cow::Borrowed("post")]),
     };
 
     /// Navigation menus: each menu is a term, flat, and its items (`nav_menu_item` posts) are
     /// its objects, as WordPress registers `nav_menu`. Not public: it has no archive.
     pub const NAV_MENU: Self = Self {
-        name: "nav_menu",
+        name: Cow::Borrowed("nav_menu"),
         hierarchical: false,
-        object_types: &["nav_menu_item"],
+        object_types: Cow::Borrowed(&[Cow::Borrowed("nav_menu_item")]),
     };
+
+    /// A taxonomy with owned names, such as one from a definition.
+    pub fn new(name: impl Into<String>, hierarchical: bool, object_types: Vec<String>) -> Self {
+        Self {
+            name: Cow::Owned(name.into()),
+            hierarchical,
+            object_types: Cow::Owned(object_types.into_iter().map(Cow::Owned).collect()),
+        }
+    }
 
     /// The built-in taxonomy named `name`, if there is one.
     pub fn builtin(name: &str) -> Option<Self> {
         [Self::CATEGORY, Self::POST_TAG, Self::NAV_MENU]
             .into_iter()
             .find(|t| t.name == name)
+    }
+
+    /// Whether the taxonomy is for the post type `post_type`.
+    pub fn is_for(&self, post_type: &str) -> bool {
+        self.object_types.iter().any(|t| t == post_type)
     }
 }
 
@@ -141,7 +157,7 @@ pub enum TermError {
     /// A parent was given for a flat taxonomy, such as tags.
     NotHierarchical {
         /// The taxonomy's name.
-        taxonomy: &'static str,
+        taxonomy: String,
     },
     /// The parent is not a term of this taxonomy (`missing_parent`).
     MissingParent,
@@ -290,15 +306,15 @@ impl Term {
         }
         if new.parent_id.is_some() && !taxonomy.hierarchical {
             return Err(TermError::NotHierarchical {
-                taxonomy: taxonomy.name,
+                taxonomy: taxonomy.name.to_string(),
             });
         }
-        let taxonomy = *taxonomy;
+        let taxonomy = taxonomy.clone();
         db.transaction(async |tx| {
             if let Some(parent) = new.parent_id {
                 let found = TermTaxonomyRow::query()
                     .where_eq("term_id", parent)
-                    .where_eq("taxonomy", taxonomy.name)
+                    .where_eq("taxonomy", &*taxonomy.name)
                     .exists(tx.exec())
                     .await?;
                 if !found {
@@ -337,7 +353,7 @@ impl Term {
                     tx.exec(),
                     &[
                         ("term_id", term_id.into()),
-                        ("taxonomy", taxonomy.name.into()),
+                        ("taxonomy", Value::from(&*taxonomy.name)),
                         ("description", new.description.clone().into()),
                         ("parent_id", new.parent_id.into()),
                         ("count", 0_i64.into()),
@@ -351,7 +367,7 @@ impl Term {
                 name,
                 slug,
                 term_group: 0,
-                taxonomy: taxonomy.name.to_owned(),
+                taxonomy: taxonomy.name.to_string(),
                 description: new.description,
                 parent_id: new.parent_id,
                 count: 0,
@@ -397,10 +413,10 @@ impl Term {
         }
         if matches!(changes.parent_id, Some(Some(_))) && !taxonomy.hierarchical {
             return Err(TermError::NotHierarchical {
-                taxonomy: taxonomy.name,
+                taxonomy: taxonomy.name.to_string(),
             });
         }
-        let taxonomy = *taxonomy;
+        let taxonomy = taxonomy.clone();
         let term_id = self.term_id;
         let term_taxonomy_id = self.term_taxonomy_id;
         let gone = || {
@@ -422,7 +438,7 @@ impl Term {
                 Some(Some(parent)) => {
                     let found = TermTaxonomyRow::query()
                         .where_eq("term_id", parent)
-                        .where_eq("taxonomy", taxonomy.name)
+                        .where_eq("taxonomy", &*taxonomy.name)
                         .exists(tx.exec())
                         .await?;
                     if !found {
@@ -507,7 +523,7 @@ impl Term {
     pub async fn all(db: &Database, taxonomy: &Taxonomy) -> Result<Vec<Self>, Error> {
         let mut c = db;
         let rows = TermTaxonomyRow::query()
-            .where_eq("taxonomy", taxonomy.name)
+            .where_eq("taxonomy", &*taxonomy.name)
             .get(c.exec())
             .await?;
         Ok(by_name(with_terms(&mut c, rows).await?))
@@ -675,7 +691,7 @@ impl Post {
         term_taxonomy_ids: &[i64],
     ) -> Result<u64, Error> {
         let object_id = self.id;
-        let taxonomy = *taxonomy;
+        let taxonomy = taxonomy.clone();
         db.transaction(async |tx| {
             let current = related(tx, object_id, &taxonomy).await?;
             let removed: Vec<i64> = current
@@ -780,7 +796,7 @@ pub(crate) async fn terms_by_term_id(
         rows.extend(
             TermTaxonomyRow::query()
                 .where_in("term_id", chunk.iter().copied())
-                .where_eq("taxonomy", taxonomy.name)
+                .where_eq("taxonomy", &*taxonomy.name)
                 .get(c.exec())
                 .await?,
         );
@@ -833,7 +849,7 @@ async fn find_by_term_id<C: Conn>(
 ) -> Result<Option<Term>, Error> {
     let rows = TermTaxonomyRow::query()
         .where_eq("term_id", term_id)
-        .where_eq("taxonomy", taxonomy.name)
+        .where_eq("taxonomy", &*taxonomy.name)
         .get(c.exec())
         .await?;
     Ok(with_terms(c, rows).await?.pop())
@@ -854,7 +870,7 @@ async fn find_by_slug<C: Conn>(
         .collect();
     let rows = TermTaxonomyRow::query()
         .where_in("term_id", term_ids)
-        .where_eq("taxonomy", taxonomy.name)
+        .where_eq("taxonomy", &*taxonomy.name)
         .limit(1)
         .get(c.exec())
         .await?;
@@ -898,7 +914,7 @@ async fn existing<C: Conn>(
     parent_id: Option<i64>,
 ) -> Result<Option<i64>, Error> {
     let rows = TermTaxonomyRow::query()
-        .where_eq("taxonomy", taxonomy.name)
+        .where_eq("taxonomy", &*taxonomy.name)
         .where_eq("parent_id", parent_id)
         .get(c.exec())
         .await?;
@@ -977,7 +993,7 @@ async fn set_terms(
     term_taxonomy_ids: &[i64],
     append: bool,
 ) -> Result<(), Error> {
-    let taxonomy = *taxonomy;
+    let taxonomy = taxonomy.clone();
     db.transaction(async |tx| {
         set_terms_in(tx, object_id, &taxonomy, term_taxonomy_ids, append).await
     })
@@ -993,10 +1009,10 @@ pub(crate) async fn set_terms_in(
     term_taxonomy_ids: &[i64],
     append: bool,
 ) -> Result<(), Error> {
-    let taxonomy = *taxonomy;
+    let taxonomy = taxonomy.clone();
     let wanted: HashSet<i64> = TermTaxonomyRow::query()
         .where_in("id", term_taxonomy_ids.iter().copied())
-        .where_eq("taxonomy", taxonomy.name)
+        .where_eq("taxonomy", &*taxonomy.name)
         .get(tx.exec())
         .await?
         .into_iter()
@@ -1035,7 +1051,7 @@ async fn related<C: Conn>(
         "SELECT r.term_taxonomy_id FROM term_relationships r \
          INNER JOIN term_taxonomy tt ON tt.id = r.term_taxonomy_id \
          WHERE r.object_id = ? AND tt.taxonomy = ?",
-        &[object_id.into(), taxonomy.name.into()],
+        &[object_id.into(), Value::from(&*taxonomy.name)],
     )
     .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
@@ -1080,7 +1096,7 @@ async fn recount<C: Conn>(
         return Ok(());
     }
     let mut binds = vec![Value::from(PostStatus::Publish)];
-    binds.extend(taxonomy.object_types.iter().map(|&t| Value::from(t)));
+    binds.extend(taxonomy.object_types.iter().map(|t| Value::from(&**t)));
     binds.extend(term_taxonomy_ids.iter().map(|&id| Value::from(id)));
     raw::execute(
         c.exec(),
@@ -1135,7 +1151,7 @@ async fn give_default_term(
 ) -> Result<(), Error> {
     let mut given = false;
     for chunk in objects.chunks(500) {
-        let mut binds = vec![Value::from(taxonomy.name)];
+        let mut binds = vec![Value::from(&*taxonomy.name)];
         binds.extend(chunk.iter().map(|&id| Value::from(id)));
         let kept: HashSet<i64> = raw::fetch_all::<(i64,)>(
             tx.exec(),

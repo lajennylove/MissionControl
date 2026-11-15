@@ -109,7 +109,7 @@ async fn render(
             ctl.db,
             ctl.meta,
             MetaObject::Term,
-            ctl.taxonomy.taxonomy.name,
+            &ctl.taxonomy.taxonomy.name,
             &ids,
         )
         .await?

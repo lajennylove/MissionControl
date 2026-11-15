@@ -376,7 +376,7 @@ impl MetaRoutesController<'_> {
                 request
                     .post_type
                     .as_deref()
-                    .is_none_or(|post_type| t.taxonomy.object_types.contains(&post_type))
+                    .is_none_or(|post_type| t.taxonomy.is_for(post_type))
             })
             .collect();
         let may_assign = |t: &TaxonomySpec| can(self.user, &t.caps().assign_terms, None);
@@ -393,7 +393,7 @@ impl MetaRoutesController<'_> {
                 continue;
             }
             data.insert(
-                taxonomy.taxonomy.name.to_owned(),
+                taxonomy.taxonomy.name.to_string(),
                 Value::Object(taxonomy_json(&site, taxonomy, &request, false)),
             );
         }
@@ -519,12 +519,12 @@ impl MetaRoutesController<'_> {
         request: &Request,
         filter: bool,
     ) -> Map<String, Value> {
-        let taxonomies: Vec<&'static str> = self
+        let taxonomies: Vec<String> = self
             .taxonomies
             .shown_in_rest()
-            .iter()
-            .filter(|t| t.taxonomy.object_types.contains(&post_type.name.as_str()))
-            .map(|t| t.taxonomy.name)
+            .into_iter()
+            .filter(|t| t.taxonomy.is_for(&post_type.name))
+            .map(|t| t.taxonomy.name.into_owned())
             .collect();
         let labels = labels::post_type(post_type);
         let mut item = Map::new();
@@ -610,28 +610,18 @@ fn finish(
 /// capabilities: the meta capabilities first, then the primitive ones, then `create_posts`
 /// (`upload_files` for attachments).
 fn type_capabilities(post_type: &PostType) -> Value {
+    // The meta capability names come from the capability type's singular (`edit_story` for
+    // `["story", "stories"]`); a type WordPress does not know has every name one capability.
     let caps: PostTypeCaps = post_type.caps();
-    // `edit_posts` is `edit_{plural}` for a capability type; otherwise every name is one
-    // capability (WordPress's mapping of a type it does not know).
-    let singular = caps
-        .edit_posts
-        .strip_prefix("edit_")
-        .and_then(|plural| plural.strip_suffix('s'))
-        .filter(|singular| caps.edit_others_posts == format!("edit_others_{singular}s"))
-        .map(str::to_owned);
-    let meta = |verb: &str| match &singular {
-        Some(singular) => format!("{verb}_{singular}"),
-        None => caps.edit_posts.clone(),
-    };
     let create = if post_type.is_attachment() {
         "upload_files".to_owned()
     } else {
         caps.edit_posts.clone()
     };
     json!({
-        "edit_post": meta("edit"),
-        "read_post": meta("read"),
-        "delete_post": meta("delete"),
+        "edit_post": caps.edit_post,
+        "read_post": caps.read_post,
+        "delete_post": caps.delete_post,
         "edit_posts": caps.edit_posts,
         "edit_others_posts": caps.edit_others_posts,
         "delete_posts": caps.delete_posts,

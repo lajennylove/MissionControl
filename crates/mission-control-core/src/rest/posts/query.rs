@@ -98,7 +98,7 @@ struct ListParams {
     /// An attachment list's `mime_type`, when it is one of the media types'.
     mime_type: Option<String>,
     /// Per taxonomy: the `term_id`s a post must have one of, and those it must have none of.
-    terms: Vec<(&'static str, Vec<i64>, Vec<i64>)>,
+    terms: Vec<(String, Vec<i64>, Vec<i64>)>,
     fields: Fields,
     embed: Option<Vec<String>>,
 }
@@ -173,14 +173,14 @@ impl ListParams {
         .collect();
         let mut terms = Vec::new();
         for taxonomy in &post_type.taxonomies {
-            let base = taxonomy.rest_base;
+            let base = &*taxonomy.rest_base;
             let exclude_name = format!("{base}_exclude");
             let include = term_list(&mut r, base);
             let exclude = term_list(&mut r, &exclude_name);
             sizes.push((base.to_owned(), include.len()));
             sizes.push((exclude_name, exclude.len()));
             if !include.is_empty() || !exclude.is_empty() {
-                terms.push((taxonomy.taxonomy.name, include, exclude));
+                terms.push((taxonomy.taxonomy.name.to_string(), include, exclude));
             }
         }
         let statuses = read_statuses(ctl, &mut r);
@@ -508,7 +508,7 @@ impl Sql {
                      WHERE r.object_id = p.id AND tt.taxonomy = ? AND tt.term_id IN ({}))",
                     marks(values.len())
                 ));
-                binds.push((*taxonomy).into());
+                binds.push(taxonomy.as_str().into());
                 binds.extend(values.iter().map(|v| orbit_orm::Value::from(*v)));
             }
         }
@@ -722,7 +722,7 @@ pub(crate) fn collection_args(post_type: &PostType) -> Map<String, Value> {
         );
     }
     for taxonomy in &post_type.taxonomies {
-        let base = taxonomy.rest_base;
+        let base = &*taxonomy.rest_base;
         put(
             base,
             json!({"description": format!("Limit result set to items with specific terms assigned in the {base} taxonomy."), "type": "array", "items": {"type": "integer"}, "default": [], "required": false}),

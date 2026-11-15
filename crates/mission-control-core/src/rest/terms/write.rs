@@ -199,7 +199,7 @@ fn read_meta(ctl: &TermsController<'_>, params: &Params) -> Result<MetaUpdate, R
     MetaUpdate::read(
         ctl.meta,
         MetaObject::Term,
-        ctl.taxonomy.taxonomy.name,
+        &ctl.taxonomy.taxonomy.name,
         params,
     )
 }

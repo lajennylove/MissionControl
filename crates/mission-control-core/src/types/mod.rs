@@ -1,9 +1,11 @@
 //! Custom post types, taxonomies and field groups.
 //!
 //! [`definition`] holds the one definition format the admin's manager screens, Rust code and
-//! plugins all produce (design 5.3). The registry that loads and serves them is Task 5.2.
+//! plugins all produce (design 5.3). [`registry`] holds the definitions in use: those made in
+//! code and by plugins in memory, the admin's in the database.
 
 pub mod definition;
+pub mod registry;
 
 pub use definition::{
     CapabilityType, DefinitionError, FieldDef, FieldGroupDef, FieldKindDef, HasArchive,
@@ -13,3 +15,4 @@ pub use definition::{
     PostTypeDef, PostTypeLabels, Rewrite, RewriteRules, ShowInMenu, Support, TaxonomyCapabilities,
     TaxonomyDef, TaxonomyLabels,
 };
+pub use registry::{Definition, DefinitionKind, Registry, RegistryError};

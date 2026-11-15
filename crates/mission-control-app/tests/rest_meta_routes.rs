@@ -466,6 +466,7 @@ async fn registered_types_are_listed_only_when_shown_in_rest() {
         show_in_rest: false,
         supports: Supports::ALL,
         taxonomies: Vec::new(),
+        caps: mission_control_core::users::PostTypeCaps::for_post_type("book"),
     };
     post_types.register(book.clone());
     let types = ok(site.get("/wp-json/wp/v2/types", None).await).await;

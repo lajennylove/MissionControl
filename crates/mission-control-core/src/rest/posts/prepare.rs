@@ -326,7 +326,7 @@ fn full_item(
             .filter(|t| t.taxonomy == taxonomy.taxonomy.name)
             .map(|t| t.term_id)
             .collect();
-        put(taxonomy.rest_base, json!(ids));
+        put(&taxonomy.rest_base, json!(ids));
     }
     if options.context == Context::Edit {
         put(
@@ -594,7 +594,7 @@ struct Embeds {
     /// Each post's terms, by post id.
     post_terms: HashMap<i64, Vec<(String, i64)>>,
     /// The taxonomies' rest bases, by taxonomy name, in the type's order.
-    taxonomies: Vec<(&'static str, &'static str)>,
+    taxonomies: Vec<(String, String)>,
 }
 
 impl Embeds {
@@ -662,7 +662,7 @@ impl Embeds {
                     .taxonomies
                     .iter()
                     .find(|t| t.taxonomy.name == term.taxonomy)
-                    .map_or("", |t| t.rest_base);
+                    .map_or("", |t| &t.rest_base);
                 terms.insert(
                     (term.taxonomy.clone(), term.term_id),
                     json!({
@@ -690,7 +690,7 @@ impl Embeds {
                 .post_type
                 .taxonomies
                 .iter()
-                .map(|t| (t.taxonomy.name, t.rest_base))
+                .map(|t| (t.taxonomy.name.to_string(), t.rest_base.to_string()))
                 .collect(),
         })
     }

@@ -4,7 +4,8 @@
 //! A [`TaxonomySpec`] describes what the controller reads from a taxonomy's registration: the
 //! taxonomy (its name, whether it is hierarchical, its post types), its `rest_base` and whether
 //! the REST API shows it. [`Taxonomies`] holds the taxonomies the API serves; it starts with
-//! `category` and `post_tag`, and custom taxonomies (Task 5.x) register on it. A taxonomy whose
+//! `category` and `post_tag`, and the type registry ([`Registry`](crate::types::Registry))
+//! registers custom taxonomies on it. A taxonomy whose
 //! `show_in_rest` is false has no route and is not listed in discovery. [`TermsController`]
 //! answers one request for one taxonomy, with no Rocket types: the `mission-control` crate
 //! mounts it.
@@ -78,6 +79,10 @@ pub struct TaxonomySpec {
     /// Whether the REST API serves the taxonomy. One with `false` has no route and is not
     /// listed.
     pub show_in_rest: bool,
+    /// The taxonomy's capability names: from its registration (its definition's
+    /// [`caps`](crate::types::TaxonomyDef::caps)), or [`TaxonomyCaps::for_taxonomy`] for
+    /// WordPress's own taxonomies.
+    pub caps: TaxonomyCaps,
 }
 
 impl TaxonomySpec {
@@ -87,6 +92,7 @@ impl TaxonomySpec {
             taxonomy: Taxonomy::CATEGORY,
             rest_base: "categories".to_owned(),
             show_in_rest: true,
+            caps: TaxonomyCaps::for_taxonomy("category"),
         }
     }
 
@@ -96,12 +102,13 @@ impl TaxonomySpec {
             taxonomy: Taxonomy::POST_TAG,
             rest_base: "tags".to_owned(),
             show_in_rest: true,
+            caps: TaxonomyCaps::for_taxonomy("post_tag"),
         }
     }
 
-    /// The taxonomy's capability names.
+    /// The taxonomy's capability names: [`caps`](Self::caps).
     pub fn caps(&self) -> TaxonomyCaps {
-        TaxonomyCaps::for_taxonomy(self.taxonomy.name)
+        self.caps.clone()
     }
 
     /// The taxonomy's collection route, `/wp/v2/{rest_base}`.
@@ -145,6 +152,15 @@ impl Taxonomies {
             .iter()
             .find(|t| t.show_in_rest && t.rest_base == rest_base)
             .cloned()
+    }
+
+    /// Removes the taxonomy named `name`. True when there was one. Its routes stay in a
+    /// [`RestRoutes`] they were registered on, but no request is served on them.
+    pub fn unregister(&self, name: &str) -> bool {
+        let mut taxonomies = self.taxonomies.write().unwrap_or_else(|e| e.into_inner());
+        let before = taxonomies.len();
+        taxonomies.retain(|t| t.taxonomy.name != name);
+        taxonomies.len() != before
     }
 
     /// The taxonomy named `name`, whether the REST API shows it or not.
@@ -208,7 +224,7 @@ fn route_specs(taxonomy: &TaxonomySpec) -> [RouteSpec; 2] {
                 Endpoint::new(["POST"], Value::Object(write::schema_args(taxonomy, true))),
             ],
         )
-        .with_meta(MetaObject::Term, taxonomy.taxonomy.name),
+        .with_meta(MetaObject::Term, &*taxonomy.taxonomy.name),
         RouteSpec::new(
             item,
             vec![
@@ -217,7 +233,7 @@ fn route_specs(taxonomy: &TaxonomySpec) -> [RouteSpec; 2] {
                 Endpoint::new(["DELETE"], delete),
             ],
         )
-        .with_meta(MetaObject::Term, taxonomy.taxonomy.name),
+        .with_meta(MetaObject::Term, &*taxonomy.taxonomy.name),
     ]
 }
 
@@ -321,7 +337,7 @@ impl TermsController<'_> {
     /// The taxonomy's default terms, which nobody may delete: the `default_{taxonomy}` and
     /// `default_term_{taxonomy}` options, as WordPress's `delete_term` check reads them.
     async fn default_terms(&self) -> Result<Vec<i64>, RestError> {
-        default_term_ids(self.db, self.taxonomy.taxonomy.name)
+        default_term_ids(self.db, &self.taxonomy.taxonomy.name)
             .await
             .map_err(|e| database_error(&e))
     }
@@ -332,6 +348,7 @@ impl TermsController<'_> {
             term_id: term.term_id,
             taxonomy: &term.taxonomy,
             default_terms,
+            caps: Some(&self.taxonomy.caps),
         };
         can(self.user, cap, Some(&Object::Term(context)))
     }

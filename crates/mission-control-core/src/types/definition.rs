@@ -41,6 +41,7 @@
 //! assert!(book.ensure_editable().is_ok());
 //! ```
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt;
@@ -54,7 +55,9 @@ use serde_json::{Map, Value};
 pub use ignite_core::FieldKindDef;
 use ignite_core::{BlockDef, FieldDef as IgniteFieldDef};
 
+use crate::content::Taxonomy;
 use crate::rest::posts::{PostType, RestTaxonomy, Supports};
+use crate::rest::terms::TaxonomySpec;
 use crate::users::{PostTypeCaps, TaxonomyCaps};
 
 /// The longest post type slug WordPress registers (`register_post_type`).
@@ -1542,19 +1545,24 @@ impl PostTypeDef {
             taxonomies: self
                 .taxonomies
                 .iter()
-                .filter_map(|name| known.iter().find(|t| t.taxonomy.name == name).copied())
+                .filter_map(|name| known.iter().find(|t| t.taxonomy.name == *name).cloned())
                 .collect(),
+            caps: self.caps(),
         }
     }
 
     /// The type's capability names, as `get_post_type_capabilities` derives them with
-    /// `map_meta_cap` on: from the `capability_type`'s plural, with each name set in
-    /// `capabilities` in its place.
+    /// `map_meta_cap` on: the meta capabilities from the `capability_type`'s singular
+    /// (`edit_book`), the primitive ones from its plural, with each name set in `capabilities`
+    /// in its place.
     pub fn caps(&self) -> PostTypeCaps {
-        let plural = &self.capability_type.plural;
+        let CapabilityType { singular, plural } = &self.capability_type;
         let set = &self.capabilities;
         let cap = |given: &Option<String>, derived: String| given.clone().unwrap_or(derived);
         PostTypeCaps {
+            edit_post: format!("edit_{singular}"),
+            read_post: format!("read_{singular}"),
+            delete_post: format!("delete_{singular}"),
             read: cap(&set.read, "read".to_owned()),
             edit_posts: cap(&set.edit_posts, format!("edit_{plural}")),
             edit_others_posts: cap(&set.edit_others_posts, format!("edit_others_{plural}")),
@@ -1910,6 +1918,36 @@ impl TaxonomyDef {
     /// The taxonomy's permalink base, or `None` without permalinks.
     pub fn effective_rewrite_slug(&self) -> Option<&str> {
         self.rewrite.slug_or(&self.slug)
+    }
+
+    /// The taxonomy as the term functions and the REST controller read it: its name, whether it
+    /// is hierarchical, and its post types.
+    pub fn to_taxonomy(&self) -> Taxonomy {
+        Taxonomy::new(
+            self.slug.clone(),
+            self.hierarchical,
+            self.object_type.clone(),
+        )
+    }
+
+    /// The taxonomy as the REST controller serves it: [`to_taxonomy`](Self::to_taxonomy), its
+    /// `rest_base`, `show_in_rest` and [`caps`](Self::caps).
+    pub fn to_taxonomy_spec(&self) -> TaxonomySpec {
+        TaxonomySpec {
+            taxonomy: self.to_taxonomy(),
+            rest_base: self.effective_rest_base().to_owned(),
+            show_in_rest: self.show_in_rest,
+            caps: self.caps(),
+        }
+    }
+
+    /// The taxonomy as a post type shows it in the REST API: [`to_taxonomy`](Self::to_taxonomy)
+    /// and its `rest_base`.
+    pub fn to_rest_taxonomy(&self) -> RestTaxonomy {
+        RestTaxonomy {
+            taxonomy: self.to_taxonomy(),
+            rest_base: Cow::Owned(self.effective_rest_base().to_owned()),
+        }
     }
 
     /// The taxonomy's capability names: its `capabilities`, and the defaults
