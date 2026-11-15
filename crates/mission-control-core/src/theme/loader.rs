@@ -72,6 +72,12 @@ pub enum ThemeError {
         /// The theme's folder.
         dir: PathBuf,
     },
+    /// `theme.toml` is not a regular file in the theme's folder: a symbolic link, a FIFO, a
+    /// device or a folder. It is refused before it is opened.
+    ManifestNotAFile {
+        /// The manifest path.
+        path: PathBuf,
+    },
     /// `theme.toml` is over [`MAX_MANIFEST_BYTES`].
     ManifestTooLarge {
         /// The manifest file.
@@ -84,7 +90,8 @@ pub enum ThemeError {
     InvalidManifest {
         /// The manifest file.
         path: PathBuf,
-        /// What is wrong, naming the key or value.
+        /// What is wrong and where (line and column). It may name a key or a `supports` value
+        /// written as a slug, but never echoes any other value from the file.
         message: String,
     },
     /// `theme.toml` has no `name`, or an empty one.
@@ -143,6 +150,12 @@ impl fmt::Display for ThemeError {
                  `name`.",
                 dir.display()
             ),
+            ThemeError::ManifestNotAFile { path } => write!(
+                f,
+                "`{}` is not a regular file. Replace it with a {MANIFEST_FILE} file in the \
+                 theme's folder, not a link or a special file.",
+                path.display()
+            ),
             ThemeError::ManifestTooLarge { path, len } => write!(
                 f,
                 "`{}` is {len} bytes, over the {MAX_MANIFEST_BYTES}-byte limit for a theme \
@@ -151,7 +164,7 @@ impl fmt::Display for ThemeError {
             ),
             ThemeError::InvalidManifest { path, message } => write!(
                 f,
-                "`{}` is not a valid theme manifest: {message}. Fix that line.",
+                "`{}` is not a valid theme manifest: {message}. Fix it and load the theme again.",
                 path.display()
             ),
             ThemeError::MissingName { path } => write!(
@@ -259,14 +272,32 @@ fn read_theme(slug: String, dir: PathBuf) -> Result<Theme, ThemeError> {
         path: path.clone(),
         source,
     };
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
+    // Checked before opening: following a link would read a file outside the theme, and opening
+    // a FIFO for reading blocks until a writer comes.
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => return Err(ThemeError::ManifestNotAFile { path }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(ThemeError::MissingManifest { dir });
         }
         Err(error) => return Err(read_error(error)),
+    }
+    let file = match open_manifest(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ThemeError::MissingManifest { dir });
+        }
+        // `O_NOFOLLOW` refuses a link swapped in after the check with `ELOOP`.
+        Err(error) if error.raw_os_error() == Some(ELOOP) => {
+            return Err(ThemeError::ManifestNotAFile { path });
+        }
+        Err(error) => return Err(read_error(error)),
     };
-    let len = file.metadata().map_err(read_error)?.len();
+    let meta = file.metadata().map_err(read_error)?;
+    if !meta.is_file() {
+        return Err(ThemeError::ManifestNotAFile { path });
+    }
+    let len = meta.len();
     if len > MAX_MANIFEST_BYTES {
         return Err(ThemeError::ManifestTooLarge { path, len });
     }
@@ -290,6 +321,30 @@ fn read_theme(slug: String, dir: PathBuf) -> Result<Theme, ThemeError> {
         manifest,
         parent: None,
     })
+}
+
+/// The `ELOOP` error number, which `O_NOFOLLOW` returns for a symbolic link.
+#[cfg(unix)]
+const ELOOP: i32 = libc::ELOOP;
+#[cfg(not(unix))]
+const ELOOP: i32 = -1;
+
+/// Opens the manifest for reading without following a symbolic link and without blocking on a
+/// FIFO, so a file swapped in after [`read_theme`]'s check is refused too.
+#[cfg(unix)]
+fn open_manifest(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens the manifest for reading. Links and special files are refused by the check before it.
+#[cfg(not(unix))]
+fn open_manifest(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 impl Theme {

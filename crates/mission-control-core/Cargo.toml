@@ -50,6 +50,11 @@ uuid = { version = "1", features = ["v4"] }
 # Zeroes plain application passwords and their random bytes when dropped (Apache-2.0 OR MIT).
 zeroize = "1"
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` and `O_NONBLOCK`, to open a theme manifest without following a link or blocking on
+# a FIFO (MIT OR Apache-2.0).
+libc = "0.2"
+
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }
 tempfile = "3"

@@ -112,7 +112,7 @@ impl Manifest {
         let raw: RawManifest =
             toml::from_str(text).map_err(|error| ThemeError::InvalidManifest {
                 path: path.to_path_buf(),
-                message: error.message().to_owned(),
+                message: describe(&error, text),
             })?;
         let name = raw.name.as_deref().map(str::trim).unwrap_or_default();
         if name.is_empty() {
@@ -137,4 +137,68 @@ impl Manifest {
     pub fn supports(&self, feature: Support) -> bool {
         self.supports.contains(&feature)
     }
+}
+
+/// The longest key or `supports` value repeated in an error message.
+const MAX_ECHOED_NAME: usize = 64;
+
+/// What is wrong with a manifest and where, without echoing a value from the file: the text
+/// could be anything, and messages end up in logs. A key or `supports` value is named only when
+/// it is a short slug; a wrong type gives only the type expected.
+fn describe(error: &toml::de::Error, text: &str) -> String {
+    let message = error.message();
+    let what = if let Some(key) = quoted_after(message, "unknown field `") {
+        match echoable(key) {
+            Some(key) => format!("unknown key `{key}`"),
+            None => "an unknown key".to_owned(),
+        }
+    } else if let Some(value) = quoted_after(message, "unknown variant `") {
+        match echoable(value) {
+            Some(value) => format!("unknown `supports` value `{value}`"),
+            None => "an unknown `supports` value".to_owned(),
+        }
+    } else if message.starts_with("invalid type:") {
+        // serde writes "invalid type: <value>, expected <type>"; only the type is kept.
+        match message.rsplit_once(", expected ") {
+            Some((_, expected)) => format!("a value has the wrong type (expected {expected})"),
+            None => "a value has the wrong type".to_owned(),
+        }
+    } else if message.starts_with("duplicate key") {
+        "a key is written twice".to_owned()
+    } else {
+        "the TOML is not valid".to_owned()
+    };
+    match error
+        .span()
+        .and_then(|span| line_and_column(text, span.start))
+    {
+        Some((line, column)) => format!("{what} at line {line}, column {column}"),
+        None => what,
+    }
+}
+
+/// The text between `prefix` and the next backtick in `message`, if `message` starts with it.
+fn quoted_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    message
+        .strip_prefix(prefix)?
+        .split_once('`')
+        .map(|(name, _)| name)
+}
+
+/// `name` if it is safe to repeat: a short run of ASCII letters, digits, `-` and `_`.
+fn echoable(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name.len() <= MAX_ECHOED_NAME
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(name)
+}
+
+/// The 1-based line and column (in characters) of byte `offset` in `text`.
+fn line_and_column(text: &str, offset: usize) -> Option<(usize, usize)> {
+    let before = text.get(..offset)?;
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    Some((line, before[line_start..].chars().count() + 1))
 }

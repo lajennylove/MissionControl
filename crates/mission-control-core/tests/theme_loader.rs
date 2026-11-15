@@ -452,3 +452,98 @@ fn a_theme_is_found_by_its_folder_even_through_a_relative_path() {
     assert_eq!(theme.slug(), "dotted");
     assert_eq!(theme.dir(), dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_manifest_symlinked_outside_the_theme_is_refused_unread() {
+    let themes = Themes::new();
+    let outside = themes.root.parent().unwrap().join("outside.toml");
+    fs::write(&outside, format!("name = \"X\"\nleak = \"{SECRET}\"\n")).unwrap();
+    let dir = themes.root.join("linked-manifest");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("index.propel"), "").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("theme.toml")).unwrap();
+
+    let error = load_theme(&dir).unwrap_err();
+    assert!(
+        matches!(error, ThemeError::ManifestNotAFile { .. }),
+        "{error:?}"
+    );
+    assert!(!error.to_string().contains(SECRET), "{error}");
+    assert!(!error.to_string().contains("leak"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_manifest_is_refused_without_blocking() {
+    let themes = Themes::new();
+    let dir = themes.root.join("fifo");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("index.propel"), "").unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(dir.join("theme.toml"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // If the loader opened the FIFO for reading it would block forever; run it on a thread and
+    // give up after a few seconds.
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(load_theme(&dir).map(|_| ()));
+    });
+    let result = receive
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("loading a FIFO manifest blocked");
+    let error = result.unwrap_err();
+    assert!(
+        matches!(error, ThemeError::ManifestNotAFile { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn manifest_errors_give_the_line_and_column_but_never_a_value() {
+    let themes = Themes::new();
+
+    let error = manifest_error(&themes, "name = \"X\"\n\nlicence = \"secret-value\"\n");
+    let message = error.to_string();
+    assert!(message.contains("licence"), "{message}");
+    assert!(message.contains("line 3, column 1"), "{message}");
+    assert!(!message.contains("secret-value"), "{message}");
+
+    let error = manifest_error(&themes, "name = \"X\"\nsupports = \"secret-value\"\n");
+    let message = error.to_string();
+    assert!(message.contains("line 2"), "{message}");
+    assert!(!message.contains("secret-value"), "{message}");
+
+    let error = manifest_error(&themes, "name = \"X\"\nversion = 1.0\n");
+    let message = error.to_string();
+    assert!(message.contains("line 2"), "{message}");
+    assert!(!message.contains("1.0"), "{message}");
+
+    let error = manifest_error(&themes, "name = \"X\"\nauthor = \"secret-value\n");
+    let message = error.to_string();
+    assert!(message.contains("line 2"), "{message}");
+    assert!(!message.contains("secret-value"), "{message}");
+}
+
+#[test]
+fn a_child_cannot_extend_outside_the_theme_roots() {
+    let themes = Themes::new();
+    themes.theme("base", "name = \"Base\"\n", &[("index.propel", "")]);
+    let child = themes.theme(
+        "kid",
+        "name = \"Kid\"\ntemplate = \"base\"\n",
+        &[
+            ("dotdot.propel", "@extends('../../secrets')"),
+            ("other.propel", "@extends('other::secrets')"),
+        ],
+    );
+    let theme = load_theme(&child).unwrap();
+    let loader = theme.loader();
+
+    for view in ["kid::dotdot", "kid::other"] {
+        assert_confined(&render(&loader, view, &json!({})));
+    }
+}
