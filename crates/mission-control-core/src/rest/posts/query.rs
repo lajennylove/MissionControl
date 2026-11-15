@@ -36,9 +36,6 @@ fn statuses_of(post_type: &PostType) -> (&'static [&'static str], &'static str) 
     }
 }
 
-/// The most ids `include`, `exclude` and the other id lists take, so one query stays bounded.
-const MAX_LIST_IDS: usize = 500;
-
 /// How a list is ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrderBy {
@@ -187,17 +184,12 @@ impl ListParams {
             }
         }
         let statuses = read_statuses(ctl, &mut r);
-        for (name, list) in &sizes {
-            let (name, list) = (name.as_str(), *list);
-            if list > MAX_LIST_IDS {
-                r.invalid.add(
-                    name,
-                    "rest_too_many_items",
-                    format!("{name} must contain at most {MAX_LIST_IDS} items."),
-                    json!({"param": name}),
-                );
-            }
-        }
+        r.invalid.too_many(
+            &sizes
+                .iter()
+                .map(|(n, l)| (n.as_str(), *l))
+                .collect::<Vec<_>>(),
+        );
         r.invalid.finish()?;
         let (fields, embed) = read_envelope(params);
         Ok(Self {
@@ -619,7 +611,7 @@ async fn fetch(
 /// WordPress's search order (`WP_Query::parse_search_order`): with one term, posts whose title
 /// has it first; with more, the whole phrase in the title, then every term in the title, then
 /// any term in the title, then the phrase in the excerpt, then in the content.
-fn relevance(search: &str, terms: &[SearchTerm]) -> (String, Vec<orbit_orm::Value>) {
+pub(crate) fn relevance(search: &str, terms: &[SearchTerm]) -> (String, Vec<orbit_orm::Value>) {
     let like =
         |text: &str| orbit_orm::Value::from(format!("%{}%", escape_like(&text.to_lowercase())));
     let included: Vec<&SearchTerm> = terms.iter().filter(|t| !t.exclude).collect();

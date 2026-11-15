@@ -1321,15 +1321,48 @@ async fn a_protected_post_hides_its_content() {
     let (_, json) = body(site.get(&uri, None).await).await;
     assert_eq!(json["content"], json!({"rendered": "", "protected": true}));
     assert_eq!(json["excerpt"], json!({"rendered": "", "protected": true}));
-    assert_eq!(json["title"]["rendered"], json!("Locked"));
+    // `get_the_title`'s prefix (Ruling R70).
+    assert_eq!(json["title"]["rendered"], json!("Protected: Locked"));
     let (_, json) = body(site.get(&format!("{uri}?password=sesame"), None).await).await;
     assert_eq!(json["content"]["rendered"], json!("Hidden words"));
+    assert_eq!(json["title"]["rendered"], json!("Protected: Locked"));
     assert_error(
         site.get(&format!("{uri}?password=wrong"), None).await,
         Status::Forbidden,
         "rest_post_incorrect_password",
     )
     .await;
+}
+
+#[rocket::async_test]
+async fn a_private_posts_rendered_title_is_marked() {
+    let site = site().await;
+    let post = site
+        .create(
+            "author",
+            "post",
+            NewPost {
+                status: PostStatus::Private,
+                title: "Secret".into(),
+                content: "Inside".into(),
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, "post")
+            },
+        )
+        .await;
+    let uri = format!("/wp-json/wp/v2/posts/{}?context=edit", post.id);
+    let (status, json) = body(site.get(&uri, Some("editor")).await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(
+        json["title"],
+        json!({"raw": "Secret", "rendered": "Private: Secret"})
+    );
+    let (_, list) = body(
+        site.get("/wp-json/wp/v2/posts?status=private", Some("editor"))
+            .await,
+    )
+    .await;
+    assert_eq!(list[0]["title"]["rendered"], json!("Private: Secret"));
 }
 
 #[rocket::async_test]

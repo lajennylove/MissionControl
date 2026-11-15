@@ -15,9 +15,6 @@ use crate::rest::shared::{
 use crate::rest::{RestError, RestResponse};
 use crate::users::{Object, can};
 
-/// The most ids `include` and `exclude` (and slugs `slug`) take, so one query stays bounded.
-const MAX_LIST_IDS: usize = 500;
-
 /// The `orderby` values, as WordPress's terms controller lists them.
 const ORDERBY: &[&str] = &[
     "id",
@@ -80,20 +77,11 @@ impl ListParams {
         };
         let post = r.integer("post", None, None).filter(|p| *p != 0);
         let slug: Vec<String> = r.strings("slug");
-        for (name, len) in [
+        r.invalid.too_many(&[
             ("include", include.len()),
             ("exclude", exclude.len()),
             ("slug", slug.len()),
-        ] {
-            if len > MAX_LIST_IDS {
-                r.invalid.add(
-                    name,
-                    "rest_too_many_items",
-                    format!("{name} must contain at most {MAX_LIST_IDS} items."),
-                    json!({"param": name}),
-                );
-            }
-        }
+        ]);
         r.invalid.finish()?;
         let (fields, embed) = read_envelope(params);
         Ok(Self {

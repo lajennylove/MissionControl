@@ -182,6 +182,18 @@ fn guid(site: &Site, post: &Post) -> String {
     }
 }
 
+/// The title as `get_the_title` gives it outside the admin: `Protected: {title}` for a
+/// password-protected post, `Private: {title}` for a private one.
+pub(crate) fn rendered_title(post: &Post) -> String {
+    if post.password.as_deref().is_some_and(|p| !p.is_empty()) {
+        format!("Protected: {}", post.title)
+    } else if post.status == PostStatus::Private {
+        format!("Private: {}", post.title)
+    } else {
+        post.title.clone()
+    }
+}
+
 /// Every field of `post`, as the edit context shows it; [`by_context`] removes what another
 /// context leaves out.
 fn full_item(
@@ -226,7 +238,10 @@ fn full_item(
         json!(format!("{}{}", site.home, batch.links[index])),
     );
     if supports.title {
-        put("title", json!({"raw": post.title, "rendered": post.title}));
+        put(
+            "title",
+            json!({"raw": post.title, "rendered": rendered_title(post)}),
+        );
     }
     // Rendered only when it is shown: `the_content` runs the shortcodes.
     let rendered_content = if required

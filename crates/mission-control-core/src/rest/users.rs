@@ -60,9 +60,6 @@ use crate::users::{RoleAssignment, UserCaps, UserRoles, has_cap};
 /// How many ids one `IN (...)` binds.
 const IN_CHUNK: usize = 500;
 
-/// The most ids `include`, `exclude` and the other lists take, so one query stays bounded.
-const MAX_LIST_IDS: usize = 500;
-
 /// The avatar sizes, as `rest_get_avatar_sizes`.
 const AVATAR_SIZES: [u32; 3] = [24, 48, 96];
 
@@ -385,22 +382,13 @@ impl UsersController<'_> {
         let roles = r.strings("roles");
         let capabilities = r.strings("capabilities");
         let authors = r.one_of("who", &["authors"]).is_some();
-        for (name, len) in [
+        r.invalid.too_many(&[
             ("include", include.len()),
             ("exclude", exclude.len()),
             ("slug", slug.len()),
             ("roles", roles.len()),
             ("capabilities", capabilities.len()),
-        ] {
-            if len > MAX_LIST_IDS {
-                r.invalid.add(
-                    name,
-                    "rest_too_many_items",
-                    format!("{name} must contain at most {MAX_LIST_IDS} items."),
-                    json!({"param": name}),
-                );
-            }
-        }
+        ]);
         r.invalid.finish()?;
         let (fields, _) = read_envelope(params);
         Ok(ListParams {

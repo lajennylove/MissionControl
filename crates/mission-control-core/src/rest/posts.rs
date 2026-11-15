@@ -24,6 +24,8 @@
 //!   or deletes it for good with `force=true`.
 //! - `meta` shows the keys registered for the type in [`MetaKeys`], and creates and updates
 //!   write them, as [`super::meta`] describes.
+//! - `title.rendered` is the title as `get_the_title` gives it: `Protected: {title}` for a
+//!   password-protected post, `Private: {title}` for a private one.
 //! - Every create and update passes the title, content and excerpt through
 //!   [`kses_post_fields`](crate::content::kses_post_fields) for the acting user, on a blocking
 //!   thread behind [`KsesLimiter`]; every update records a revision.
@@ -52,7 +54,7 @@ pub(crate) mod prepare;
 mod query;
 mod write;
 
-pub(crate) use query::collection_args;
+pub(crate) use query::{collection_args, relevance};
 
 use std::sync::{RwLock, RwLockReadGuard};
 
@@ -287,6 +289,11 @@ impl PostTypes {
             .iter()
             .find(|t| t.show_in_rest && t.name == name)
             .cloned()
+    }
+
+    /// The type named `name`, whether the REST API shows it or not.
+    pub fn registered(&self, name: &str) -> Option<PostType> {
+        self.read().iter().find(|t| t.name == name).cloned()
     }
 
     /// The types shown in the REST API, in the order registered.

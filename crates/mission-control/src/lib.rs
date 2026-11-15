@@ -21,7 +21,8 @@
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
 //! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
 //! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the
-//! registered meta keys shown under `meta` (`Arc<MetaKeys>`, empty at start), the kses
+//! registered meta keys shown under `meta` (`Arc<MetaKeys>`, empty at start), the settings the
+//! REST API reads and writes (`Arc<Settings>`, WordPress's core settings at start), the kses
 //! limiter (`Arc<KsesLimiter>`), the uploads' storage (`Arc<dyn Storage>`, on the local disk in
 //! the uploads folder, `MC_UPLOADS_DIR`), the image size registry (`Arc<ImageSizes>`, WordPress's
 //! default sizes) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
@@ -29,8 +30,11 @@
 //!
 //! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, posts, pages and every
 //! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`, categories, tags and every
-//! taxonomy in [`Taxonomies`] the same way, users at `/wp-json/wp/v2/users` (reads only) and
-//! media at `/wp-json/wp/v2/media`. Uploads are served at `/wp-content/uploads/`, as data
+//! taxonomy in [`Taxonomies`] the same way, users at `/wp-json/wp/v2/users` (reads only),
+//! media at `/wp-json/wp/v2/media`, the content model at `/wp-json/wp/v2/types`, `/taxonomies`
+//! and `/statuses`, search at `/wp-json/wp/v2/search`, and the settings (administrators only) at
+//! `/wp-json/wp/v2/settings`. Code that registers a post type, taxonomy or setting after the app
+//! is built registers the routes again (`register_routes`), so discovery lists them. Uploads are served at `/wp-content/uploads/`, as data
 //! (`nosniff`, a sandbox policy, the stored type). REST clients sign in with
 //! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
 //! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
@@ -52,6 +56,7 @@ use mission_control_core::hooks::Hooks;
 use mission_control_core::media::{ImageSizes, LocalStorage, Storage};
 use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::posts::PostTypes;
+use mission_control_core::rest::settings::Settings;
 use mission_control_core::rest::terms::Taxonomies;
 use mission_control_core::rest::{KsesLimiter, RestRoutes};
 use mission_control_core::scheduler::Scheduler;
@@ -133,6 +138,10 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     taxonomies.register_routes(&rest_routes);
     mission_control_core::rest::users::register_routes(&rest_routes);
     mission_control_core::rest::media::register_routes(&rest_routes);
+    mission_control_core::rest::meta_routes::register_routes(&rest_routes);
+    mission_control_core::rest::search::register_routes(&rest_routes, &post_types, &taxonomies);
+    let settings = Arc::new(Settings::new());
+    settings.register_routes(&rest_routes);
     let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(config.uploads_dir.clone()));
     let image_sizes = Arc::new(ImageSizes::new());
     let upload_settings = rest::media::UploadSettings {
@@ -154,6 +163,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(post_types)
         .manage(taxonomies)
         .manage(meta_keys)
+        .manage(settings)
         .manage(kses)
         .manage(auth)
         .manage(storage)

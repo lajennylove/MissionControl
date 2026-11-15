@@ -147,6 +147,14 @@ impl Taxonomies {
             .cloned()
     }
 
+    /// The taxonomy named `name`, whether the REST API shows it or not.
+    pub fn registered(&self, name: &str) -> Option<TaxonomySpec> {
+        self.read()
+            .iter()
+            .find(|t| t.taxonomy.name == name)
+            .cloned()
+    }
+
     /// The taxonomies shown in the REST API, in the order registered.
     pub fn shown_in_rest(&self) -> Vec<TaxonomySpec> {
         self.read()

@@ -82,6 +82,10 @@ pub(crate) fn require(params: &Params, names: &[&str]) -> Result<(), RestError> 
     .with_data("params", json!(missing)))
 }
 
+/// The most items `include`, `exclude` and the other id and slug lists take, so one query stays
+/// bounded (Mission Control's limit; WordPress has none).
+pub(crate) const MAX_LIST_IDS: usize = 500;
+
 /// The parameters that failed validation, gathered so the error names them all.
 #[derive(Debug, Default)]
 pub(crate) struct Invalid {
@@ -124,6 +128,21 @@ impl Invalid {
             format!("{param} is not of type {kind}."),
             json!({"param": param}),
         );
+    }
+
+    /// `rest_too_many_items` for each of `lists` (a parameter's name and its length) longer than
+    /// [`MAX_LIST_IDS`].
+    pub(crate) fn too_many(&mut self, lists: &[(&str, usize)]) {
+        for (name, len) in lists {
+            if *len > MAX_LIST_IDS {
+                self.add(
+                    name,
+                    "rest_too_many_items",
+                    format!("{name} must contain at most {MAX_LIST_IDS} items."),
+                    json!({"param": name}),
+                );
+            }
+        }
     }
 
     /// `param` is not one of `allowed`.

@@ -15,6 +15,9 @@ base64 = "0.22"
 # BLAKE2b for application password hashes, as WordPress 6.8's `wp_fast_hash` (MIT OR Apache-2.0).
 blake2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The IANA timezone names, to check the `timezone_string` setting as WordPress checks it against
+# `timezone_identifiers_list` (MIT OR Apache-2.0; its `phf` dependency is MIT).
+chrono-tz = { version = "0.10", default-features = false }
 # Reads legacy Office (OLE compound) files to check their type (MIT). The version `infer` uses.
 cfb = "0.14"
 # Transliterates titles to ASCII slugs (BSD-3-Clause).
