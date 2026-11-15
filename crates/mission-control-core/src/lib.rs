@@ -7,6 +7,7 @@ pub mod front;
 pub mod hooks;
 pub mod media;
 pub mod migrations;
+pub mod rest;
 pub mod scheduler;
 mod text;
 pub mod theme;

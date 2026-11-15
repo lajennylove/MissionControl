@@ -19,12 +19,15 @@
 //!
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
-//! scheduler (`Arc<Scheduler>`) and the front end (`Arc<Frontend>`). The scheduler's loop starts
+//! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`) and the front end
+//! (`Arc<Frontend>`). The scheduler's loop starts
 //! at liftoff, once the server listens, and runs due events every minute.
 //!
-//! Not mounted yet: the admin (Ignite) and the REST API.
+//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`. Not mounted yet: the admin
+//! (Ignite).
 
 mod front;
+mod rest;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +36,7 @@ use mission_control_core::config::Config;
 use mission_control_core::content::{Shortcodes, register_publish_future_post};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
+use mission_control_core::rest::RestRoutes;
 use mission_control_core::scheduler::Scheduler;
 use orbit_orm::Database;
 use rocket::fairing::AdHoc;
@@ -45,6 +49,10 @@ const SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
 /// The rank of the public site's catch-all route. Higher than [`ASSET_RANK`], so a theme's
 /// built file is served before the site looks the path up.
 const FRONT_RANK: isize = 20;
+
+/// The rank of the REST routes that answer a family of paths (`/wp-json/<path..>`, the
+/// `rest_route` query). Below [`FRONT_RANK`], above every route with a path of its own.
+const REST_RANK: isize = 5;
 
 /// The rank of a theme's built assets. A missing file forwards to the public site, which
 /// answers with the theme's 404.
@@ -71,10 +79,13 @@ fn build(config: Config, db: Option<Arc<Database>>) -> Rocket<Build> {
     let hooks = Arc::new(Hooks::new());
     let shortcodes = Arc::new(Shortcodes::new());
     shortcodes.register_the_content(&hooks);
+    let rest_routes = Arc::new(RestRoutes::new());
 
     rocket::build()
         .manage(Arc::clone(&hooks))
         .manage(shortcodes)
+        .manage(rest_routes)
+        .mount("/", rest::routes(REST_RANK))
         .attach(AdHoc::try_on_ignite("Mission Control", move |rocket| {
             ignite(rocket, config, db, hooks)
         }))

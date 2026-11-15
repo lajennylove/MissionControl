@@ -1351,6 +1351,7 @@ dependencies = [
  "orbit-orm",
  "propel_runtime",
  "rocket",
+ "serde_json",
  "tokio",
 ]
 
