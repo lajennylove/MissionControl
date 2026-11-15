@@ -9,6 +9,7 @@ pub mod media;
 pub mod migrations;
 pub mod scheduler;
 mod text;
+pub mod theme;
 pub mod users;
 
 pub mod install;
