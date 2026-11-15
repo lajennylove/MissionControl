@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use mission_control_core::content::{
-    FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_NESTING, PostFields, kses_data,
-    kses_post, kses_post_fields, kses_title, safecss_filter_attr,
+    FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_FORMATTING_ATTRIBUTES,
+    MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
+    safecss_filter_attr,
 };
 use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, UserCaps};
 
@@ -509,12 +510,51 @@ fn long_attributes_reopened_in_every_paragraph_are_refused_in_bounded_time() {
         assert!(kses_post(&html).starts_with("&lt;"), "{}", &html[..20]);
     }
     assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
-    // A long attribute on an element that is closed is fine.
+    // A link closed at once is kept with an `href` up to the cap.
+    let href = format!("/{}", "a".repeat(MAX_FORMATTING_ATTRIBUTES - 10));
     let closed = format!(
         "<p><b style=\"color: red\">x</b></p><p><a href=\"{href}\">y</a></p>{}",
         "<p>z</p>".repeat(5_000)
     );
     assert_eq!(kses_post(&closed), closed);
+    // Past the cap, a formatting element's attributes are refused even when it is closed.
+    let href = format!("/{}", "a".repeat(20_000));
+    let closed = format!("<p><a href=\"{href}\">y</a></p>");
+    assert!(kses_post(&closed).starts_with("&lt;"));
+    let span = format!("<p><span title=\"{href}\">y</span></p>");
+    assert_eq!(
+        kses_post(&span),
+        span,
+        "other elements keep long attributes"
+    );
+}
+
+#[test]
+fn a_misnested_formatting_element_kept_by_the_parser_is_refused_in_bounded_time() {
+    // `</b>` acts on the last active `<b>`: in `<div><b BIG><p><b></p></b></div>` that is the
+    // inner one, already closed by `</p>`, so the parser drops it and keeps BIG active, and
+    // reopens BIG in every later paragraph (a 30 KB `style` in 52,000 paragraphs took 32 s and
+    // 1.7 GB). The pre-scan keeps BIG active too, and charges it.
+    let style = format!("color: red;{}", " ".repeat(3_000));
+    let href = format!("/{}", "a".repeat(3_000));
+    let paragraphs = "<p>x".repeat(5_000);
+    let started = Instant::now();
+    for html in [
+        format!("<div><b style=\"{style}\"><p><b></p></b></div>{paragraphs}"),
+        format!("<ul><li><b style=\"{style}\"><p><b></p></b></li></ul>{paragraphs}"),
+        format!("<b style=\"{style}\"><p><b></p></b>{paragraphs}"),
+        format!("<div><a href=\"{href}\"><p><a></p></a></div>{paragraphs}"),
+        format!("<div><em style=\"{style}\"><p><em></p></em></div>{paragraphs}"),
+    ] {
+        assert!(kses_post(&html).starts_with("&lt;"), "{}", &html[..12]);
+    }
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
+    // Closed in order, the same markup is kept.
+    let kept = format!(
+        "<div><b style=\"color: red\"><p><b>y</b></p></b></div>{}",
+        "<p>x</p>".repeat(5_000)
+    );
+    assert_eq!(kses_post(&kept), kept);
 }
 
 #[test]

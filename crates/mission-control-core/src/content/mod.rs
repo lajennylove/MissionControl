@@ -36,8 +36,9 @@ pub use future::{
     schedule_future_post,
 };
 pub use kses::{
-    FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_NESTING, PostFields, kses_data,
-    kses_post, kses_post_fields, kses_title, safecss_filter_attr,
+    FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_FORMATTING_ATTRIBUTES,
+    MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
+    safecss_filter_attr,
 };
 pub(crate) use meta::put_post_meta_in;
 pub use meta::{

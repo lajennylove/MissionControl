@@ -47,9 +47,11 @@
 //!   the helper, or check the size first.
 //! - **Shape.** Input nested deeper than [`MAX_NESTING`] elements (the parser's time grows with
 //!   length times depth), holding more than [`MAX_ACTIVE_FORMATTING`] formatting elements active
-//!   at once, or that would make the parser copy more start-tag bytes than about the input's
-//!   length (it reopens every unclosed formatting element, attributes and all, in each new
-//!   block, and clones misnested ones), is not parsed: it is stored as escaped text, so nothing
+//!   at once, with a formatting element (`<a>`, `<b>`, `<em>`…) whose start tag has more than
+//!   [`MAX_FORMATTING_ATTRIBUTES`] (4 KB) of attributes, even when it is closed at once, or that
+//!   would make the parser copy more start-tag bytes than about the input's length (it reopens
+//!   every unclosed formatting element, attributes and all, in each new block, and clones
+//!   misnested ones), is not parsed: it is stored as escaped text, so nothing
 //!   runs and nothing typed is lost (a title is kept as typed). So is input whose length times
 //!   its number of `&` and `0xC2` bytes passes ten billion (html5ever 0.40's serialiser rescans
 //!   a value after each of them).
@@ -60,7 +62,11 @@
 //!   many blocks. One unclosed link with a long `href` (or a long `style`) followed by many
 //!   paragraphs is refused by the pre-scan, cheaply, since the parser would copy the `href` into
 //!   every paragraph; a short unclosed `<b>` across thousands of paragraphs is kept, as browsers
-//!   show it.
+//!   show it. A link whose `href` (or a formatting element whose `style`, `title`…) passes 4 KB
+//!   is refused even when it is well-formed; other elements (`<span>`, `<img>`, `<p>`…) keep
+//!   long attributes. A formatting end tag that does not close the last element open (such as
+//!   `</b>` after `<b><p><b></p>`) leaves every `<b>` counted as active, so sloppy markup of that
+//!   kind followed by many blocks can be refused too.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -681,6 +687,13 @@ const FORMATTING_ELEMENTS: &[&str] = &[
 /// a handful at most.
 pub const MAX_ACTIVE_FORMATTING: usize = 32;
 
+/// The most attribute bytes (everything between the name and the closing `>`) a formatting
+/// element's start tag may have; past it, the input is not parsed, as past
+/// [`MAX_NESTING`]. The parser copies these bytes each time it reopens or clones the element, so
+/// this bounds the cost of each copy even where the pre-scan's model of the tree is wrong. A
+/// link's `href` or a `style` longer than 4 KB is rare in post content.
+pub const MAX_FORMATTING_ATTRIBUTES: usize = 4 * 1024;
+
 /// How much larger than its input kses's output may be: this many times the input, plus
 /// [`OUTPUT_ALLOWANCE`]. Escaping text makes at most five times (`&` as `&amp;`); a parse that
 /// writes more is reopening elements, and is refused like input past the caps.
@@ -783,8 +796,10 @@ fn output_budget(input: &str) -> usize {
 ///   `<svg` or `<math` tag, since in SVG and MathML those names are ordinary elements); `<li>`
 ///   closes an open `<li>`, `<dd>` or `<dt>` an open `<dd>` or `<dt>`, and `<p>` an open `<p>`;
 /// - a [formatting element](FORMATTING_ELEMENTS) also counts as active, with the length of its
-///   start tag, and stops counting only when its end tag comes while it is the last element open
-///   (the parser keeps it active, and reopens it, after any other end);
+///   start tag (whose attributes may not pass [`MAX_FORMATTING_ATTRIBUTES`]), and stops counting
+///   only when its end tag comes while it is both the last element open and the last active
+///   one with its name (the entry the parser's adoption agency acts on); after any other end,
+///   the parser may keep it active and reopen it, so the model keeps every entry;
 /// - an end tag closes only the element it names when that element is the last counted one open
 ///   (and `</ul>`, `</ol>`, `</menu>` and `</dl>` their open items first; `</p>` its paragraph
 ///   when only formatting elements are open in it), and only when no uncounted element other
@@ -822,6 +837,11 @@ fn nesting_within_cap(html: &str) -> bool {
         if next.is_ascii_alphabetic() {
             let (name_end, after) = scan_tag(bytes, i);
             let name = html[i..name_end].to_ascii_lowercase();
+            if FORMATTING_ELEMENTS.contains(&name.as_str())
+                && attribute_bytes(bytes, name_end, after) > MAX_FORMATTING_ATTRIBUTES
+            {
+                return false;
+            }
             i = after;
             tree.charge_start(&name, foreign);
             if name == "plaintext" && !foreign {
@@ -885,9 +905,18 @@ fn nesting_within_cap(html: &str) -> bool {
     tree.within_caps() && tree.reopened <= reopen_budget
 }
 
-/// The elements whose start tag never closes an element in the parser, nor opens one that
-/// stays open as a [special] element: the formatting elements and the other phrasing elements
-/// (`<img>`, `<br>` and `<wbr>` are special, but void, so closed at once).
+/// The phrasing elements other than the formatting ones. With the
+/// [formatting elements](FORMATTING_ELEMENTS), their start tags never open an element that stays
+/// open as a [special] element (`<img>`, `<br>` and `<wbr>` are special, but void, so closed at
+/// once), so they do not expose the active formatting elements to the adoption agency
+/// (`TreeModel::last_block`).
+///
+/// They can close elements, which the model does not follow (it keeps those open: more, never
+/// fewer): `<a>` and `<nobr>` run the adoption agency for an active one (charged separately);
+/// in a `<colgroup>`, any of them closes the colgroup (uncounted, so kept open by the model);
+/// and in SVG or MathML many of them (`<b>`, `<span>`, `<sub>`…) close the foreign elements open
+/// (when the input has an `<svg` or `<math` tag, the model treats every start tag as one that
+/// may open a special element).
 ///
 /// [special]: https://html.spec.whatwg.org/multipage/parsing.html#special
 const PHRASING_ELEMENTS: &[&str] = &[
@@ -982,10 +1011,18 @@ struct Active {
 /// active ones (at most [`MAX_ACTIVE_FORMATTING`] and one more, since the pass stops past the
 /// cap), so the pass stays linear.
 ///
-/// The model closes an element only when the parser does too, and keeps every formatting
-/// element the parser keeps in its list of active formatting elements (it lets one go only when
-/// its end tag comes while it is the last element open), so [`TreeModel::active`] holds every
-/// element the parser may reopen or clone.
+/// Where the model cannot tell what the parser does, it keeps elements open and entries active
+/// (more, never fewer). It lets an active entry go at one point only, in [`TreeModel::end`]: a
+/// formatting end tag whose name's last active entry is the element open last, with nothing
+/// open after it, and no element counted in text that may be markup. The parser then acts on
+/// the same entry: its adoption agency picks the last entry with the name, and the model's
+/// entries are a superset of the parser's in the same order per name (the parser only drops
+/// entries, replaces one with its clone in place, or moves the one it acts on later, past
+/// entries of other names only); that element is the parser's current node, or has only
+/// reopened formatting elements after it, so no special element is open after it and the
+/// parser closes it and drops its entry. So [`TreeModel::active`] holds every element the
+/// parser may reopen or clone. Elements are closed (`end`, `end_paragraph`, the item pops in
+/// `start`) only as the parser closes them; closing never drops an active entry.
 #[derive(Default)]
 struct TreeModel {
     /// The uncounted elements open before any counted one.
@@ -1098,7 +1135,15 @@ impl TreeModel {
         }
         for at in 0..text.len() - 1 {
             if text[at] == b'<' && text[at + 1].is_ascii_alphabetic() {
-                let (_, after) = scan_tag(bytes, from + at + 1);
+                let (name_end, after) = scan_tag(bytes, from + at + 1);
+                let name = &bytes[from + at + 1..name_end];
+                if FORMATTING_ELEMENTS
+                    .iter()
+                    .any(|f| f.as_bytes().eq_ignore_ascii_case(name))
+                    && attribute_bytes(bytes, name_end, after) > MAX_FORMATTING_ATTRIBUTES
+                {
+                    return false;
+                }
                 self.unclosable_bytes = self.unclosable_bytes.saturating_add(after - (from + at));
             }
         }
@@ -1163,19 +1208,26 @@ impl TreeModel {
 
     /// An end tag `name`.
     fn end(&mut self, name: &str) {
-        if let Some(top) = self.open.last()
-            && top.uncounted.is_empty()
-            && top.formatting
-            && top.name == name
-        {
-            // The formatting element is the last one open: closed, and no longer active.
-            let seq = top.seq;
-            self.open.pop();
-            self.active.retain(|a| a.seq != seq);
-            return;
-        }
         if FORMATTING_ELEMENTS.contains(&name) {
-            // Any other end of a formatting element keeps it active.
+            // The adoption agency acts on the last active entry with this name (the parser's
+            // "formatting element"), not on the element open last. Only when that entry is the
+            // element open last, with nothing open after it, does the parser certainly close it
+            // and drop its entry; the model does the same. In every other case (the entry is not
+            // open, so the parser drops that entry and keeps the open one; or something is open
+            // after it, so the parser may clone it), the model drops nothing and closes nothing.
+            // Elements counted in text that may be markup could be later entries with this name,
+            // so with any of them, nothing is dropped either.
+            let last = self.active.iter().rev().find(|a| a.name == name);
+            if let (Some(last), Some(top)) = (last, self.open.last())
+                && self.unclosable == 0
+                && top.formatting
+                && top.uncounted.is_empty()
+                && top.seq == last.seq
+            {
+                let seq = last.seq;
+                self.open.pop();
+                self.active.retain(|a| a.seq != seq);
+            }
             return;
         }
         if name == "p" {
@@ -1292,6 +1344,14 @@ fn scan_tag(bytes: &[u8], name_start: usize) -> (usize, usize) {
             }
         }
     }
+}
+
+/// The attribute bytes of the tag whose name ends at `name_end` and that ends before `after`
+/// ([`scan_tag`]): everything between the name and the closing `>` (to the end of the input
+/// when the tag does not end).
+fn attribute_bytes(bytes: &[u8], name_end: usize, after: usize) -> usize {
+    let closed = after > name_end && bytes[after - 1] == b'>';
+    after - name_end - usize::from(closed)
 }
 
 /// The index after the comment whose text starts at `start` (after `<!--`), as the HTML
@@ -1887,12 +1947,78 @@ mod tests {
     }
 
     #[test]
+    fn a_formatting_end_tag_lets_go_only_of_the_entry_the_parser_lets_go() {
+        // `<div><b BIG><p><b></p></b></div>`: `</p>` closes the inner `<b>` (it stays active),
+        // and `</b>` then acts on the last active `<b>`, the inner one, which is not open: the
+        // parser drops that entry and keeps BIG open and active. The model must not drop BIG.
+        let mut tree = TreeModel::default();
+        tree.start("div".to_owned(), 5, false);
+        tree.start("b".to_owned(), 2_000, false);
+        tree.seq += 1;
+        tree.start("p".to_owned(), 3, false);
+        tree.start("b".to_owned(), 3, false);
+        tree.seq += 1;
+        tree.end("p");
+        tree.end("b");
+        assert!(
+            tree.active.iter().any(|a| a.bytes == 2_000),
+            "BIG stays active"
+        );
+        tree.end("div");
+        assert!(tree.active.iter().any(|a| a.bytes == 2_000));
+
+        // So every later paragraph reopens BIG, and the pass charges it.
+        let style = format!("color: red;{}", " ".repeat(2_000));
+        let href = format!("/{}", "a".repeat(2_000));
+        let paragraphs = "<p>x".repeat(3_000);
+        for html in [
+            format!("<div><b style=\"{style}\"><p><b></p></b></div>{paragraphs}"),
+            format!("<ul><li><b style=\"{style}\"><p><b></p></b></li></ul>{paragraphs}"),
+            format!("<b style=\"{style}\"><p><b></p></b>{paragraphs}"),
+            format!("<div><a href=\"{href}\"><p><a></p></a></div>{paragraphs}"),
+            format!("<div><em title=\"{href}\"><p><em></p></em></div>{paragraphs}"),
+            format!(
+                "<div><b style=\"{style}\"><p><b></p></b></div>\
+                 <div><i style=\"{style}\"><p><i></p></i></div>{paragraphs}"
+            ),
+        ] {
+            assert!(!nesting_within_cap(&html), "{}", &html[..12]);
+        }
+        // The same element closed while it is the last open still stops being active.
+        assert!(nesting_within_cap(&format!(
+            "<div><b style=\"{style}\"><p>x</p></b></div>{paragraphs}"
+        )));
+    }
+
+    #[test]
+    fn formatting_start_tags_longer_than_the_cap_are_refused() {
+        let at_cap = format!(
+            "<b title=\"{}\">",
+            "a".repeat(MAX_FORMATTING_ATTRIBUTES - 9)
+        );
+        assert_eq!(at_cap.len(), MAX_FORMATTING_ATTRIBUTES + 3);
+        assert!(nesting_within_cap(&format!("<p>{at_cap}x</b></p>")));
+        let past = format!(
+            "<b title=\"{}\">",
+            "a".repeat(MAX_FORMATTING_ATTRIBUTES - 8)
+        );
+        assert!(!nesting_within_cap(&format!("<p>{past}x</b></p>")));
+        for name in FORMATTING_ELEMENTS {
+            let html = format!("<{name} title=\"{}\">x</{name}>", "a".repeat(5_000));
+            assert!(!nesting_within_cap(&html), "{name}");
+        }
+        // Other elements keep long attributes.
+        let html = format!("<span title=\"{}\">x</span>", "a".repeat(20_000));
+        assert!(nesting_within_cap(&html));
+    }
+
+    #[test]
     fn the_serialising_work_counts_ampersands_and_0xc2_bytes() {
         for html in [
             "&".repeat(150_000),
             "\u{a0}".repeat(150_000),
             "\u{b0}".repeat(150_000),
-            format!("<a title=\"{}\">x</a>", "\u{a9}".repeat(150_000)),
+            format!("<span title=\"{}\">x</span>", "\u{a9}".repeat(150_000)),
         ] {
             assert!(nesting_within_cap(&html), "the shape is fine");
             assert!(!parse_is_bounded(&html), "the serialising work is not");
