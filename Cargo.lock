@@ -1516,9 +1516,9 @@ dependencies = [
 
 [[package]]
 name = "orbit-orm"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afc84e90f4bd2d39bb4c15a4c7960175714eec9e80403c8402e0238420f6cdcd"
+checksum = "f87ba72ef90aef312017c508c36c5253f6e117660c37b573275dfcf11a9ac842"
 dependencies = [
  "chrono",
  "orbit-macros",

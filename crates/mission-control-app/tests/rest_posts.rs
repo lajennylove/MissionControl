@@ -25,7 +25,7 @@ use mission_control_core::users::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, InMemoryUserRoles, RoleAssignment, UserRoles,
 };
 use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
-use orbit_orm::{Database, Driver, Model, raw};
+use orbit_orm::{Database, Model, raw};
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::{Client, LocalResponse};
 use serde_json::{Value, json};
@@ -940,8 +940,8 @@ async fn an_oversized_field_is_refused_for_an_author() {
     )
     .await;
     assert_eq!(Post::of_type("post").count(site.db()).await.unwrap(), 0);
-    // An editor is not filtered, so the kses cap does not apply.
-    let (status, _) = body(
+    // An editor is not filtered, so the kses cap does not apply, on every database.
+    let (status, json) = body(
         site.post(
             "/wp-json/wp/v2/posts",
             Some("editor"),
@@ -950,53 +950,117 @@ async fn an_oversized_field_is_refused_for_an_author() {
         .await,
     )
     .await;
-    // Ruling R52: on MySQL and MariaDB the column is a `TEXT` (64 KB; WordPress uses `LONGTEXT`),
-    // so a larger field is refused with the same 413 before the database is touched, never a
-    // 500 or a cut value. The other databases store it.
-    match site.db().driver() {
-        Driver::MySql => assert_eq!(status, Status::PayloadTooLarge),
-        Driver::Postgres | Driver::Sqlite => assert_eq!(status, Status::Created),
-    }
+    assert_eq!(status, Status::Created, "{json}");
+    let id = json["id"].as_i64().unwrap();
+    assert_eq!(site.reload(id).await.unwrap().content, big);
 }
 
 #[rocket::async_test]
-async fn fields_over_mysqls_text_column_are_refused_there() {
+async fn an_editors_two_megabyte_post_fits_the_request_limit() {
+    let site = site().await;
+    // Ruling R58: the REST body limit is 8 MiB by default (PHP's `post_max_size`), past
+    // Rocket's 1 MiB `json` limit.
+    let content = format!("<p>{}</p>", "Grand café 日本. ".repeat(105_000));
+    assert!(content.len() > 2_000_000);
+    let (status, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "Two megabytes", "content": content}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Created, "{json}");
+    let id = json["id"].as_i64().unwrap();
+    assert_eq!(site.reload(id).await.unwrap().content, content);
+
+    // Past the limit, the body is refused before it is read in full.
+    let huge = "a".repeat(8 * 1024 * 1024 + 1);
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "Too big", "content": huge}),
+        )
+        .await,
+        Status::PayloadTooLarge,
+        "rest_request_too_large",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn an_editors_one_megabyte_post_saves_and_reads_back() {
+    let site = site().await;
+    // Past MySQL's 64 KB `TEXT` and the kses cap: the columns are `LONGTEXT` there, as in
+    // WordPress, and an editor (`unfiltered_html`) is not filtered.
+    let content = format!("<p>{}</p>", "Grand café 日本. ".repeat(50_500));
+    assert!(content.len() > 1_000_000 && content.len() < 1_040_000);
+    let (status, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "A megabyte", "content": content}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Created, "{json}");
+    let id = json["id"].as_i64().unwrap();
+    assert_eq!(site.reload(id).await.unwrap().content, content);
+    let (status, json) = body(
+        site.get(
+            &format!("/wp-json/wp/v2/posts/{id}?context=edit"),
+            Some("editor"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json["content"]["raw"], json!(content));
+}
+
+#[rocket::async_test]
+async fn fields_over_64_kb_round_trip_on_every_database() {
     let site = site().await;
     // Under the kses cap for an author, over MySQL's 65,535-byte `TEXT`.
-    let html = format!("<p>{}</p>", "a".repeat(70_000));
-    let response = site
-        .post(
+    let content = format!("<p>{}</p>", "a".repeat(70_000));
+    let excerpt = "e".repeat(70_000);
+    let title = "t".repeat(70_000);
+    let (status, json) = body(
+        site.post(
             "/wp-json/wp/v2/posts",
             Some("author"),
-            json!({"title": "Long", "content": html}),
+            json!({"title": title, "content": content, "excerpt": excerpt}),
         )
-        .await;
-    match site.db().driver() {
-        Driver::MySql => {
-            let json =
-                assert_error(response, Status::PayloadTooLarge, "rest_content_too_large").await;
-            assert_eq!(json["data"]["field"], json!("content"));
-            assert_eq!(Post::of_type("post").count(site.db()).await.unwrap(), 0);
-        }
-        Driver::Postgres | Driver::Sqlite => {
-            let (status, json) = body(response).await;
-            assert_eq!(status, Status::Created, "{json}");
-            // An update that keeps the long content is not refused either.
-            let id = json["id"].as_i64().unwrap();
-            let (status, _) = body(
-                site.send(
-                    "PUT",
-                    &format!("/wp-json/wp/v2/posts/{id}"),
-                    Some("author"),
-                    Some(json!({"title": "Longer"})),
-                    &[],
-                )
-                .await,
-            )
-            .await;
-            assert_eq!(status, Status::Ok);
-        }
-    }
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Created, "{json}");
+    let id = json["id"].as_i64().unwrap();
+    let stored = site.reload(id).await.unwrap();
+    assert_eq!(stored.content, content);
+    assert_eq!(stored.excerpt, excerpt);
+    assert_eq!(stored.title, title);
+
+    // An update that keeps the long fields (kses runs on the merged post) stores them whole.
+    let (status, json) = body(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/posts/{id}"),
+            Some("author"),
+            Some(json!({"slug": "longer"})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["content"]["raw"], json!(content));
+    assert_eq!(json["excerpt"]["raw"], json!(excerpt));
+    assert_eq!(json["title"]["raw"], json!(title));
+    assert_eq!(site.reload(id).await.unwrap().content, content);
 }
 
 #[rocket::async_test]
@@ -1061,6 +1125,43 @@ async fn if_unmodified_since_refuses_a_stale_update() {
     )
     .await;
     assert_eq!(status, Status::Ok);
+}
+
+#[rocket::async_test]
+async fn an_invalid_if_unmodified_since_is_ignored() {
+    let site = site().await;
+    let post = site.published("author", "post", "Versioned").await;
+    // A save the client has not seen: a valid, older header would get a 412.
+    let mut other = site.reload(post.id).await.unwrap();
+    other.title = "Changed elsewhere".into();
+    other.save(site.db()).await.unwrap();
+
+    // RFC 9110, section 13.1.4: a header that is not an HTTP date is ignored, so the update is
+    // made without the check, and the last write wins as in WordPress.
+    for (i, header) in [
+        "not a date",
+        "",
+        "2026-11-15T10:00:00Z",
+        "Sun, 99 Nov 1994 08:49:37 GMT",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let title = format!("Mine {i}");
+        let (status, json) = body(
+            site.send(
+                "PUT",
+                &format!("/wp-json/wp/v2/posts/{}", post.id),
+                Some("author"),
+                Some(json!({"title": title})),
+                &[("If-Unmodified-Since", header.to_owned())],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, Status::Ok, "{header:?}: {json}");
+        assert_eq!(site.reload(post.id).await.unwrap().title, title);
+    }
 }
 
 #[rocket::async_test]

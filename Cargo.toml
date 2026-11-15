@@ -16,5 +16,5 @@ publish = false
 
 [workspace.dependencies]
 # From crates.io. The three drivers MC supports, and the `OrbitModel` derive.
-orbit-orm = { version = "0.2.0", default-features = false, features = ["derive", "mysql", "postgres", "sqlite"] }
+orbit-orm = { version = "0.4.0", default-features = false, features = ["derive", "mysql", "postgres", "sqlite"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

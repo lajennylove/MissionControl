@@ -40,8 +40,7 @@
 //!   second and last from `wp_insert_term` and `wp_update_term` without a status, which its REST
 //!   server sends as 500.
 //! - `rest_content_too_large` (413): a name or description longer than
-//!   [`MAX_FILTERED_BYTES`](crate::content::MAX_FILTERED_BYTES) (Ruling R42), or a description
-//!   longer than MySQL's `TEXT` column holds (Ruling R52).
+//!   [`MAX_FILTERED_BYTES`](crate::content::MAX_FILTERED_BYTES) (Ruling R42).
 //!
 //! Left out, for now: registered meta (`meta` is `{}` until Task 10.6), `/wp/v2/taxonomies`
 //! (Task 10.8), the `Allow` header, term aliases (`term_group` is 0), a custom taxonomy's

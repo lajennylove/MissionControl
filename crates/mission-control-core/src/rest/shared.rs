@@ -101,34 +101,6 @@ pub(crate) fn too_large(error: &FieldTooLarge) -> RestError {
     .with_data("field", json!(error.field))
 }
 
-/// The most bytes a `TEXT` column holds on MySQL and MariaDB, where a post's title, content and
-/// excerpt and a term's description are `TEXT` (WordPress uses `LONGTEXT`; Orbit's schema
-/// builder has no such type).
-pub(crate) const MYSQL_TEXT_BYTES: usize = 65_535;
-
-/// Ruling R52: on MySQL and MariaDB, a `field` longer than its `TEXT` column holds is refused
-/// with `rest_content_too_large` (413) before the database is touched, rather than fail with a
-/// 500 or be cut short by a non-strict server. Other databases have no such limit.
-pub(crate) fn check_text_capacity(
-    db: &Database,
-    field: &str,
-    value: &str,
-) -> Result<(), RestError> {
-    if db.driver() != orbit_orm::Driver::MySql || value.len() <= MYSQL_TEXT_BYTES {
-        return Ok(());
-    }
-    Err(RestError::new(
-        "rest_content_too_large",
-        format!(
-            "The {field} is too large to save: it is {} bytes, and this database holds at most \
-             {MYSQL_TEXT_BYTES} bytes.",
-            value.len()
-        ),
-        413,
-    )
-    .with_data("field", json!(field)))
-}
-
 /// The options a request reads, once.
 #[derive(Debug, Clone)]
 pub(crate) struct Site {

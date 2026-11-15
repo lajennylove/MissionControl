@@ -134,6 +134,42 @@ async fn values_of_every_json_kind_round_trip() {
     }
 }
 
+/// A value past MySQL's 64 KB `TEXT`: the value columns are `long_text` (`LONGTEXT` there, as
+/// WordPress sizes them), so it is stored and read back whole on every database.
+fn large() -> Value {
+    let text = "Grand café 日本 \"quoted\" <p>paragraph</p>\n".repeat(4_000);
+    assert!(text.len() > 150_000);
+    json!({"text": text, "n": 1})
+}
+
+#[tokio::test]
+async fn values_over_64_kb_round_trip_in_meta_and_options() {
+    let test = database().await;
+    let db = test.db();
+    let user = setup(db).await;
+    let post = new_post(db, user, "post", PostStatus::Draft).await;
+    let term = Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .unwrap();
+
+    set_post_meta(db, post.id, "big", &large()).await.unwrap();
+    assert_eq!(
+        get_post_meta(db, post.id, "big").await.unwrap(),
+        Some(large())
+    );
+    set_user_meta(db, user, "big", &large()).await.unwrap();
+    assert_eq!(get_user_meta(db, user, "big").await.unwrap(), Some(large()));
+    set_term_meta(db, term.term_id, "big", &large())
+        .await
+        .unwrap();
+    assert_eq!(
+        get_term_meta(db, term.term_id, "big").await.unwrap(),
+        Some(large())
+    );
+    set_option(db, "big", &large()).await.unwrap();
+    assert_eq!(get_option(db, "big").await.unwrap(), Some(large()));
+}
+
 #[tokio::test]
 async fn user_meta_set_get_replace_delete() {
     let test = database().await;

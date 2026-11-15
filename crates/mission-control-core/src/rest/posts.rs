@@ -32,9 +32,9 @@
 //!   [`MAX_FILTERED_BYTES`](crate::content::MAX_FILTERED_BYTES) from a user whose writing kses
 //!   filters (Ruling R42).
 //! - `rest_post_conflict` (412): an update sent with `If-Unmodified-Since` when the post changed
-//!   after that time (Ruling R49). Without the header the last write wins, as in WordPress.
-//! - `rest_invalid_header` (400): an `If-Unmodified-Since` that is not an HTTP date. The update is
-//!   refused rather than made without the check the client asked for.
+//!   after that time (Ruling R49). Without the header the last write wins, as in WordPress; a
+//!   header that is not an HTTP date is ignored (RFC 9110, section 13.1.4), so that update also
+//!   proceeds unconditionally.
 //!
 //! Left out, for now: comments (`comment_status` and `ping_status` read `closed` and writes are
 //! checked but not stored; no `replies` link), post formats (`format` reads `standard`; writes
@@ -381,7 +381,8 @@ impl PostsController<'_> {
 
     /// `POST`, `PUT` or `PATCH /wp/v2/{base}/{id}`: updates the post from `params`. With
     /// `if_unmodified_since` (the header's value), the update is made only if the post has not
-    /// changed since then.
+    /// changed since then; a value that is not an HTTP date is ignored (RFC 9110, section
+    /// 13.1.4), and the update is made without the check.
     ///
     /// # Errors
     ///

@@ -23,7 +23,7 @@ use mission_control_core::users::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, InMemoryUserRoles, RoleAssignment, UserRoles,
 };
 use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
-use orbit_orm::{Database, Driver, raw};
+use orbit_orm::{Database, raw};
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::{Client, LocalResponse};
 use serde_json::{Value, json};
@@ -1112,22 +1112,23 @@ async fn discovery_lists_the_taxonomies_served() {
 }
 
 #[rocket::async_test]
-async fn a_description_too_large_for_mysql_is_refused() {
+async fn a_description_over_64_kb_round_trips_on_every_database() {
     let (site, _) = site().await;
-    if site.db().driver() != Driver::MySql {
-        return;
-    }
+    // Over MySQL's 65,535-byte `TEXT`: the column is `LONGTEXT` there, as in WordPress.
     let description = "a".repeat(70_000);
-    let json = assert_error(
+    let (status, json) = body(
         site.post(
             "/wp-json/wp/v2/tags",
             Some("admin"),
             json!({"name": "Big", "description": description}),
         )
         .await,
-        Status::PayloadTooLarge,
-        "rest_content_too_large",
     )
     .await;
-    assert_eq!(json["data"]["field"], json!("description"));
+    assert_eq!(status, Status::Created, "{json}");
+    assert_eq!(json["description"], json!(description));
+    let id = json["id"].as_i64().unwrap();
+    let (status, json) = body(site.get(&format!("/wp-json/wp/v2/tags/{id}"), None).await).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json["description"], json!(description));
 }

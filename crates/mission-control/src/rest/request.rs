@@ -1,10 +1,10 @@
 //! What the REST controllers' routes share: the id in a path, the request's parameters (query
 //! string and body), and the [`Reply`] that sends a controller's answer.
 //!
-//! Request bodies are JSON or form-encoded, as WordPress reads them, up to Rocket's `json` data
-//! limit (for both); a larger body is refused with 413 `rest_request_too_large` (Mission
-//! Control's code; PHP refuses such a body before WordPress runs). Parameters in the body win
-//! over those in the query string.
+//! Request bodies are JSON or form-encoded, as WordPress reads them, up to the `rest` data limit
+//! (for both; [`REST_BODY_LIMIT`], 8 MiB, by default); a larger body is refused with 413
+//! `rest_request_too_large` (Mission Control's code; PHP refuses such a body before WordPress
+//! runs). Parameters in the body win over those in the query string.
 
 use std::io::Cursor;
 
@@ -59,6 +59,12 @@ pub(crate) fn query_of<'a>(origin: &'a Origin<'_>) -> &'a str {
     origin.query().map_or("", |q| q.as_str())
 }
 
+/// The largest REST request body (JSON or form) read by default: 8 MiB, PHP's default
+/// `post_max_size`, which caps what WordPress accepts (Ruling R58). A site changes it with
+/// Rocket's `rest` limit, as any Rocket data limit: `limits.rest = "16 MiB"` under a profile in
+/// `Rocket.toml`, or `ROCKET_LIMITS={rest="16 MiB"}`.
+pub(crate) const REST_BODY_LIMIT: u64 = 8 * 1024 * 1024;
+
 /// The request's parameters: the query string's, then the body's over them.
 pub(crate) async fn params(
     origin: &Origin<'_>,
@@ -72,10 +78,9 @@ pub(crate) async fn params(
     if !json && !form {
         return Ok(params);
     }
-    // One limit for both kinds, Rocket's `json` limit (1 MiB by default): a post sent as a form
-    // is as large as one sent as JSON, and Rocket's `form` limit (32 KiB) is sized for small
-    // forms.
-    let limit = limits.get("json").unwrap_or(1.mebibytes());
+    // One limit for both kinds: a post sent as a form is as large as one sent as JSON, and
+    // Rocket's own `json` (1 MiB) and `form` (32 KiB) limits are sized for smaller bodies.
+    let limit = limits.get("rest").unwrap_or(REST_BODY_LIMIT.bytes());
     let body = data.open(limit).into_string().await.map_err(|e| {
         log::warn!("Could not read a REST request body: {e}");
         RestError::new(

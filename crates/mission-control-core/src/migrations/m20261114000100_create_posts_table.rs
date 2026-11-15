@@ -8,9 +8,11 @@ use orbit_orm::schema::{self, Action};
 
 /// Creates `posts`. Sizes follow `wp_posts`: `post_type` and `status` are 20 characters, `slug`
 /// is 200 (`post_name`), `password` is 255, `mime_type` is 100 (`post_mime_type`, empty but for
-/// attachments). `author_id` is a `BIGINT`, the type of Ignite's
-/// `users.id`, so MySQL and MariaDB accept the foreign key; deleting a user who has posts is
-/// refused.
+/// attachments). `title`, `content` and `excerpt` are `long_text`: `LONGTEXT` on MySQL and
+/// MariaDB, as `wp_posts` sizes `post_content` (it has `TEXT` for `post_title` and
+/// `post_excerpt`; the larger type keeps an imported title or excerpt whole), and `TEXT`
+/// elsewhere. `author_id` is a `BIGINT`, the type of Ignite's `users.id`, so MySQL and MariaDB
+/// accept the foreign key; deleting a user who has posts is refused.
 ///
 /// `(post_type, slug)` is a plain index, not a unique key: WordPress keeps slugs unique per type
 /// (per parent for hierarchical types) among posts that are not trashed, and a draft may have no
@@ -24,10 +26,10 @@ pub(super) fn migration() -> Migration {
             t.big_integer("author_id");
             t.string("post_type").length(20).default("post");
             t.string("status").length(20).default("publish");
-            t.text("title");
+            t.long_text("title");
             t.string("slug").length(200).default("");
-            t.text("content");
-            t.text("excerpt");
+            t.long_text("content");
+            t.long_text("excerpt");
             t.big_integer("parent_id").nullable();
             t.integer("menu_order").default(0);
             t.date_time("published_at").nullable();

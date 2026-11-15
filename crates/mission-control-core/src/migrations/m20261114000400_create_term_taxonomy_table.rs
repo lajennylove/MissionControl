@@ -5,8 +5,9 @@ use orbit_orm::Migration;
 use orbit_orm::schema::{self, Action};
 
 /// Creates `term_taxonomy`. `taxonomy` is 32 characters, as in WordPress; `count` is a `BIGINT`
-/// that defaults to 0. A term appears once per taxonomy (WordPress's `term_id_taxonomy` unique
-/// key).
+/// that defaults to 0; `description` is a `long_text` (`LONGTEXT` on MySQL and MariaDB, as
+/// WordPress sizes it; `TEXT` elsewhere). A term appears once per taxonomy (WordPress's
+/// `term_id_taxonomy` unique key).
 ///
 /// `parent_id` is the parent's term id (`terms.id`), as WordPress's `parent` column, so the REST
 /// API and WXR map onto it one to one; null, not WordPress's 0, means a top-level term, so that a
@@ -22,7 +23,7 @@ pub(super) fn migration() -> Migration {
             t.id();
             t.big_integer("term_id");
             t.string("taxonomy").length(32);
-            t.text("description");
+            t.long_text("description");
             t.big_integer("parent_id").nullable();
             t.big_integer("count").default(0);
             t.unique(["term_id", "taxonomy"]);

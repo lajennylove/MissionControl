@@ -138,6 +138,29 @@ async fn runs_a_single_event_once_when_it_is_due() {
 }
 
 #[tokio::test]
+async fn a_payload_over_64_kb_round_trips() {
+    let test = database().await;
+    migrate(test.db()).await;
+    let (hooks, seen) = recording_hooks();
+    let scheduler = Scheduler::new(test.shared(), hooks);
+
+    // Past MySQL's 64 KB `TEXT`: `payload` is a `LONGTEXT` there, as WordPress's `cron` option.
+    let note = "Grand café 日本 \"quoted\"\n".repeat(5_000);
+    assert!(note.len() > 100_000);
+    let at = now() + TimeDelta::minutes(5);
+    scheduler.schedule(at, NOTE, note.clone()).await.unwrap();
+
+    let stored = events(test.db()).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<String>(&stored[0].payload).unwrap(),
+        note
+    );
+    assert_eq!(scheduler.run_due(at).await.unwrap().completed, 1);
+    assert_eq!(*seen.lock().unwrap(), [note]);
+}
+
+#[tokio::test]
 async fn runs_due_events_in_time_order() {
     let test = database().await;
     migrate(test.db()).await;

@@ -10,7 +10,7 @@ use crate::content::{
     kses_data, sanitize_text_field,
 };
 use crate::rest::params::{Params, Reader, require};
-use crate::rest::shared::{Context, Fields, Site, check_text_capacity, database_error, too_large};
+use crate::rest::shared::{Context, Fields, Site, database_error, too_large};
 use crate::rest::{RestError, RestResponse};
 
 /// The fields a request writes, read and checked from its parameters. `None` leaves a field as
@@ -117,9 +117,6 @@ async fn sanitize(
             )
         })
         .await?;
-    if let Some(description) = &description {
-        check_text_capacity(ctl.db, "description", description)?;
-    }
     Ok((name, description))
 }
 

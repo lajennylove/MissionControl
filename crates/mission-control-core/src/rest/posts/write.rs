@@ -13,9 +13,7 @@ use crate::content::{
 };
 use crate::content::{PUBLISH_FUTURE_POST, terms_by_term_id};
 use crate::rest::params::{Params, Reader, as_integer};
-use crate::rest::shared::{
-    Context, Fields, Site, check_text_capacity, database_error, id_of, option,
-};
+use crate::rest::shared::{Context, Fields, Site, database_error, id_of, option};
 use crate::rest::{RestError, RestResponse};
 use crate::scheduler;
 use crate::theme::page_template_name;
@@ -393,19 +391,6 @@ fn settle_status(
     }
 }
 
-/// Ruling R52: on MySQL and MariaDB, a title, content or excerpt longer than its `TEXT` column
-/// holds is refused with `rest_content_too_large` (413) before the database is touched.
-fn check_column_capacity(ctl: &PostsController<'_>, fields: &PostFields) -> Result<(), RestError> {
-    for (field, value) in [
-        ("title", &fields.title),
-        ("content", &fields.content),
-        ("excerpt", &fields.excerpt),
-    ] {
-        check_text_capacity(ctl.db, field, value)?;
-    }
-    Ok(())
-}
-
 /// `rest_invalid_field` when a sticky post would have a password, as WordPress refuses it.
 fn check_sticky_password(sticky: bool, password: &str) -> Result<(), RestError> {
     if sticky && !password.is_empty() {
@@ -564,7 +549,6 @@ pub(super) async fn create(
             },
         )
         .await?;
-    check_column_capacity(ctl, &fields)?;
     let supports = ctl.post_type.supports;
     if supports.editor
         && supports.title
@@ -606,19 +590,24 @@ pub(super) async fn create(
     Ok(response.with_header("Location", location))
 }
 
-/// The time in an `If-Unmodified-Since` header: an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`),
-/// in UTC.
+/// The time in an `If-Unmodified-Since` header, in UTC, when it is an HTTP-date (RFC 9110,
+/// section 5.6.7): the IMF-fixdate `Sun, 06 Nov 1994 08:49:37 GMT`, or one of the obsolete forms
+/// HTTP still accepts, RFC 850 (`Sunday, 06-Nov-94 08:49:37 GMT`) and asctime
+/// (`Sun Nov  6 08:49:37 1994`). Anything else is `None`: another zone or offset (`-0500`),
+/// another case or padding, or a day name that does not match the date. The text must read back
+/// exactly as it was parsed, which is how each form's fixed layout is enforced.
 fn parse_http_date(text: &str) -> Option<NaiveDateTime> {
-    let text = text.trim();
-    DateTime::parse_from_rfc2822(text)
-        .ok()
-        .map(|d| d.naive_utc())
-        .or_else(|| {
-            // RFC 850 and asctime forms, which HTTP still accepts.
-            ["%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
-                .iter()
-                .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
-        })
+    const FORMATS: [&str; 3] = [
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%A, %d-%b-%y %H:%M:%S GMT",
+        "%a %b %e %H:%M:%S %Y",
+    ];
+    let text = text.trim_matches([' ', '\t']);
+    FORMATS.iter().find_map(|format| {
+        NaiveDateTime::parse_from_str(text, format)
+            .ok()
+            .filter(|date| date.format(format).to_string() == text)
+    })
 }
 
 /// `update_item`.
@@ -631,16 +620,9 @@ pub(super) async fn update(
     let mut stored = ctl.find(id).await?;
     let site = Site::load(ctl.db).await?;
     let changes = Changes::read(ctl.post_type, &site, params)?;
-    let unmodified_since = match if_unmodified_since {
-        None => None,
-        Some(text) => Some(parse_http_date(text).ok_or_else(|| {
-            RestError::new(
-                "rest_invalid_header",
-                "The If-Unmodified-Since header is not an HTTP date.",
-                400,
-            )
-        })?),
-    };
+    // RFC 9110 section 13.1.4: a recipient ignores an If-Unmodified-Since that is not a valid
+    // HTTP date, so the update goes ahead without the check, and the last write wins.
+    let unmodified_since = if_unmodified_since.and_then(parse_http_date);
     for attempt in 1..=MAX_ATTEMPTS {
         let trash = ctl.trash_status(&stored).await?;
         if !ctl.can_on("edit_post", &stored, trash, &site) {
@@ -706,7 +688,6 @@ pub(super) async fn update(
                 },
             )
             .await?;
-        check_column_capacity(ctl, &fields)?;
         post.title = fields.title;
         post.content = fields.content;
         post.excerpt = fields.excerpt;
@@ -972,5 +953,38 @@ mod tests {
             settle_status(PostStatus::Draft, None),
             (PostStatus::Draft, None)
         );
+    }
+
+    #[test]
+    fn http_dates_are_the_three_forms_of_rfc_9110() {
+        let expected =
+            NaiveDateTime::parse_from_str("1994-11-06 08:49:37", "%Y-%m-%d %H:%M:%S").unwrap();
+        for valid in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+            " Sun, 06 Nov 1994 08:49:37 GMT ",
+        ] {
+            assert_eq!(parse_http_date(valid), Some(expected), "{valid:?}");
+        }
+        for invalid in [
+            "Sun, 06 Nov 1994 08:49:37 -0500",
+            "Sun, 06 Nov 1994 03:49:37 -0500",
+            "Sun, 06 Nov 1994 08:49:37 +0000",
+            "Sun, 06 Nov 1994 08:49:37 UT",
+            "Sun, 06 Nov 1994 08:49:37 EST",
+            "06 Nov 1994 08:49:37 GMT",
+            "Sun, 6 Nov 1994 08:49:37 GMT",
+            "sun, 06 nov 1994 08:49:37 GMT",
+            "Mon, 06 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:37 gmt",
+            "Sun, 99 Nov 1994 08:49:37 GMT",
+            "Sun Nov 6 08:49:37 1994",
+            "1994-11-06T08:49:37Z",
+            "not a date",
+            "",
+        ] {
+            assert_eq!(parse_http_date(invalid), None, "{invalid:?}");
+        }
     }
 }
