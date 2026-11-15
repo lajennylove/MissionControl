@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use mission_control_core::content::{
-    MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
-    safecss_filter_attr,
+    MAX_ACTIVE_FORMATTING, MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields,
+    kses_title, safecss_filter_attr,
 };
 use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, UserCaps};
 
@@ -424,6 +424,88 @@ fn deep_nesting_is_refused_in_linear_time() {
         "</script><div>".repeat(MAX_NESTING + 1)
     );
     assert!(kses_post(&script_escape).starts_with("&lt;"));
+}
+
+#[test]
+fn reopened_formatting_elements_are_refused_in_bounded_time() {
+    // The parser reopens every unclosed formatting element (`<b>`, `<em>`…) in each new block:
+    // 512 of them and 60,000 paragraphs made 516 MB of output from 486 KB.
+    let unclosed =
+        |count: usize| -> String { (0..count).map(|k| format!("<b id=a{k}>")).collect() };
+    let amplified = format!("<p>{}</p>{}", unclosed(512), "<p>x</p>".repeat(20_000));
+    let started = Instant::now();
+    let output = kses_post(&amplified);
+    assert!(output.starts_with("&lt;p&gt;&lt;b"), "refused");
+    assert!(output.len() <= amplified.len() * 5);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // Up to the cap the formatting elements are parsed; one more is refused.
+    let at_cap = format!("<p>{}</p><p>x</p>", unclosed(MAX_ACTIVE_FORMATTING));
+    assert!(kses_post(&at_cap).starts_with("<p><b id=\"a0\">"));
+    let past_cap = format!("<p>{}</p><p>x</p>", unclosed(MAX_ACTIVE_FORMATTING + 1));
+    assert!(kses_post(&past_cap).starts_with("&lt;"));
+    // Misnested end tags that leave the element in the parser's list do not close it.
+    assert!(kses_post(&"<b><p></b>".repeat(MAX_ACTIVE_FORMATTING + 1)).starts_with("&lt;"));
+    assert!(kses_post(&"<i><div></i></div>".repeat(MAX_ACTIVE_FORMATTING + 1)).starts_with("&lt;"));
+
+    // Under the cap, the output budget is the backstop: 32 reopened elements in thousands of
+    // paragraphs would write far more than the input.
+    let under_cap = format!(
+        "<p>{}</p>{}",
+        unclosed(MAX_ACTIVE_FORMATTING),
+        "<p>x</p>".repeat(5_000)
+    );
+    let started = Instant::now();
+    assert!(kses_post(&under_cap).starts_with("&lt;"));
+    // Refused by the pre-scan's reopening budget, before the parser builds anything: a few
+    // milliseconds, where parsing it took half a second (and building 160,000 elements).
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        started.elapsed()
+    );
+    let four_unclosed = format!("<p>{}</p>{}", unclosed(4), "<p>x</p>".repeat(20_000));
+    assert!(kses_post(&four_unclosed).starts_with("&lt;"));
+    // One unclosed formatting element is reopened once per paragraph, as browsers do; parsed.
+    let one_unclosed = format!("<p><b>x</p>{}", "<p>y</p>".repeat(20_000));
+    assert!(kses_post(&one_unclosed).starts_with("<p><b>x</b></p><p><b>y</b></p>"));
+    let ordinary = format!("<p><b>x</p>{}", "<p>y <em>z</em></p>".repeat(1_000));
+    assert!(kses_post(&ordinary).starts_with("<p><b>x</b></p><p><b>y <em>z</em></b></p>"));
+
+    // Closed formatting, any amount, is parsed; so is text that escapes to five times its size.
+    let closed =
+        "<p><b>x</b> <em>y</em> <a href=\"/\">z</a> <strong><i>w</i></strong></p>".repeat(5_000);
+    assert_eq!(kses_post(&closed), closed);
+    let ampersands = "&".repeat(20_000);
+    assert_eq!(kses_post(&ampersands), "&amp;".repeat(20_000));
+    let unclosed_paragraphs = "<p><b>x</p>".repeat(20);
+    assert!(kses_post(&unclosed_paragraphs).starts_with("<p><b>x</b></p>"));
+}
+
+#[test]
+fn many_ampersands_are_refused_in_bounded_time() {
+    // html5ever 0.40's serialiser searches the rest of a text or attribute value once per `&`
+    // it escapes, so 400,000 `&` took seconds to write.
+    let started = Instant::now();
+    let text = format!("{}<b>x</b>", "a&".repeat(200_000));
+    let output = kses_post(&text);
+    assert!(output.ends_with("&lt;b&gt;x&lt;/b&gt;"), "refused");
+    assert!(kses_data(&text).ends_with("&lt;b&gt;x&lt;/b&gt;"));
+    assert_eq!(kses_title(&text), text);
+    let attribute = format!("<a title=\"{}\">x</a>", "&".repeat(400_000));
+    assert!(kses_post(&attribute).starts_with("&lt;a title"));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    // Ampersands in ordinary amounts are parsed.
+    let links = "<p><a href=\"/?a=1&amp;b=2\">Tom &amp; Jerry</a></p>".repeat(2_000);
+    assert_eq!(kses_post(&links), links);
 }
 
 #[test]
