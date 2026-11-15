@@ -6,10 +6,10 @@
 //! each namespace index from it, so discovery never changes when a route is added. [`auth`]
 //! decides who a request runs as, and [`RestError`] is WordPress's error body. [`posts`],
 //! [`terms`], [`users`] and [`media`] are WordPress's posts, terms, users and attachments
-//! controllers; [`params`] reads a request's
-//! parameters as `WP_REST_Request` holds them, and [`KsesLimiter`] runs the controllers' kses
-//! filters off the async threads. The core types here hold no Rocket types: the
-//! `mission-control` crate mounts them.
+//! controllers; [`meta`] is the registered meta they show under `meta`; [`params`] reads a
+//! request's parameters as `WP_REST_Request` holds them, and [`KsesLimiter`] runs the
+//! controllers' kses filters off the async threads. The core types here hold no Rocket types:
+//! the `mission-control` crate mounts them.
 //!
 //! ```
 //! use mission_control_core::rest::{Endpoint, RestRoutes, RouteSpec};
@@ -26,6 +26,7 @@
 pub mod auth;
 pub mod discovery;
 pub mod media;
+pub mod meta;
 pub mod params;
 pub mod posts;
 mod shared;
@@ -177,6 +178,9 @@ pub struct RouteSpec {
     pub namespace: String,
     /// The endpoints, in the order they are listed.
     pub endpoints: Vec<Endpoint>,
+    /// The object type and subtype (post type or taxonomy) whose registered meta the endpoints'
+    /// `meta` argument lists in discovery, for a route that writes `meta`. `None` for any other.
+    pub meta: Option<(meta::MetaObject, String)>,
 }
 
 impl RouteSpec {
@@ -189,7 +193,15 @@ impl RouteSpec {
             path,
             namespace,
             endpoints,
+            meta: None,
         }
+    }
+
+    /// This route with the `meta` argument of its endpoints listing the keys registered for
+    /// `object` and `subtype` (see [`meta::MetaKeys::schemas`]).
+    pub fn with_meta(mut self, object: meta::MetaObject, subtype: impl Into<String>) -> Self {
+        self.meta = Some((object, subtype.into()));
+        self
     }
 
     /// The methods of all endpoints, without repeats, in the order first seen.

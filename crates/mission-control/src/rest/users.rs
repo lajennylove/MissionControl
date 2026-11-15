@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::posts::PostTypes;
 use mission_control_core::rest::users::UsersController;
 use mission_control_core::users::UserCaps;
@@ -25,6 +26,7 @@ struct App<'r> {
     db: &'r Database,
     post_types: &'r PostTypes,
     settings: &'r AuthSettings,
+    meta: &'r MetaKeys,
 }
 
 #[rocket::async_trait]
@@ -37,11 +39,13 @@ impl<'r> FromRequest<'r> for App<'r> {
             rocket.state::<Arc<Database>>(),
             rocket.state::<Arc<PostTypes>>(),
             rocket.state::<AuthSettings>(),
+            rocket.state::<Arc<MetaKeys>>(),
         ) {
-            (Some(db), Some(post_types), Some(settings)) => Outcome::Success(Self {
+            (Some(db), Some(post_types), Some(settings), Some(meta)) => Outcome::Success(Self {
                 db,
                 post_types,
                 settings,
+                meta,
             }),
             _ => {
                 log::error!("The users routes ran before the app was ready");
@@ -59,6 +63,7 @@ impl App<'_> {
             user: caps,
             roles: self.settings.user_roles.as_ref(),
             post_types: self.post_types,
+            meta: self.meta,
         }
     }
 }

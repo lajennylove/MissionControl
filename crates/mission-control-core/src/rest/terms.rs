@@ -42,7 +42,10 @@
 //! - `rest_content_too_large` (413): a name or description longer than
 //!   [`MAX_FILTERED_BYTES`](crate::content::MAX_FILTERED_BYTES) (Ruling R42).
 //!
-//! Left out, for now: registered meta (`meta` is `{}` until Task 10.6), `/wp/v2/taxonomies`
+//! `meta` shows the term meta registered in [`MetaKeys`] for the taxonomy, and creates and
+//! updates write it, as [`super::meta`] describes.
+//!
+//! Left out, for now: `/wp/v2/taxonomies`
 //! (Task 10.8), the `Allow` header, term aliases (`term_group` is 0), a custom taxonomy's
 //! `default_term` and its own query var in links (a custom taxonomy's link is
 //! `?taxonomy={name}&term={slug}`), and the `?rest_route=` form for these routes.
@@ -56,6 +59,7 @@ use std::sync::{RwLock, RwLockReadGuard};
 use orbit_orm::Database;
 use serde_json::{Map, Value, json};
 
+use super::meta::{MetaKeys, MetaObject};
 use super::params::Params;
 use super::posts::PostTypes;
 use super::shared::{authorization_status, database_error};
@@ -195,7 +199,8 @@ fn route_specs(taxonomy: &TaxonomySpec) -> [RouteSpec; 2] {
                 Endpoint::new(["GET"], Value::Object(query::collection_args(taxonomy))),
                 Endpoint::new(["POST"], Value::Object(write::schema_args(taxonomy, true))),
             ],
-        ),
+        )
+        .with_meta(MetaObject::Term, taxonomy.taxonomy.name),
         RouteSpec::new(
             item,
             vec![
@@ -203,7 +208,8 @@ fn route_specs(taxonomy: &TaxonomySpec) -> [RouteSpec; 2] {
                 Endpoint::new(["POST", "PUT", "PATCH"], Value::Object(update)),
                 Endpoint::new(["DELETE"], delete),
             ],
-        ),
+        )
+        .with_meta(MetaObject::Term, taxonomy.taxonomy.name),
     ]
 }
 
@@ -216,6 +222,7 @@ fn route_specs(taxonomy: &TaxonomySpec) -> [RouteSpec; 2] {
 ///     post_types: &post_types,
 ///     user: &caps,
 ///     kses: &kses,
+///     meta: &meta_keys,
 /// };
 /// let response = controller.list("hide_empty=true").await?;
 /// ```
@@ -230,6 +237,8 @@ pub struct TermsController<'a> {
     pub user: &'a UserCaps,
     /// Where writes filter the term's name and description.
     pub kses: &'a KsesLimiter,
+    /// The registered meta keys, shown and written under `meta`.
+    pub meta: &'a MetaKeys,
 }
 
 impl TermsController<'_> {

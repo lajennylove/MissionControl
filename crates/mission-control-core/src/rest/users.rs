@@ -33,8 +33,9 @@
 //!
 //! Left out: creating, updating and deleting users (`POST`, `PUT`, `PATCH` and `DELETE`, and
 //! `/users/me` writes). Users belong to Ignite; Mission Control does not write them yet. Also
-//! left out: `has_published_posts` and `search_columns` as parameters, registered meta (`meta` is
-//! `{}` until Task 10.6), and the `?rest_route=` form for these routes.
+//! left out: `has_published_posts` and `search_columns` as parameters, and the `?rest_route=` form
+//! for these routes. `meta` shows the user meta registered in [`MetaKeys`] (see [`super::meta`]);
+//! with no user writes, it is read only.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -44,6 +45,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::auth::not_logged_in;
+use super::meta::{MetaKeys, MetaObject, MetaValues};
 use super::params::{Reader, parse_form};
 use super::posts::PostTypes;
 use super::shared::{
@@ -224,6 +226,7 @@ struct ListParams {
 ///     user: &caps,
 ///     roles: &*user_roles,
 ///     post_types: &post_types,
+///     meta: &meta_keys,
 /// };
 /// let me = controller.me("context=edit").await?;
 /// ```
@@ -236,6 +239,8 @@ pub struct UsersController<'a> {
     pub roles: &'a dyn UserRoles,
     /// The post types the REST API serves: a user with published posts of one is public.
     pub post_types: &'a PostTypes,
+    /// The registered meta keys, shown under `meta`.
+    pub meta: &'a MetaKeys,
 }
 
 impl UsersController<'_> {
@@ -618,6 +623,11 @@ impl UsersController<'_> {
         }
         let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
         let meta = user_meta(self.db, &ids).await?;
+        let registered = if context != Context::Embed && fields.includes("meta") {
+            MetaValues::load(self.db, self.meta, MetaObject::User, "user", &ids).await?
+        } else {
+            MetaValues::default()
+        };
         let avatars = Avatars::load(self.db).await?;
         let site_locale = match option(self.db, "WPLANG").await? {
             Some(Value::String(locale)) if !locale.trim().is_empty() => locale,
@@ -631,6 +641,7 @@ impl UsersController<'_> {
                     .unwrap_or_default()
             };
             let mut item = base_item(site, row, &avatars, &text("description"));
+            item.insert("meta".into(), registered.json(row.id));
             if context == Context::Edit {
                 let assignment = self.assignment(row.id).await?;
                 let caps = assignment.user_caps(row.id);

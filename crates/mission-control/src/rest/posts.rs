@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use mission_control_core::front::Frontend;
 use mission_control_core::hooks::Hooks;
+use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::posts::{PostType, PostTypes, PostsController};
 use mission_control_core::rest::{KsesLimiter, RestResponse, discovery};
 use mission_control_core::users::UserCaps;
@@ -66,6 +67,7 @@ struct App<'r> {
     hooks: &'r Hooks,
     kses: &'r KsesLimiter,
     frontend: Option<&'r Frontend>,
+    meta: &'r MetaKeys,
 }
 
 #[rocket::async_trait]
@@ -78,12 +80,14 @@ impl<'r> FromRequest<'r> for App<'r> {
             rocket.state::<Arc<Database>>(),
             rocket.state::<Arc<Hooks>>(),
             rocket.state::<Arc<KsesLimiter>>(),
+            rocket.state::<Arc<MetaKeys>>(),
         ) {
-            (Some(db), Some(hooks), Some(kses)) => Outcome::Success(Self {
+            (Some(db), Some(hooks), Some(kses), Some(meta)) => Outcome::Success(Self {
                 db,
                 hooks,
                 kses,
                 frontend: rocket.state::<Arc<Frontend>>().map(|f| &**f),
+                meta,
             }),
             _ => {
                 log::error!("The posts routes ran before the app was ready");
@@ -108,6 +112,7 @@ impl<'r> App<'r> {
             kses: self.kses,
             theme: self.frontend.map(Frontend::theme),
             image_sizes: None,
+            meta: self.meta,
         }
     }
 }

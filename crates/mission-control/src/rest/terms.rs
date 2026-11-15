@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use mission_control_core::rest::KsesLimiter;
+use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::posts::PostTypes;
 use mission_control_core::rest::terms::{Taxonomies, TaxonomySpec, TermsController};
 use mission_control_core::users::UserCaps;
@@ -48,6 +49,7 @@ struct App<'r> {
     db: &'r Database,
     kses: &'r KsesLimiter,
     post_types: &'r PostTypes,
+    meta: &'r MetaKeys,
 }
 
 #[rocket::async_trait]
@@ -60,11 +62,13 @@ impl<'r> FromRequest<'r> for App<'r> {
             rocket.state::<Arc<Database>>(),
             rocket.state::<Arc<KsesLimiter>>(),
             rocket.state::<Arc<PostTypes>>(),
+            rocket.state::<Arc<MetaKeys>>(),
         ) {
-            (Some(db), Some(kses), Some(post_types)) => Outcome::Success(Self {
+            (Some(db), Some(kses), Some(post_types), Some(meta)) => Outcome::Success(Self {
                 db,
                 kses,
                 post_types,
+                meta,
             }),
             _ => {
                 log::error!("The terms routes ran before the app was ready");
@@ -87,6 +91,7 @@ impl App<'_> {
             post_types: self.post_types,
             user: caps,
             kses: self.kses,
+            meta: self.meta,
         }
     }
 }

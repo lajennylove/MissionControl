@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::content::{MetaError, get_option};
 use crate::front::site_address;
+use crate::rest::meta::MetaKeys;
 use crate::rest::{RestRoutes, RouteSpec};
 use orbit_orm::Database;
 
@@ -39,12 +40,17 @@ fn rest_url(home: &str, path: &str) -> String {
     }
 }
 
-/// The index document, `GET /wp-json/`, from the site's options and the registered routes.
+/// The index document, `GET /wp-json/`, from the site's options and the registered routes. The
+/// `meta` argument of a route that writes meta lists the keys registered in `meta_keys`.
 ///
 /// # Errors
 ///
 /// Fails with the database's error when an option cannot be read.
-pub async fn index(db: &Database, routes: &RestRoutes) -> Result<Value, MetaError> {
+pub async fn index(
+    db: &Database,
+    routes: &RestRoutes,
+    meta_keys: &MetaKeys,
+) -> Result<Value, MetaError> {
     let home = site_address(&text(db, "home").await?);
     let mut document = Map::new();
     let mut put = |key: &str, value: Value| document.insert(key.to_owned(), value);
@@ -73,7 +79,10 @@ pub async fn index(db: &Database, routes: &RestRoutes) -> Result<Value, MetaErro
     // application passwords are available. Its address is the authorize-application screen, which
     // Mission Control does not have yet, so nothing is listed.
     put("authentication", json!({}));
-    put("routes", routes_document(&home, &routes.routes()));
+    put(
+        "routes",
+        routes_document(&home, &routes.routes(), meta_keys),
+    );
     put("site_logo", json!(integer(db, "site_logo").await?));
     let site_icon = integer(db, "site_icon").await?;
     put("site_icon", json!(site_icon));
@@ -82,7 +91,8 @@ pub async fn index(db: &Database, routes: &RestRoutes) -> Result<Value, MetaErro
     Ok(Value::Object(document))
 }
 
-/// The index of `namespace`: its name and its routes. `None` when no route is registered in it.
+/// The index of `namespace`: its name and its routes, listing meta as [`index`] does. `None`
+/// when no route is registered in it.
 ///
 /// # Errors
 ///
@@ -90,6 +100,7 @@ pub async fn index(db: &Database, routes: &RestRoutes) -> Result<Value, MetaErro
 pub async fn namespace_index(
     db: &Database,
     routes: &RestRoutes,
+    meta_keys: &MetaKeys,
     namespace: &str,
 ) -> Result<Option<Value>, MetaError> {
     let in_namespace = routes.routes_in(namespace);
@@ -99,7 +110,7 @@ pub async fn namespace_index(
     let home = home_address(db).await?;
     Ok(Some(json!({
         "namespace": namespace,
-        "routes": routes_document(&home, &in_namespace),
+        "routes": routes_document(&home, &in_namespace, meta_keys),
     })))
 }
 
@@ -122,14 +133,27 @@ pub fn no_route() -> Value {
     })
 }
 
-/// The `routes` object: each route's `namespace`, `methods`, `endpoints` and `_links`.
-fn routes_document(home: &str, routes: &[RouteSpec]) -> Value {
+/// The `routes` object: each route's `namespace`, `methods`, `endpoints` and `_links`. A route
+/// that writes meta lists the registered keys under its `meta` argument's `properties`.
+fn routes_document(home: &str, routes: &[RouteSpec], meta_keys: &MetaKeys) -> Value {
     let mut document = Map::new();
     for route in routes {
+        let properties = route
+            .meta
+            .as_ref()
+            .map(|(object, subtype)| meta_keys.schemas(*object, subtype));
         let endpoints: Vec<Value> = route
             .endpoints
             .iter()
-            .map(|e| json!({"methods": e.methods, "args": e.args}))
+            .map(|e| {
+                let mut args = e.args.clone();
+                if let Some(properties) = &properties
+                    && let Some(Value::Object(meta)) = args.get_mut("meta")
+                {
+                    meta.insert("properties".to_owned(), properties.clone());
+                }
+                json!({"methods": e.methods, "args": args})
+            })
             .collect();
         let mut entry = json!({
             "namespace": route.namespace,

@@ -20,6 +20,7 @@ use mission_control_core::media::{ImageSizes, Storage};
 use mission_control_core::rest::media::{
     MediaController, MediaUpload, UploadedFile, upload_too_big,
 };
+use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::{KsesLimiter, MAX_INPUT_VARS, Params, RestError, parse_form};
 use mission_control_core::users::UserCaps;
 use orbit_orm::Database;
@@ -50,6 +51,7 @@ struct App<'r> {
     storage: &'r Arc<dyn Storage>,
     sizes: &'r Arc<ImageSizes>,
     settings: &'r UploadSettings,
+    meta: &'r MetaKeys,
 }
 
 #[rocket::async_trait]
@@ -65,17 +67,25 @@ impl<'r> FromRequest<'r> for App<'r> {
             rocket.state::<Arc<dyn Storage>>(),
             rocket.state::<Arc<ImageSizes>>(),
             rocket.state::<UploadSettings>(),
+            rocket.state::<Arc<MetaKeys>>(),
         ) {
-            (Some(db), Some(hooks), Some(kses), Some(storage), Some(sizes), Some(settings)) => {
-                Outcome::Success(Self {
-                    db,
-                    hooks,
-                    kses,
-                    storage,
-                    sizes,
-                    settings,
-                })
-            }
+            (
+                Some(db),
+                Some(hooks),
+                Some(kses),
+                Some(storage),
+                Some(sizes),
+                Some(settings),
+                Some(meta),
+            ) => Outcome::Success(Self {
+                db,
+                hooks,
+                kses,
+                storage,
+                sizes,
+                settings,
+                meta,
+            }),
             _ => {
                 log::error!("The media routes ran before the app was ready");
                 Outcome::Error((Status::InternalServerError, ()))
@@ -95,6 +105,7 @@ impl App<'_> {
             storage: self.storage,
             sizes: self.sizes,
             upload_max_bytes: self.settings.max_bytes,
+            meta: self.meta,
         }
     }
 }

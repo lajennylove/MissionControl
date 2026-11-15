@@ -299,6 +299,119 @@ impl Store {
     }
 }
 
+/// One of the meta tables, for code that serves posts, terms and users the same way (the REST
+/// API's registered meta).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetaTable {
+    /// `post_meta`.
+    Post,
+    /// `term_meta`, keyed by the `terms` id.
+    Term,
+    /// `user_meta`.
+    User,
+}
+
+impl MetaTable {
+    fn store(self) -> &'static Store {
+        match self {
+            Self::Post => &POST_META,
+            Self::Term => &TERM_META,
+            Self::User => &USER_META,
+        }
+    }
+}
+
+/// How many owners one `IN (...)` of [`meta_rows`] binds.
+const ROWS_CHUNK: usize = 500;
+
+/// The rows of `table` whose owner is one of `owners` and whose key is one of `keys`, as
+/// `(owner, key, text)` in the order they were added, at most `per_key` rows per owner and key
+/// (the first ones by id): a key with more rows is never read whole. The key is compared exactly:
+/// MySQL compares text without case, so rows whose key differs only in case are dropped here
+/// (they count toward the same `per_key` rows there).
+pub(crate) async fn meta_rows(
+    db: &Database,
+    table: MetaTable,
+    owners: &[i64],
+    keys: &[&str],
+    per_key: usize,
+) -> Result<Vec<(i64, String, String)>, Error> {
+    let store = table.store();
+    let owner = store.owner.expect("meta tables have an owner column");
+    let mut out = Vec::new();
+    if owners.is_empty() || keys.is_empty() || per_key == 0 {
+        return Ok(out);
+    }
+    let key_marks = vec!["?"; keys.len()].join(", ");
+    let per_key = i64::try_from(per_key).unwrap_or(i64::MAX);
+    for chunk in owners.chunks(ROWS_CHUNK) {
+        let mut binds: Vec<Sql> = chunk.iter().map(|id| Sql::from(*id)).collect();
+        binds.extend(keys.iter().map(|k| Sql::from(*k)));
+        binds.push(per_key.into());
+        // `ROW_NUMBER()` numbers each owner's rows of a key, so the database returns at most
+        // `per_key` of them; SQLite (3.25), MariaDB (10.2), MySQL (8.0) and PostgreSQL have it.
+        let sql = format!(
+            "SELECT m_owner, m_key, m_value FROM (SELECT {owner} AS m_owner, {key} AS m_key, \
+             {value} AS m_value, id AS m_id, ROW_NUMBER() OVER (PARTITION BY {owner}, {key} \
+             ORDER BY id) AS m_rank FROM {table} WHERE {owner} IN ({marks}) AND {key} IN \
+             ({key_marks})) ranked WHERE m_rank <= ? ORDER BY m_id",
+            key = store.key,
+            value = store.value,
+            table = store.table,
+            marks = vec!["?"; chunk.len()].join(", "),
+        );
+        let rows: Vec<(i64, String, String)> = raw::fetch_all(db, &sql, &binds).await?;
+        out.extend(
+            rows.into_iter()
+                .filter(|(_, key, _)| keys.contains(&key.as_str())),
+        );
+    }
+    Ok(out)
+}
+
+/// Sets `key` of `owner` in `table` to `value`, replacing every row the key has, or inserting one,
+/// as `update_metadata` does.
+pub(crate) async fn set_meta(
+    db: &Database,
+    table: MetaTable,
+    owner: i64,
+    key: &str,
+    value: &Value,
+) -> Result<(), MetaError> {
+    table.store().set(db, owner, key, value).await
+}
+
+/// Replaces the rows of `key` of `owner` in `table` with one row per value of `values`, in
+/// order, in one transaction: the storage of a key registered with `single: false`.
+pub(crate) async fn set_meta_values(
+    db: &Database,
+    table: MetaTable,
+    owner: i64,
+    key: &str,
+    values: &[Value],
+) -> Result<(), MetaError> {
+    let store = table.store();
+    db.transaction(async |tx| {
+        store.delete(tx, owner, key).await?;
+        for value in values {
+            store.insert(tx, owner, key, &value.to_string()).await?;
+        }
+        Ok::<(), Error>(())
+    })
+    .await?;
+    Ok(())
+}
+
+/// Deletes every row of `key` of `owner` in `table`. True when there was one.
+pub(crate) async fn delete_meta(
+    db: &Database,
+    table: MetaTable,
+    owner: i64,
+    key: &str,
+) -> Result<bool, MetaError> {
+    Ok(table.store().delete(&mut &*db, owner, key).await?)
+}
+
 /// Post meta, set and read on a connection that is already in use (the steps of a transaction),
 /// for the trash meta `Post::trash` keeps.
 pub(crate) async fn put_post_meta_in<C: Conn>(

@@ -12,6 +12,7 @@ use super::TermsController;
 use crate::content::{Term, terms_by_term_id};
 use crate::front::term_links;
 use crate::rest::RestError;
+use crate::rest::meta::{MetaObject, MetaValues};
 use crate::rest::shared::{Context, Fields, Site, curies, database_error};
 
 /// How the terms of a request are shown.
@@ -102,6 +103,19 @@ async fn render(
     } else {
         Vec::new()
     };
+    let meta = if options.context != Context::Embed && options.fields.includes("meta") {
+        let ids: Vec<i64> = terms.iter().map(|t| t.term_id).collect();
+        MetaValues::load(
+            ctl.db,
+            ctl.meta,
+            MetaObject::Term,
+            ctl.taxonomy.taxonomy.name,
+            &ids,
+        )
+        .await?
+    } else {
+        MetaValues::default()
+    };
     Ok(terms
         .iter()
         .zip(paths)
@@ -113,7 +127,7 @@ async fn render(
                     site.home, term.taxonomy, term.slug
                 ),
             };
-            let item = full_item(ctl, term, link);
+            let item = full_item(ctl, term, link, meta.json(term.term_id));
             let mut item = options.fields.filter(by_context(item, options.context));
             if with_links {
                 item.insert(
@@ -127,7 +141,12 @@ async fn render(
 }
 
 /// Every field of `term`, as the view and edit contexts show it.
-fn full_item(ctl: &TermsController<'_>, term: &Term, link: String) -> Map<String, Value> {
+fn full_item(
+    ctl: &TermsController<'_>,
+    term: &Term,
+    link: String,
+    meta: Value,
+) -> Map<String, Value> {
     let mut item = Map::new();
     let mut put = |key: &str, value: Value| {
         item.insert(key.to_owned(), value);
@@ -142,7 +161,7 @@ fn full_item(ctl: &TermsController<'_>, term: &Term, link: String) -> Map<String
     if ctl.taxonomy.taxonomy.hierarchical {
         put("parent", json!(term.parent_id.unwrap_or(0)));
     }
-    put("meta", json!({}));
+    put("meta", meta);
     item
 }
 

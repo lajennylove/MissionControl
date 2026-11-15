@@ -20,7 +20,8 @@
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
 //! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
-//! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the kses
+//! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the
+//! registered meta keys shown under `meta` (`Arc<MetaKeys>`, empty at start), the kses
 //! limiter (`Arc<KsesLimiter>`), the uploads' storage (`Arc<dyn Storage>`, on the local disk in
 //! the uploads folder, `MC_UPLOADS_DIR`), the image size registry (`Arc<ImageSizes>`, WordPress's
 //! default sizes) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
@@ -49,6 +50,7 @@ use mission_control_core::content::{Shortcodes, register_publish_future_post};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
 use mission_control_core::media::{ImageSizes, LocalStorage, Storage};
+use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::posts::PostTypes;
 use mission_control_core::rest::terms::Taxonomies;
 use mission_control_core::rest::{KsesLimiter, RestRoutes};
@@ -126,6 +128,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let rest_routes = Arc::new(RestRoutes::new());
     let post_types = Arc::new(PostTypes::new());
     post_types.register_routes(&rest_routes);
+    let meta_keys = Arc::new(MetaKeys::new());
     let taxonomies = Arc::new(Taxonomies::new());
     taxonomies.register_routes(&rest_routes);
     mission_control_core::rest::users::register_routes(&rest_routes);
@@ -150,6 +153,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(rest_routes)
         .manage(post_types)
         .manage(taxonomies)
+        .manage(meta_keys)
         .manage(kses)
         .manage(auth)
         .manage(storage)

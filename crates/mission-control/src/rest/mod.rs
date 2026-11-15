@@ -17,6 +17,7 @@ const FIXED_BASE_RANK: isize = -20;
 
 use std::sync::Arc;
 
+use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::{RestRoutes, discovery};
 use orbit_orm::Database;
 use rocket::http::uri::Origin;
@@ -51,12 +52,12 @@ pub(crate) fn json(status: Status, body: &serde_json::Value) -> Json {
 
 /// The document at REST route `route` (`/`, `/wp/v2`): the index, a namespace index or
 /// `rest_no_route`.
-async fn answer(db: &Database, routes: &RestRoutes, route: &str) -> Json {
+async fn answer(db: &Database, routes: &RestRoutes, meta_keys: &MetaKeys, route: &str) -> Json {
     let route = route.trim_matches('/');
     let result = if route.is_empty() {
-        discovery::index(db, routes).await.map(Some)
+        discovery::index(db, routes, meta_keys).await.map(Some)
     } else {
-        discovery::namespace_index(db, routes, route).await
+        discovery::namespace_index(db, routes, meta_keys, route).await
     };
     match result {
         Ok(Some(document)) => json(Status::Ok, &document),
@@ -84,10 +85,11 @@ async fn wp_json(
     _auth: auth::RestAuth,
     db: &State<Arc<Database>>,
     routes: &State<Arc<RestRoutes>>,
+    meta_keys: &State<Arc<MetaKeys>>,
 ) -> Json {
     let path = origin.path().as_str();
     let route = path.strip_prefix("/wp-json").unwrap_or(path);
-    answer(db, routes, route).await
+    answer(db, routes, meta_keys, route).await
 }
 
 /// The `rest_route` query of a request to the site root, as WordPress's `rest_api_loaded` reads
@@ -114,6 +116,7 @@ async fn rest_route(
     _auth: auth::RestAuth,
     db: &State<Arc<Database>>,
     routes: &State<Arc<RestRoutes>>,
+    meta_keys: &State<Arc<MetaKeys>>,
 ) -> Json {
-    answer(db, routes, &route.0).await
+    answer(db, routes, meta_keys, &route.0).await
 }

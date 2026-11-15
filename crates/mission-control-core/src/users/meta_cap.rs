@@ -402,7 +402,7 @@ fn dedup(caps: Vec<String>) -> Vec<String> {
 /// letters (`/[^\x20-\x7E\p{L}]/` without the `u` flag, so it tests bytes, not characters) and
 /// looks at the first byte left. Skipping every non-ASCII character here protects at least the
 /// keys WordPress protects, and sometimes more (`é_x`), never fewer.
-fn is_protected_meta(key: &str) -> bool {
+pub(crate) fn is_protected_meta(key: &str) -> bool {
     key.chars().find(|c| matches!(c, ' '..='~')) == Some('_')
 }
 

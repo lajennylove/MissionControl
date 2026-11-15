@@ -12,6 +12,7 @@ use crate::content::{
     save_revision, set_option, set_post_meta,
 };
 use crate::content::{PUBLISH_FUTURE_POST, terms_by_term_id};
+use crate::rest::meta::{MetaObject, MetaUpdate};
 use crate::rest::params::{Params, Reader, as_integer};
 use crate::rest::shared::{Context, Fields, Site, database_error, id_of, option};
 use crate::rest::{RestError, RestResponse};
@@ -515,6 +516,15 @@ pub(super) async fn respond(
     })
 }
 
+/// The request's `meta`, checked against the keys registered for the type: nothing for a type
+/// without `custom-fields`, whose schema has no `meta`.
+fn read_meta(ctl: &PostsController<'_>, params: &Params) -> Result<MetaUpdate, RestError> {
+    if !ctl.post_type.supports.custom_fields {
+        return Ok(MetaUpdate::default());
+    }
+    MetaUpdate::read(ctl.meta, MetaObject::Post, &ctl.post_type.name, params)
+}
+
 /// `create_item`.
 pub(super) async fn create(
     ctl: &PostsController<'_>,
@@ -522,6 +532,7 @@ pub(super) async fn create(
 ) -> Result<RestResponse, RestError> {
     let site = Site::load(ctl.db).await?;
     let changes = Changes::read(ctl.post_type, &site, params)?;
+    let meta = read_meta(ctl, params)?;
     if params
         .get("id")
         .is_some_and(|id| as_integer(id).is_some_and(|id| id != 0))
@@ -585,6 +596,12 @@ pub(super) async fn create(
         .await
         .map_err(|e| database_error(&e))?;
     write_extras(ctl, &site, &post, &changes, true).await?;
+    // As `create_item`, the meta is checked on the new post, so a refused key leaves it saved.
+    let can_edit = ctl.can_on("edit_post", &post, None, &site);
+    meta.authorize(ctl.db, ctl.user, post.id, can_edit)
+        .await?
+        .apply(ctl.db)
+        .await?;
     let response = respond(ctl, &site, post.id, 201).await?;
     let location = site.rest_url(&format!("wp/v2/{}/{}", ctl.post_type.rest_base, post.id));
     Ok(response.with_header("Location", location))
@@ -620,6 +637,8 @@ pub(super) async fn update(
     let mut stored = ctl.find(id).await?;
     let site = Site::load(ctl.db).await?;
     let changes = Changes::read(ctl.post_type, &site, params)?;
+    let mut meta = None;
+    let mut authorized = None;
     // RFC 9110 section 13.1.4: a recipient ignores an If-Unmodified-Since that is not a valid
     // HTTP date, so the update goes ahead without the check, and the last write wins.
     let unmodified_since = if_unmodified_since.and_then(parse_http_date);
@@ -633,6 +652,8 @@ pub(super) async fn update(
         }
         if attempt == 1 {
             check_fields_permission(ctl, &changes, false).await?;
+            // As `update_item`, the meta's values are checked once the user may edit the post.
+            meta = Some(read_meta(ctl, params)?);
         }
         if let Some(status) = changes.status {
             check_status(ctl, status)?;
@@ -645,6 +666,11 @@ pub(super) async fn update(
                 Err(MetaError::Database(e)) => return Err(database_error(&e)),
             };
         check_references(ctl, &changes, current_template.as_deref()).await?;
+        // The meta's permissions are checked before the post is written, so a refused key
+        // leaves the post as it was. The user may edit the post: checked above.
+        if let Some(meta) = meta.take() {
+            authorized = Some(meta.authorize(ctl.db, ctl.user, id, true).await?);
+        }
         let mut post = stored.clone();
         if let Some(author) = changes.author
             && author != 0
@@ -708,6 +734,9 @@ pub(super) async fn update(
             Ok(_) => {
                 let saved = ctl.find(id).await?;
                 write_extras(ctl, &site, &saved, &changes, false).await?;
+                if let Some(authorized) = authorized.take() {
+                    authorized.apply(ctl.db).await?;
+                }
                 return respond(ctl, &site, id, 200).await;
             }
             Err(SaveError::Conflict { .. }) if unmodified_since.is_some() => return Err(conflict()),

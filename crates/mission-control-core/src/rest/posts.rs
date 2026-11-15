@@ -22,6 +22,8 @@
 //!   creating needs `edit_posts` (with `publish_posts` to publish, `edit_others_posts` to write
 //!   as someone else), updating `edit_post` and deleting `delete_post`. A delete trashes the post,
 //!   or deletes it for good with `force=true`.
+//! - `meta` shows the keys registered for the type in [`MetaKeys`], and creates and updates
+//!   write them, as [`super::meta`] describes.
 //! - Every create and update passes the title, content and excerpt through
 //!   [`kses_post_fields`](crate::content::kses_post_fields) for the acting user, on a blocking
 //!   thread behind [`KsesLimiter`]; every update records a revision.
@@ -38,7 +40,7 @@
 //!
 //! Left out, for now: comments (`comment_status` and `ping_status` read `closed` and writes are
 //! checked but not stored; no `replies` link), post formats (`format` reads `standard`; writes
-//! are checked, not stored), registered meta (`meta` is `{}` until Task 10.6), the `Allow`
+//! are checked, not stored), the `Allow`
 //! header, `before`/`after` and the other date filters, `search_columns`, `tax_relation`,
 //! embedding featured media (`wp:featuredmedia` is linked, not embedded), autosaves and revisions
 //! routes, and the `?rest_route=` form for these routes.
@@ -62,6 +64,7 @@ use super::shared::{Site, authorization_status, database_error};
 use crate::content::{MetaError, Post, PostStatus, Taxonomy, get_post_meta};
 use crate::hooks::Hooks;
 use crate::media::ImageSizes;
+use crate::rest::meta::{MetaKeys, MetaObject};
 use crate::rest::{Endpoint, KsesLimiter, RestError, RestRoutes, RouteSpec};
 use crate::theme::Theme;
 use crate::users::{Object, PostContext, PostTypeCaps, UserCaps, can, has_cap};
@@ -348,7 +351,8 @@ fn route_specs(post_type: &PostType) -> [RouteSpec; 2] {
                 Endpoint::new(["GET"], Value::Object(query::collection_args(post_type))),
                 Endpoint::new(["POST"], Value::Object(write::schema_args(post_type))),
             ],
-        ),
+        )
+        .with_meta(MetaObject::Post, &post_type.name),
         RouteSpec::new(
             item,
             vec![
@@ -356,7 +360,8 @@ fn route_specs(post_type: &PostType) -> [RouteSpec; 2] {
                 Endpoint::new(["POST", "PUT", "PATCH"], Value::Object(update)),
                 Endpoint::new(["DELETE"], delete),
             ],
-        ),
+        )
+        .with_meta(MetaObject::Post, &post_type.name),
     ]
 }
 
@@ -371,6 +376,7 @@ fn route_specs(post_type: &PostType) -> [RouteSpec; 2] {
 ///     kses: &kses,
 ///     theme: Some(&theme),
 ///     image_sizes: None,
+///     meta: &meta_keys,
 /// };
 /// let response = controller.list("per_page=5").await?;
 /// ```
@@ -391,6 +397,8 @@ pub struct PostsController<'a> {
     /// The registered image sizes, for an attachment's `missing_image_sizes`. `None` reads as no
     /// sizes; only the media controller needs them.
     pub image_sizes: Option<&'a ImageSizes>,
+    /// The registered meta keys, shown and written under `meta`.
+    pub meta: &'a MetaKeys,
 }
 
 impl PostsController<'_> {

@@ -47,6 +47,7 @@ pub use meta::{
     set_post_meta, set_post_meta_raw, set_term_meta, set_term_meta_raw, set_user_meta,
     set_user_meta_raw,
 };
+pub(crate) use meta::{MetaTable, delete_meta, meta_rows, set_meta, set_meta_values};
 pub use permalink::{
     PermalinkContext, PermalinkError, PermalinkStructure, Segment, Tag, page_ancestors, permalink,
 };

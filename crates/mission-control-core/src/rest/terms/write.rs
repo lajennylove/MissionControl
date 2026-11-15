@@ -9,6 +9,7 @@ use crate::content::{
     FieldTooLarge, MAX_FILTERED_BYTES, MAX_TERM_LENGTH, NewTerm, Term, TermChanges, TermError,
     kses_data, sanitize_text_field,
 };
+use crate::rest::meta::{MetaObject, MetaUpdate};
 use crate::rest::params::{Params, Reader, require};
 use crate::rest::shared::{Context, Fields, Site, database_error, too_large};
 use crate::rest::{RestError, RestResponse};
@@ -193,6 +194,16 @@ async fn respond(
     })
 }
 
+/// The request's `meta`, checked against the keys registered for the taxonomy.
+fn read_meta(ctl: &TermsController<'_>, params: &Params) -> Result<MetaUpdate, RestError> {
+    MetaUpdate::read(
+        ctl.meta,
+        MetaObject::Term,
+        ctl.taxonomy.taxonomy.name,
+        params,
+    )
+}
+
 /// `create_item`.
 pub(super) async fn create(
     ctl: &TermsController<'_>,
@@ -200,6 +211,7 @@ pub(super) async fn create(
 ) -> Result<RestResponse, RestError> {
     require(params, &["name"])?;
     let changes = Changes::read(ctl.taxonomy, params)?;
+    let meta = read_meta(ctl, params)?;
     // `create_item_permissions_check`: a hierarchical taxonomy's `edit_terms`, a flat one's
     // `assign_terms`, so whoever may tag a post may add a tag.
     let caps = ctl.taxonomy.caps();
@@ -238,6 +250,13 @@ pub(super) async fn create(
         Ok(term) => term,
         Err(e) => return Err(term_error(ctl, e).await),
     };
+    // As `create_item`, the meta is checked on the new term, so a refused key leaves it saved.
+    let defaults = ctl.default_terms().await?;
+    let can_edit = ctl.can_on("edit_term", &term, &defaults);
+    meta.authorize(ctl.db, ctl.user, term.term_id, can_edit)
+        .await?
+        .apply(ctl.db)
+        .await?;
     let site = Site::load(ctl.db).await?;
     let response = respond(ctl, &site, term.term_id, 201, Context::Edit).await?;
     let location = site.rest_url(&format!(
@@ -263,7 +282,12 @@ pub(super) async fn update(
             "Sorry, you are not allowed to edit this term.",
         ));
     }
+    // As `update_item`, the meta's values are checked once the user may edit the term.
+    let meta = read_meta(ctl, params)?;
     let parent = checked_parent(ctl, &changes).await?;
+    // Checked before anything is written, so a refused key leaves the term as it was. The user
+    // may edit the term: checked above.
+    let meta = meta.authorize(ctl.db, ctl.user, term.term_id, true).await?;
     // As `update_item`: only a request with something to change updates the term.
     if !changes.is_empty() {
         let (name, description) =
@@ -278,6 +302,7 @@ pub(super) async fn update(
             return Err(term_error(ctl, e).await);
         }
     }
+    meta.apply(ctl.db).await?;
     respond(ctl, &site, term.term_id, 200, Context::Edit).await
 }
 

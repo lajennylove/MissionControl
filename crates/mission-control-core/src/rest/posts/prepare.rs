@@ -16,6 +16,7 @@ use super::query::constant_time_eq;
 use crate::content::{Post, PostStatus, make_slug, now};
 use crate::front::{post_links, term_links, trim_excerpt};
 use crate::hooks::THE_CONTENT;
+use crate::rest::meta::{MetaObject, MetaValues};
 use crate::rest::shared::{Context, Fields, Site, curies, database_error};
 use crate::rest::{RestError, media, users};
 use crate::text::{escape_html, html_class};
@@ -66,6 +67,8 @@ pub(crate) struct Batch {
     pub(crate) meta: HashMap<(i64, String), Value>,
     /// Each post's revision count and latest revision id.
     revisions: HashMap<i64, (i64, i64)>,
+    /// The registered meta shown under `meta`.
+    registered: MetaValues,
 }
 
 /// The JSON of `posts` for `options`, in order.
@@ -91,6 +94,13 @@ pub(crate) async fn items(
     };
     if options.context == Context::Edit {
         batch.samples = sample_links(ctl, site, posts).await?;
+    }
+    if ctl.post_type.supports.custom_fields
+        && options.context != Context::Embed
+        && options.fields.includes("meta")
+    {
+        batch.registered =
+            MetaValues::load(db, ctl.meta, MetaObject::Post, &ctl.post_type.name, &ids).await?;
     }
     if with_links && ctl.post_type.supports.revisions {
         batch.revisions = revision_counts(db, &ids).await?;
@@ -292,7 +302,7 @@ fn full_item(
         put("format", json!("standard"));
     }
     if supports.custom_fields {
-        put("meta", json!({}));
+        put("meta", batch.registered.json(post.id));
     }
     let terms = batch.terms.get(&post.id).map_or(&[][..], Vec::as_slice);
     for taxonomy in &post_type.taxonomies {

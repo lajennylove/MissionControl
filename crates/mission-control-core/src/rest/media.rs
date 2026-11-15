@@ -58,6 +58,7 @@ use md5::{Digest, Md5};
 use orbit_orm::{Database, Model};
 use serde_json::{Map, Value, json};
 
+use super::meta::{MetaKeys, MetaObject, MetaUpdate};
 use super::params::{Params, Reader, as_integer};
 use super::posts::prepare::{ATTACHED_FILE, ATTACHMENT_ALT, ATTACHMENT_METADATA, Batch};
 use super::posts::{PostType, PostsController, invalid_id};
@@ -107,35 +108,41 @@ pub fn register_routes(routes: &RestRoutes) {
     });
     let mut write = writable_args();
     write.insert("id".into(), id.clone());
-    routes.register(RouteSpec::new(
-        collection,
-        vec![
-            Endpoint::new(
-                ["GET"],
-                Value::Object(super::posts::collection_args(&post_type)),
-            ),
-            Endpoint::new(["POST"], Value::Object(writable_args())),
-        ],
-    ));
-    routes.register(RouteSpec::new(
-        item,
-        vec![
-            Endpoint::new(["GET"], json!({"id": id, "context": context})),
-            Endpoint::new(["POST", "PUT", "PATCH"], Value::Object(write)),
-            Endpoint::new(
-                ["DELETE"],
-                json!({
-                    "id": id,
-                    "force": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Whether to bypass Trash and force deletion.",
-                        "required": false,
-                    },
-                }),
-            ),
-        ],
-    ));
+    routes.register(
+        RouteSpec::new(
+            collection,
+            vec![
+                Endpoint::new(
+                    ["GET"],
+                    Value::Object(super::posts::collection_args(&post_type)),
+                ),
+                Endpoint::new(["POST"], Value::Object(writable_args())),
+            ],
+        )
+        .with_meta(MetaObject::Post, &post_type.name),
+    );
+    routes.register(
+        RouteSpec::new(
+            item,
+            vec![
+                Endpoint::new(["GET"], json!({"id": id, "context": context})),
+                Endpoint::new(["POST", "PUT", "PATCH"], Value::Object(write)),
+                Endpoint::new(
+                    ["DELETE"],
+                    json!({
+                        "id": id,
+                        "force": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Whether to bypass Trash and force deletion.",
+                            "required": false,
+                        },
+                    }),
+                ),
+            ],
+        )
+        .with_meta(MetaObject::Post, &post_type.name),
+    );
 }
 
 /// The arguments of an upload or an update, as discovery lists the writable fields.
@@ -155,6 +162,10 @@ fn writable_args() -> Map<String, Value> {
     args.insert(
         "post".into(),
         json!({"description": "The ID for the associated post of the attachment.", "type": "integer", "required": false}),
+    );
+    args.insert(
+        "meta".into(),
+        json!({"description": "Meta fields.", "type": "object", "properties": [], "required": false}),
     );
     args
 }
@@ -235,6 +246,7 @@ pub fn filename_from_disposition(header: &str) -> Option<String> {
 ///     storage: &storage,
 ///     sizes: &sizes,
 ///     upload_max_bytes: config.upload_max_bytes,
+///     meta: &meta_keys,
 /// };
 /// let response = controller.list("media_type=image").await?;
 /// ```
@@ -253,6 +265,8 @@ pub struct MediaController<'a> {
     pub sizes: &'a Arc<ImageSizes>,
     /// The largest file accepted, in bytes (`MC_UPLOAD_MAX_BYTES`).
     pub upload_max_bytes: u64,
+    /// The registered meta keys, shown and written under `meta`.
+    pub meta: &'a MetaKeys,
 }
 
 /// The fields an upload or an update writes. `None` leaves a field as it is.
@@ -279,6 +293,12 @@ impl Changes {
                 .integer("post", Some(0), None)
                 .map(|p| (p > 0).then_some(p)),
         };
+        if let Some(meta) = r.raw("meta")
+            && !meta.is_object()
+            && !meta.as_array().is_some_and(Vec::is_empty)
+        {
+            r.invalid.wrong_type("meta", "object");
+        }
         r.invalid.finish()?;
         Ok(changes)
     }
@@ -319,7 +339,13 @@ impl MediaController<'_> {
             kses: self.kses,
             theme: None,
             image_sizes: Some(self.sizes),
+            meta: self.meta,
         }
+    }
+
+    /// The request's `meta`, checked against the keys registered for attachments.
+    fn read_meta(&self, params: &Params) -> Result<MetaUpdate, RestError> {
+        MetaUpdate::read(self.meta, MetaObject::Post, &ATTACHMENT.name, params)
     }
 
     /// `GET /wp/v2/media`: page `page` of the attachments the query asks for.
@@ -376,6 +402,7 @@ impl MediaController<'_> {
         content_md5: Option<&str>,
     ) -> Result<RestResponse, RestError> {
         let changes = Changes::read(params)?;
+        let meta = self.read_meta(params)?;
         if params
             .get("id")
             .is_some_and(|id| as_integer(id).is_some_and(|id| id != 0))
@@ -468,6 +495,14 @@ impl MediaController<'_> {
             .await
             .map_err(|e| attachment_error(&e))?;
         }
+        // As `create_item`, the meta is checked on the new attachment, so a refused key leaves it
+        // saved.
+        let saved = posts.find(attachment.id).await?;
+        let can_edit = posts.can_on("edit_post", &saved, None, &site);
+        meta.authorize(self.db, self.user, attachment.id, can_edit)
+            .await?
+            .apply(self.db)
+            .await?;
         let response = posts.edit_response(attachment.id, 201).await?;
         let location = site.rest_url(&format!("wp/v2/media/{}", attachment.id));
         Ok(response.with_header("Location", location))
@@ -555,6 +590,8 @@ impl MediaController<'_> {
                 "Sorry, you are not allowed to edit this post.",
             ));
         }
+        // As `update_item`, the meta's values are checked once the user may edit the attachment.
+        let meta = self.read_meta(params)?;
         if let Some(Some(parent)) = changes.post {
             let found = Post::query()
                 .find(self.db, parent)
@@ -574,6 +611,8 @@ impl MediaController<'_> {
                 Some(_) => {}
             }
         }
+        // Checked before anything is written, so a refused key leaves the attachment as it was.
+        let meta = meta.authorize(self.db, self.user, id, true).await?;
         let current = get_attachment(self.db, id)
             .await
             .map_err(|e| attachment_error(&e))?
@@ -610,6 +649,7 @@ impl MediaController<'_> {
                 .await
                 .map_err(|e| database_error(&e))?;
         }
+        meta.apply(self.db).await?;
         posts.edit_response(id, 200).await
     }
 
