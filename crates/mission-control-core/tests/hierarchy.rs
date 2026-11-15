@@ -341,7 +341,20 @@ fn hostile_values_are_dropped_not_passed_on() {
     let safe_page = ["page-about", "page-12", "page", "singular", "index"];
     let page = Resolved::Page(post(12, "page", "about"));
     for stored in [
-        "/abs", "a\\b", "C:x", "x/./y", "x\0y", "a/b/c", "../x", "a/../b", "",
+        "/abs",
+        "a\\b",
+        "C:x",
+        "x/./y",
+        "x\0y",
+        "a/b/c",
+        "../x",
+        "a/../b",
+        "",
+        "...php",
+        "..php",
+        "x/...php",
+        "a..b.php",
+        "x/C:y.php",
     ] {
         assert_eq!(templates_for(&page, Some(stored)), safe_page, "{stored:?}");
     }
