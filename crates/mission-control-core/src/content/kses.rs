@@ -47,17 +47,20 @@
 //!   the helper, or check the size first.
 //! - **Shape.** Input nested deeper than [`MAX_NESTING`] elements (the parser's time grows with
 //!   length times depth), holding more than [`MAX_ACTIVE_FORMATTING`] formatting elements active
-//!   at once, or that would make the parser reopen more than about one formatting element per
-//!   byte (it reopens every active one in each new block), is not parsed: it is stored as
-//!   escaped text, so nothing runs and nothing typed is lost (a title is kept as typed). So is
-//!   input whose length times its number of `&` and `0xC2` bytes passes ten billion (html5ever
-//!   0.40's serialiser rescans a value after each of them).
+//!   at once, or that would make the parser copy more start-tag bytes than about the input's
+//!   length (it reopens every unclosed formatting element, attributes and all, in each new
+//!   block, and clones misnested ones), is not parsed: it is stored as escaped text, so nothing
+//!   runs and nothing typed is lost (a title is kept as typed). So is input whose length times
+//!   its number of `&` and `0xC2` bytes passes ten billion (html5ever 0.40's serialiser rescans
+//!   a value after each of them).
 //! - **Output.** Output longer than eight times the input is refused the same way, as a backstop.
-//!   Ordinary content can meet it: one unclosed link with a long `href` followed by many
-//!   paragraphs is reopened, `href` and all, in every paragraph.
 //! - **Malformed but valid HTML** can be refused, because the pre-scan counts conservatively:
-//!   more than 32 formatting elements left unclosed or misnested (`<b><p></b>`), or more than
-//!   512 elements left unclosed.
+//!   more than 32 formatting elements left unclosed or misnested (`<b><p></b>`), more than 512
+//!   elements left unclosed, or an unclosed formatting element with long attributes followed by
+//!   many blocks. One unclosed link with a long `href` (or a long `style`) followed by many
+//!   paragraphs is refused by the pre-scan, cheaply, since the parser would copy the `href` into
+//!   every paragraph; a short unclosed `<b>` across thousands of paragraphs is kept, as browsers
+//!   show it.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -704,8 +707,8 @@ fn parse_is_bounded(html: &str) -> bool {
     (html.len() as u128) * (restarts as u128) <= MAX_ESCAPE_WORK && nesting_within_cap(html)
 }
 
-/// The elements the pre-scan lets the parser reopen beyond one per byte of input, for short
-/// input.
+/// The start-tag bytes the pre-scan lets the parser reopen or clone beyond one per byte of
+/// input, for short input.
 const REOPEN_ALLOWANCE: usize = 10_000;
 
 /// The elements whose content the tokenizer reads as text up to their end tag (raw text and
@@ -758,13 +761,17 @@ fn output_budget(input: &str) -> usize {
 /// html5ever (as browsers' parsers) scans its stack of open elements for many tags, so its time
 /// grows with the input's length times its nesting: 100,000 nested `<div>` take seconds. The
 /// nesting cap bounds the cost of those scans. The parser also reopens every unclosed formatting
-/// element in each new block, so 512 unclosed `<b>` and 60,000 paragraphs wrote 516 MB from
-/// 486 KB; the formatting cap bounds how many are reopened at once, a reopening budget (one
-/// element per byte of input, plus [`REOPEN_ALLOWANCE`]: at each tag and run of text, every
-/// active formatting element counts, since a block may have closed it, explicitly or not)
-/// bounds the total before anything is built, and an output budget ([`OUTPUT_FACTOR`]) is the
-/// backstop. (The serialiser's escaping work is bounded separately, in [`parse_is_bounded`],
-/// and the input's size by [`kses_post_fields`], Ruling R42.)
+/// element in each new block, attributes and all, so 512 unclosed `<b>` and 60,000 paragraphs
+/// wrote 516 MB from 486 KB, and one `<b>` with a 120 KB `style` in 30,000 paragraphs took 69 s
+/// (the sanitiser filters every copy); its adoption agency clones misnested ones too. The
+/// formatting cap bounds how many are reopened at once; a reopening budget, in bytes, bounds
+/// the total before anything is built: the start-tag bytes the parser may copy must stay within
+/// the input's length plus [`REOPEN_ALLOWANCE`] (each tag is charged the active formatting
+/// elements' start tags, which it may close for a later tag or text to reopen, and each run of
+/// the adoption agency that may clone, [`ADOPTION_ROUNDS`] times the ones it may clone; see
+/// `TreeModel::reopened`). An output budget ([`OUTPUT_FACTOR`]) is the backstop. (The
+/// serialiser's escaping work is bounded separately, in [`parse_is_bounded`], and the input's
+/// size by [`kses_post_fields`], Ruling R42.)
 ///
 /// The pass tokenizes as the HTML standard does (tags, quoted and unquoted attribute values,
 /// comments with all their endings, bogus comments, `DOCTYPE`, raw text elements, CDATA), and
@@ -775,15 +782,17 @@ fn output_budget(input: &str) -> usize {
 ///   it is [uncounted](UNCOUNTED_ELEMENTS) (every start tag at all counts when the input has an
 ///   `<svg` or `<math` tag, since in SVG and MathML those names are ordinary elements); `<li>`
 ///   closes an open `<li>`, `<dd>` or `<dt>` an open `<dd>` or `<dt>`, and `<p>` an open `<p>`;
-/// - a [formatting element](FORMATTING_ELEMENTS) also counts as active, and stops counting only
-///   when its end tag comes while it is the last element open (the parser keeps it active, and
-///   reopens it, after any other end);
+/// - a [formatting element](FORMATTING_ELEMENTS) also counts as active, with the length of its
+///   start tag, and stops counting only when its end tag comes while it is the last element open
+///   (the parser keeps it active, and reopens it, after any other end);
 /// - an end tag closes only the element it names when that element is the last counted one open
 ///   (and `</ul>`, `</ol>`, `</menu>` and `</dl>` their open items first; `</p>` its paragraph
-///   when only formatting elements are open in it); an end tag the parser would ignore, or one
-///   inside a comment, an attribute value, raw text or CDATA, closes nothing;
+///   when only formatting elements are open in it), and only when no uncounted element other
+///   than a paragraph is open in it (any, for a table), since the parser ignores it then; an
+///   end tag the parser would ignore, or one inside a comment, an attribute value, raw text or
+///   CDATA, closes nothing;
 /// - text that may be markup for the parser counts each `<` followed by a letter as an element
-///   that never closes, toward both caps: CDATA (a bogus comment outside SVG and MathML, which
+///   that never closes, toward both caps, active with its tag's bytes: CDATA (a bogus comment outside SVG and MathML, which
 ///   ends sooner), and, when the input has an `<svg` or `<math` tag anywhere, raw text and the
 ///   rest of the input after `<plaintext>` (in SVG and MathML, `<style>`, `<title>` or
 ///   `<plaintext>` hold markup); and after a `<script>` whose text holds `<!--` (where the
@@ -796,20 +805,16 @@ fn nesting_within_cap(html: &str) -> bool {
     let bytes = html.as_bytes();
     let length = bytes.len();
     let mut tree = TreeModel::default();
-    // The elements the parser may reopen: at each tag and each run of text, every active
-    // formatting element (the parser reopens the ones a block closed, and closes them
-    // implicitly, as `<p>` and `<div>` close an open paragraph). One per byte of input at most.
+    // The bytes of start tags the parser may copy, reopening or cloning formatting elements
+    // (see `TreeModel::reopened`): about one per byte of input at most.
     let reopen_budget = length.saturating_add(REOPEN_ALLOWANCE);
-    let mut reopened = 0usize;
     // Once set, no end tag closes anything.
     let mut no_closing = false;
     // Whether the parser may be in SVG or MathML anywhere, where raw text is markup.
     let foreign = contains_ignoring_case(bytes, b"<svg") || contains_ignoring_case(bytes, b"<math");
     let mut i = 0;
     while let Some(at) = bytes[i..].iter().position(|&b| b == b'<').map(|at| i + at) {
-        // The text before this tag, and the tag.
-        reopened = reopened.saturating_add(2 * tree.formatting);
-        if !tree.within_caps() || reopened > reopen_budget {
+        if !tree.within_caps() || tree.reopened > reopen_budget {
             return false;
         }
         i = at + 1;
@@ -818,28 +823,31 @@ fn nesting_within_cap(html: &str) -> bool {
             let (name_end, after) = scan_tag(bytes, i);
             let name = html[i..name_end].to_ascii_lowercase();
             i = after;
+            tree.charge_start(&name, foreign);
             if name == "plaintext" && !foreign {
                 // The rest is text for the parser.
                 break;
             }
             if name == "plaintext" {
                 // The rest is markup in SVG and MathML.
-                tree.unclosable += 1 + count_tag_opens(&bytes[i..]);
+                tree.unclosable += 1;
+                if !tree.markup_in_text(bytes, i, length) {
+                    return false;
+                }
                 break;
             }
             if RAW_TEXT_ELEMENTS.contains(&name.as_str()) {
                 let close = find_raw_text_end(bytes, i, &name).unwrap_or(length);
-                let text = &bytes[i..close];
-                if foreign {
-                    tree.unclosable += count_tag_opens(text);
+                if foreign && !tree.markup_in_text(bytes, i, close) {
+                    return false;
                 }
-                if name == "script" && contains(text, b"<!--") {
+                if name == "script" && contains(&bytes[i..close], b"<!--") {
                     no_closing = true;
                 }
                 // The end tag is read as a tag on the next turn.
                 i = close;
             }
-            tree.start(name, foreign);
+            tree.start(name, after - at, foreign);
         } else if next == b'/' {
             match bytes.get(i + 1) {
                 Some(c) if c.is_ascii_alphabetic() => {
@@ -849,6 +857,7 @@ fn nesting_within_cap(html: &str) -> bool {
                     if !no_closing {
                         tree.end(&name);
                     }
+                    tree.charge_end(&name);
                 }
                 Some(b'>') => i += 2,
                 // A bogus comment, up to the next `>`.
@@ -861,7 +870,9 @@ fn nesting_within_cap(html: &str) -> bool {
                 // CDATA in SVG and MathML, a bogus comment elsewhere: read it as the longer one,
                 // counting what may be markup.
                 let end = find(bytes, i, b"]]>").map_or(length, |at| at + 3);
-                tree.unclosable += count_tag_opens(&bytes[i..end]);
+                if !tree.markup_in_text(bytes, i, end) {
+                    return false;
+                }
                 i = end;
             } else {
                 // `DOCTYPE` or a bogus comment, up to the next `>`.
@@ -871,8 +882,63 @@ fn nesting_within_cap(html: &str) -> bool {
             i = skip_past(bytes, i, b">");
         }
     }
-    tree.within_caps()
+    tree.within_caps() && tree.reopened <= reopen_budget
 }
+
+/// The elements whose start tag never closes an element in the parser, nor opens one that
+/// stays open as a [special] element: the formatting elements and the other phrasing elements
+/// (`<img>`, `<br>` and `<wbr>` are special, but void, so closed at once).
+///
+/// [special]: https://html.spec.whatwg.org/multipage/parsing.html#special
+const PHRASING_ELEMENTS: &[&str] = &[
+    "abbr", "acronym", "bdi", "bdo", "br", "cite", "data", "del", "dfn", "img", "ins", "kbd",
+    "label", "mark", "q", "samp", "span", "sub", "sup", "time", "var", "wbr",
+];
+
+/// The elements whose end tag the parser handles by closing everything open after them (when
+/// they are in scope), so they close with the paragraphs open in them; any other element's end
+/// tag is ignored when a special element, such as a paragraph or a cell, is open after it.
+const CLOSING_ELEMENTS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "center",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hgroup",
+    "li",
+    "listing",
+    "main",
+    "menu",
+    "nav",
+    "ol",
+    "pre",
+    "search",
+    "section",
+    "summary",
+    "ul",
+];
+
+/// How many times html5ever's adoption agency runs its outer loop at most, cloning the
+/// formatting element and up to three others each time.
+const ADOPTION_ROUNDS: usize = 8;
 
 /// A counted element open in the model of [`nesting_within_cap`], with the uncounted elements
 /// open in it after it.
@@ -881,32 +947,169 @@ struct OpenElement {
     name: String,
     /// Whether it is a formatting element, counted as active.
     formatting: bool,
+    /// The order of its start tag, which names its entry in [`TreeModel::active`].
+    seq: usize,
     /// The [uncounted](UNCOUNTED_ELEMENTS) elements open after it, last opened last.
     uncounted: Vec<&'static str>,
 }
 
+impl OpenElement {
+    /// Whether the parser closes this element at its end tag (or at a new item, for a list
+    /// item), with the uncounted elements open in it: when none are, or when only paragraphs
+    /// are and its end tag closes everything open after it. A table closes with its rows, cells
+    /// and paragraphs.
+    fn closes_with_uncounted(&self) -> bool {
+        self.uncounted.is_empty()
+            || self.name == "table"
+            || (CLOSING_ELEMENTS.contains(&self.name.as_str())
+                && self.uncounted.iter().all(|&u| u == "p"))
+    }
+}
+
+/// An active formatting element in the model of [`nesting_within_cap`].
+struct Active {
+    /// The tag name.
+    name: &'static str,
+    /// The length of its start tag, name and attributes: what the parser copies when it reopens
+    /// or clones the element.
+    bytes: usize,
+    /// The order of its start tag.
+    seq: usize,
+}
+
 /// The conservative model of the parser's tree in [`nesting_within_cap`]. Every operation looks
-/// at the last element open, or walks down over open formatting elements only (at most
-/// [`MAX_ACTIVE_FORMATTING`] and one more, since the pass stops past the cap), so the pass stays
-/// linear.
+/// at the last element open, or walks down over open formatting elements only, or over the
+/// active ones (at most [`MAX_ACTIVE_FORMATTING`] and one more, since the pass stops past the
+/// cap), so the pass stays linear.
+///
+/// The model closes an element only when the parser does too, and keeps every formatting
+/// element the parser keeps in its list of active formatting elements (it lets one go only when
+/// its end tag comes while it is the last element open), so [`TreeModel::active`] holds every
+/// element the parser may reopen or clone.
 #[derive(Default)]
 struct TreeModel {
     /// The uncounted elements open before any counted one.
     root: Vec<&'static str>,
     /// The counted elements open, last opened last; their number is the depth.
     open: Vec<OpenElement>,
-    /// How many formatting elements are active (open, or closed by another element's end tag,
-    /// so reopened by the parser).
-    formatting: usize,
+    /// The active formatting elements: open, or closed by another element's end tag, so
+    /// reopened by the parser. Started first, first.
+    active: Vec<Active>,
     /// Elements counted in text that may be markup; they never close.
     unclosable: usize,
+    /// The bytes of the tags of [`TreeModel::unclosable`] elements, which may be active
+    /// formatting elements; they never stop being active.
+    unclosable_bytes: usize,
+    /// How many start tags have come.
+    seq: usize,
+    /// The order of the last start tag that is not [phrasing](PHRASING_ELEMENTS), which may
+    /// have opened a special element. An active element started before it may be cloned by the
+    /// adoption agency ("exposed").
+    last_block: usize,
+    /// The bytes of start tags the parser may copy, as reopened or cloned formatting elements.
+    ///
+    /// The parser reopens the active elements that are not open at a tag or a run of text, but
+    /// only the ones closed since it last reopened them, and only a tag closes elements. So each
+    /// tag is charged the active elements' bytes, after an end tag (the ones it may have closed
+    /// and that stay active) and before a start tag (the new element is open). An end tag of a
+    /// formatting element, and `<a>` or `<nobr>` while one is active, run the adoption agency,
+    /// which clones only when a special element is open after the formatting element: those
+    /// are charged [`ADOPTION_ROUNDS`] times the bytes of the exposed active elements.
+    reopened: usize,
 }
 
 impl TreeModel {
     /// Whether the model is within [`MAX_NESTING`] and [`MAX_ACTIVE_FORMATTING`].
     fn within_caps(&self) -> bool {
         self.open.len() + self.unclosable <= MAX_NESTING
-            && self.formatting + self.unclosable <= MAX_ACTIVE_FORMATTING
+            && self.formatting() + self.unclosable <= MAX_ACTIVE_FORMATTING
+    }
+
+    /// How many formatting elements are active.
+    fn formatting(&self) -> usize {
+        self.active.len()
+    }
+
+    /// The bytes of the active formatting elements' start tags.
+    fn active_bytes(&self) -> usize {
+        self.active
+            .iter()
+            .fold(self.unclosable_bytes, |sum, a| sum.saturating_add(a.bytes))
+    }
+
+    /// The bytes of the start tags of the active formatting elements the adoption agency may
+    /// clone: those started before a special element may have been opened.
+    fn exposed_bytes(&self) -> usize {
+        self.active
+            .iter()
+            .filter(|a| a.seq < self.last_block)
+            .fold(self.unclosable_bytes, |sum, a| sum.saturating_add(a.bytes))
+    }
+
+    /// Whether the adoption agency for `name` may clone: an active element `name` is exposed.
+    fn may_clone(&self, name: &str) -> bool {
+        self.unclosable_bytes > 0
+            || self
+                .active
+                .iter()
+                .any(|a| a.name == name && a.seq < self.last_block)
+    }
+
+    /// Charges the start tag `name`, before the model opens it.
+    fn charge_start(&mut self, name: &str, foreign: bool) {
+        self.reopened = self.reopened.saturating_add(self.active_bytes());
+        if matches!(name, "a" | "nobr") && self.may_clone(name) {
+            self.charge_adoption();
+        }
+        self.seq += 1;
+        if foreign || !(FORMATTING_ELEMENTS.contains(&name) || PHRASING_ELEMENTS.contains(&name)) {
+            self.last_block = self.seq;
+        }
+    }
+
+    /// Charges the end tag `name`, after the model closed what it closes.
+    fn charge_end(&mut self, name: &str) {
+        self.reopened = self.reopened.saturating_add(self.active_bytes());
+        if FORMATTING_ELEMENTS.contains(&name) && self.may_clone(name) {
+            self.charge_adoption();
+        }
+    }
+
+    /// Charges one run of the adoption agency.
+    fn charge_adoption(&mut self) {
+        self.reopened = self
+            .reopened
+            .saturating_add(ADOPTION_ROUNDS.saturating_mul(self.exposed_bytes()));
+    }
+
+    /// Text in `bytes[from..to]` that may be markup for the parser: each `<` followed by a
+    /// letter counts as an element that never closes, active with its tag's bytes, and as a
+    /// tag that may close elements, reopen and clone them. Returns `false` when that passes
+    /// [`MAX_ACTIVE_FORMATTING`] (then the tags are not read, so the pass stays linear).
+    fn markup_in_text(&mut self, bytes: &[u8], from: usize, to: usize) -> bool {
+        let text = &bytes[from..to];
+        let count = count_tag_opens(text);
+        if count == 0 {
+            return true;
+        }
+        self.unclosable += count;
+        if !self.within_caps() {
+            return false;
+        }
+        for at in 0..text.len() - 1 {
+            if text[at] == b'<' && text[at + 1].is_ascii_alphabetic() {
+                let (_, after) = scan_tag(bytes, from + at + 1);
+                self.unclosable_bytes = self.unclosable_bytes.saturating_add(after - (from + at));
+            }
+        }
+        self.seq += 1;
+        self.last_block = self.seq;
+        // Each of those tags may close elements and run the adoption agency.
+        let per_tag = self
+            .active_bytes()
+            .saturating_add(ADOPTION_ROUNDS.saturating_mul(self.exposed_bytes()));
+        self.reopened = self.reopened.saturating_add(count.saturating_mul(per_tag));
+        true
     }
 
     /// The uncounted elements open after the last counted one.
@@ -917,8 +1120,8 @@ impl TreeModel {
         }
     }
 
-    /// A start tag `name`; `foreign` when the input may hold SVG or MathML.
-    fn start(&mut self, name: String, foreign: bool) {
+    /// A start tag `name`, `bytes` long; `foreign` when the input may hold SVG or MathML.
+    fn start(&mut self, name: String, bytes: usize, foreign: bool) {
         let n = name.as_str();
         if !foreign && (VOID_ELEMENTS.contains(&n) || matches!(n, "html" | "head" | "body")) {
             return;
@@ -932,7 +1135,9 @@ impl TreeModel {
             open.push(uncounted);
             return;
         }
-        if let Some(top) = self.open.last() {
+        if let Some(top) = self.open.last()
+            && top.closes_with_uncounted()
+        {
             let top = top.name.as_str();
             if (n == "li" && top == "li")
                 || (matches!(n, "dd" | "dt") && matches!(top, "dd" | "dt"))
@@ -940,13 +1145,18 @@ impl TreeModel {
                 self.open.pop();
             }
         }
-        let formatting = FORMATTING_ELEMENTS.contains(&n);
-        if formatting {
-            self.formatting += 1;
+        let formatting = FORMATTING_ELEMENTS.iter().find(|&&f| f == n);
+        if let Some(&formatting) = formatting {
+            self.active.push(Active {
+                name: formatting,
+                bytes,
+                seq: self.seq,
+            });
         }
         self.open.push(OpenElement {
             name,
-            formatting,
+            formatting: formatting.is_some(),
+            seq: self.seq,
             uncounted: Vec::new(),
         });
     }
@@ -959,8 +1169,9 @@ impl TreeModel {
             && top.name == name
         {
             // The formatting element is the last one open: closed, and no longer active.
+            let seq = top.seq;
             self.open.pop();
-            self.formatting -= 1;
+            self.active.retain(|a| a.seq != seq);
             return;
         }
         if FORMATTING_ELEMENTS.contains(&name) {
@@ -983,11 +1194,16 @@ impl TreeModel {
             "dl" => &["dd", "dt"],
             _ => &[],
         };
+        // The parser ignores the end tag when a special element the model does not count (a
+        // cell, say) is open in the element; then the model keeps it open too.
         let mut at = self.open.len();
         if at > 0 && items.contains(&self.open[at - 1].name.as_str()) {
+            if !self.open[at - 1].closes_with_uncounted() {
+                return;
+            }
             at -= 1;
         }
-        if at > 0 && self.open[at - 1].name == name {
+        if at > 0 && self.open[at - 1].name == name && self.open[at - 1].closes_with_uncounted() {
             self.open.truncate(at - 1);
         }
     }
@@ -1607,6 +1823,70 @@ mod tests {
     }
 
     #[test]
+    fn the_reopening_budget_counts_the_bytes_of_the_tags_reopened() {
+        // One formatting element with a long attribute, reopened in every paragraph: the parser
+        // copies the attribute each time, and filters every copy.
+        let style = format!("color: red;{}", " ".repeat(12_000));
+        let href = format!("/{}", "a".repeat(12_000));
+        for html in [
+            format!("<p><b style=\"{style}\">{}", "<p>x".repeat(3_000)),
+            format!("<p><a href=\"{href}\">{}", "<p>x".repeat(3_000)),
+            format!("<p><b style=\"{style}\">x</p>{}", "<p>x</p>".repeat(3_000)),
+            format!("<p><em title=\"{href}\">{}", "<div>x</div>".repeat(3_000)),
+            // Inside markup the pass does not read as tags (SVG `<style>` holds markup).
+            format!(
+                "<p><svg><style><b style=\"{style}\"></style></svg>{}",
+                "<p>x</p>".repeat(3_000)
+            ),
+        ] {
+            assert!(!nesting_within_cap(&html), "{}", &html[..30]);
+        }
+        // Element counts would have let these through: one element per paragraph.
+        assert!(3_000 * 2 < "<p>x".repeat(3_000).len() + REOPEN_ALLOWANCE);
+
+        // The adoption agency clones a formatting element when a block is open in it.
+        let long = format!("<b style=\"color: red;{}\">", " ".repeat(2_000));
+        assert!(!nesting_within_cap(&format!("{long}<div>x</b>")));
+        // A formatting element closed while it is the last one open is not cloned.
+        for html in [
+            format!("{long}<div>x</div></b>"),
+            format!("{long}<span>x</span></b><div>y</div>"),
+            format!("<p>{long}x</b></p>{}", "<p>y</p>".repeat(3_000)),
+        ] {
+            assert!(nesting_within_cap(&html), "{}", &html[html.len() - 20..]);
+        }
+        // A short unclosed element is still reopened in thousands of paragraphs, as browsers do.
+        assert!(nesting_within_cap(&format!(
+            "<p><b>x</p>{}",
+            "<p>y</p>".repeat(20_000)
+        )));
+    }
+
+    #[test]
+    fn the_tree_model_keeps_an_element_the_parser_cannot_close() {
+        // `</span>` is ignored by the parser while a paragraph is open in the span.
+        let mut tree = TreeModel::default();
+        for (start, name) in [(true, "span"), (true, "p"), (false, "span")] {
+            if start {
+                tree.start(name.to_owned(), 6, false);
+            } else {
+                tree.end(name);
+            }
+        }
+        assert_eq!(tree.open.len(), 1, "the span stays open");
+        // A link closed while it is the last element open stops being active.
+        let mut tree = TreeModel::default();
+        tree.charge_start("div", false);
+        tree.start("div".to_owned(), 5, false);
+        tree.charge_start("a", false);
+        tree.start("a".to_owned(), 40, false);
+        tree.end("a");
+        tree.charge_end("a");
+        assert_eq!(tree.formatting(), 0);
+        assert_eq!(tree.reopened, 0, "nothing to reopen or clone");
+    }
+
+    #[test]
     fn the_serialising_work_counts_ampersands_and_0xc2_bytes() {
         for html in [
             "&".repeat(150_000),
@@ -1625,31 +1905,41 @@ mod tests {
         let mut tree = TreeModel::default();
         for (start, name) in [(true, "p"), (true, "b"), (true, "i"), (false, "p")] {
             if start {
-                tree.start(name.to_owned(), false);
+                tree.start(name.to_owned(), 3, false);
             } else {
                 tree.end(name);
             }
         }
         // `</p>` closed the paragraph and both formatting elements, which stay active.
         assert!(tree.open.is_empty() && tree.root.is_empty());
-        assert_eq!(tree.formatting, 2);
+        assert_eq!(tree.formatting(), 2);
+        assert_eq!(tree.active_bytes(), 6);
 
         let mut tree = TreeModel::default();
-        tree.start("div".to_owned(), false);
-        tree.start("td".to_owned(), false);
-        tree.start("b".to_owned(), false);
+        tree.start("div".to_owned(), 5, false);
+        tree.start("p".to_owned(), 3, false);
+        tree.start("b".to_owned(), 3, false);
         tree.end("b");
-        assert_eq!(tree.formatting, 0, "closed while last open");
+        assert_eq!(tree.formatting(), 0, "closed while last open");
         tree.end("div");
         assert!(
             tree.open.is_empty(),
-            "a counted element closes with its uncounted ones"
+            "a block closes with the paragraphs open in it"
+        );
+        let mut tree = TreeModel::default();
+        tree.start("table".to_owned(), 7, false);
+        tree.start("tr".to_owned(), 4, false);
+        tree.start("td".to_owned(), 4, false);
+        tree.end("table");
+        assert!(
+            tree.open.is_empty(),
+            "a table closes with its rows and cells"
         );
 
         // Uncounted elements pile up without counting, and close only from the top.
         let mut tree = TreeModel::default();
         for _ in 0..1_000 {
-            tree.start("td".to_owned(), false);
+            tree.start("td".to_owned(), 4, false);
         }
         tree.end("p");
         assert_eq!(tree.root.len(), 1_000);

@@ -493,6 +493,70 @@ fn reopened_formatting_elements_are_refused_in_bounded_time() {
 }
 
 #[test]
+fn long_attributes_reopened_in_every_paragraph_are_refused_in_bounded_time() {
+    // The parser copies a reopened element's attributes, and the sanitiser filters every copy:
+    // a 120 KB `style` reopened in 30,000 paragraphs took 69 s and 3.9 GB. The pre-scan charges
+    // the bytes of the start tags it would copy.
+    let style = format!("color: red;{}", " ".repeat(20_000));
+    let href = format!("/{}", "a".repeat(20_000));
+    let started = Instant::now();
+    for html in [
+        format!("<p><b style=\"{style}\">{}", "<p>x".repeat(5_000)),
+        format!("<p><a href=\"{href}\">{}", "<p>x".repeat(5_000)),
+        format!("<p><b style=\"{style}\">x</p>{}", "<p>x</p>".repeat(5_000)),
+        format!("<b style=\"{style}\">{}", "<div>x</b>".repeat(5_000)),
+    ] {
+        assert!(kses_post(&html).starts_with("&lt;"), "{}", &html[..20]);
+    }
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
+    // A long attribute on an element that is closed is fine.
+    let closed = format!(
+        "<p><b style=\"color: red\">x</b></p><p><a href=\"{href}\">y</a></p>{}",
+        "<p>z</p>".repeat(5_000)
+    );
+    assert_eq!(kses_post(&closed), closed);
+}
+
+#[test]
+fn an_ordinary_long_post_is_kept() {
+    // About 100 KB of the markup a post holds: headings, nested emphasis, links, images, lists,
+    // a table and quotes, all closed. Nothing in it comes near a bound.
+    let mut post = String::new();
+    let mut k = 0;
+    while post.len() < 100_000 {
+        post.push_str(&format!(
+            concat!(
+                "<h2 id=\"section-{k}\">Section {k}</h2>",
+                "<p>Intro with <strong>bold <em>and italic</em></strong>, <em>italic ",
+                "<strong>and bold</strong></em> and a <a href=\"https://example.com/posts/{k}/",
+                "?ref=feed#top\" title=\"Post {k}\">link</a>.</p>",
+                "<p><a href=\"/archive/{k}/\"><img src=\"https://example.com/wp-content/",
+                "uploads/2026/11/photo-{k}.jpg\" alt=\"Photo {k}\" width=\"640\" ",
+                "height=\"480\"></a></p>",
+                "<ul><li>One <em>item</em></li><li><a href=\"/tag/{k}/\">Two</a></li></ul>",
+                "<ol><li>First</li><li>Second <strong>bold</strong></li></ol>",
+                "<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr>",
+                "<td><em>a</em></td><td>{k}</td></tr></tbody></table>",
+                "<blockquote><p>Quoted <cite>Someone</cite></p></blockquote>",
+            ),
+            k = k
+        ));
+        k += 1;
+    }
+    let started = Instant::now();
+    assert_eq!(kses_post(&post), post);
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
+    let fields = PostFields {
+        content: post.clone(),
+        ..PostFields::default()
+    };
+    assert_eq!(
+        kses_post_fields(&user(AUTHOR), fields).unwrap().content,
+        post
+    );
+}
+
+#[test]
 fn many_ampersands_are_refused_in_bounded_time() {
     // html5ever 0.40's serialiser searches the rest of a text or attribute value once per `&`
     // it escapes, so 400,000 `&` took seconds to write.
