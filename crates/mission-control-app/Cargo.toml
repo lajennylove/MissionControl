@@ -16,7 +16,22 @@ test-hooks = []
 mission-control = { path = "../mission-control" }
 mission-control-core = { path = "../mission-control-core" }
 log = "0.4"
+# Opens the database the installer's database step tests, and runs the core migrations.
+orbit-orm.workspace = true
+# Encodes the user name, password and database name in the DATABASE_URL the installer builds
+# (MIT OR Apache-2.0). The version already in the lock.
+percent-encoding = "2.3"
+# Renders the installer's views (MIT). The version the themes use.
+propel_runtime = "0.3.0"
 rocket = "0.5.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The database's error code, to tell a wrong password from a missing database. Orbit's own sqlx
+# version.
+sqlx = { version = "0.9", default-features = false }
+# Zeroes the database URL (it holds the password) the installer keeps between steps (Apache-2.0
+# OR MIT).
+zeroize = "1"
 
 [dev-dependencies]
 # Turns on `test-hooks` for the binary the integration tests run.
@@ -29,6 +44,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # Gravatar hashes in the users tests.
 sha2 = "0.11"
 mission-control-testing = { path = "../mission-control-testing" }
-orbit-orm.workspace = true
-serde_json = "1"
 tempfile = "3"

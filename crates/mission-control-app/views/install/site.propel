@@ -1,0 +1,65 @@
+@extends('install.layout')
+
+{{-- Step 2 of the installer: the site and its administrator, as WordPress's install.php asks for them. --}}
+@section('content')
+<ol class="steps"><li>1. Database</li><li class="current">2. Site and administrator</li><li>3. Finished</li></ol>
+<div class="notice notice-success"><p>Mission Control can now communicate with your database ({{ $database }}).</p></div>
+<h2>Welcome</h2>
+<p>Welcome to the Mission Control installation process. Just fill in the information below and you will be on your way to using your site.</p>
+@if ($errors)
+<div class="notice notice-error" role="alert" id="site-errors">
+<ul>
+@foreach (message in errors)
+<li>{{ $message }}</li>
+@endforeach
+</ul>
+</div>
+@endif
+<h2>Information needed</h2>
+<p>Please provide the following information. Do not worry, you can always change these settings later.</p>
+<form method="post" action="/wp-admin/install.php?step=2" novalidate>
+<input type="hidden" name="_wpnonce" value="{{ $token }}">
+<input type="hidden" name="database_choice" value="{{ $choice }}">
+<table class="form-table" role="presentation">
+<tr>
+<th scope="row"><label for="weblog_title">Site Title</label></th>
+<td><input name="weblog_title" id="weblog_title" type="text" value="{{ $fields.weblog_title }}"></td>
+</tr>
+<tr>
+<th scope="row"><label for="user_login">Username</label></th>
+<td><input name="user_name" id="user_login" type="text" value="{{ $fields.user_name }}" autocomplete="off">
+<span class="description">Usernames can have only alphanumeric characters, spaces, underscores, hyphens, periods, and the @ symbol.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="pass1">Password</label></th>
+<td><input name="admin_password" id="pass1" type="password" value="" autocomplete="new-password">
+<span class="description"><strong>Important:</strong> You will need this password to log&nbsp;in. Please store it in a secure location.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="pass2">Repeat Password</label></th>
+<td><input name="admin_password2" id="pass2" type="password" value="" autocomplete="new-password"></td>
+</tr>
+<tr>
+<th scope="row"><label for="admin_email">Your Email</label></th>
+<td><input name="admin_email" id="admin_email" type="email" value="{{ $fields.admin_email }}">
+<span class="description">Double-check your email address before continuing.</span></td>
+</tr>
+<tr>
+<th scope="row">Search engine visibility</th>
+<td><fieldset><legend class="screen-reader-text"><span>Search engine visibility</span></legend>
+<label for="blog_public">
+@if ($discourage)
+<input name="blog_public" type="checkbox" id="blog_public" value="0" checked>
+@else
+<input name="blog_public" type="checkbox" id="blog_public" value="0">
+@endif
+Discourage search engines from indexing this site</label>
+<span class="description">It is up to search engines to honor this request.</span></fieldset></td>
+</tr>
+</table>
+<div class="notice notice-warning" id="admin-pending">
+<p><strong>The administrator account is not created yet.</strong> Creating the first user is still being built, so Mission Control does not save the username or the password you enter here. The site title, your email address and the search engine setting are saved. You will create the administrator account when that step is ready.</p>
+</div>
+<p><button type="submit" class="button">Install Mission Control</button></p>
+</form>
+@endsection

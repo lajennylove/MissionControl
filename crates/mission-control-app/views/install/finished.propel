@@ -1,0 +1,13 @@
+@extends('install.layout')
+
+{{-- Step 3 of the installer: done, as WordPress's install.php says it. --}}
+@section('content')
+<ol class="steps"><li>1. Database</li><li>2. Site and administrator</li><li class="current">3. Finished</li></ol>
+<h2>Success!</h2>
+<p class="installed">Mission Control has been installed. Thank you, and enjoy!</p>
+<p class="installed-database">Database: {{ $database }}.</p>
+<div class="notice notice-warning" id="admin-pending">
+<p><strong>The administrator account is not created yet.</strong> Mission Control did not save a username or password. You will create the administrator account when that step is ready.</p>
+</div>
+<p>Mission Control is restarting with its new configuration. In a few seconds, visit <a href="{{ $home }}">{{ $home }}</a>.</p>
+@endsection

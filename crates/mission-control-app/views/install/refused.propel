@@ -1,0 +1,12 @@
+@extends('install.layout')
+
+{{-- The installer refused a request: an expired form, an existing configuration, a site already installed. --}}
+@section('content')
+<div class="notice notice-error" role="alert" id="refused">
+<h2>{{ $page_title }}</h2>
+<p>{{ $message }}</p>
+</div>
+@if ($retry)
+<p><a class="button" href="/wp-admin/install.php">Try again</a></p>
+@endif
+@endsection

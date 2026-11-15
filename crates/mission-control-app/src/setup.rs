@@ -15,19 +15,20 @@
 //!
 //! As WordPress's installer, the setup page is open to whoever reaches the site first; the
 //! binary logs that at start, so the owner knows to finish setup straight away. The wizard's
-//! steps come with their own task; for now the page says setup is needed and lists the
-//! installer's preflight issues.
+//! steps are in [`crate::install::wizard`]; its first page also lists the installer's preflight
+//! issues.
 
 use std::path::{Path, PathBuf};
 
+use crate::install::wizard::{self, Wizard};
 use crate::restart::RestartHandle;
 use mission_control_core::config::{self, Config, ConfigError};
 use mission_control_core::install::preflight::{IssueCode, PreflightIssue, preflight};
 use rocket::fairing::AdHoc;
-use rocket::http::{ContentType, Method};
+use rocket::http::Method;
 use rocket::response::Redirect;
 use rocket::route::{Handler, Outcome, Route};
-use rocket::{Build, Data, Request, Rocket, State};
+use rocket::{Build, Data, Request, Rocket};
 
 /// The installer's path, WordPress's `wp-admin/install.php`.
 pub const INSTALL_PATH: &str = "/wp-admin/install.php";
@@ -151,7 +152,8 @@ pub fn setup_rocket_with_restart(
     .map(|method| Route::ranked(REDIRECT_RANK, method, "/<_..>", ToInstaller));
 
     let rocket = rocket::build()
-        .mount("/", rocket::routes![install])
+        .manage(Wizard::new(install_dir.clone()))
+        .mount("/", wizard::routes())
         .mount("/", redirects.collect::<Vec<_>>())
         .attach(AdHoc::on_ignite("Mission Control preflight", |rocket| {
             Box::pin(async move {
@@ -208,52 +210,6 @@ async fn run_checks(
     issues
 }
 
-/// The installer page. A placeholder until the wizard's steps: it says setup is needed and
-/// lists the preflight issues.
-#[rocket::get("/wp-admin/install.php")]
-fn install(state: &State<SetupState>) -> (ContentType, String) {
-    (ContentType::HTML, install_page(&state.issues))
-}
-
-/// The installer page's HTML. Every piece of text is escaped.
-fn install_page(issues: &[PreflightIssue]) -> String {
-    let mut body = String::from(
-        "<h1>Mission Control setup</h1>\n\
-         <p>This site is not configured yet. Set up Mission Control to start using it.</p>\n",
-    );
-    if !issues.is_empty() {
-        body.push_str("<h2>Fix these problems first</h2>\n<ul class=\"preflight-issues\">\n");
-        for issue in issues {
-            body.push_str("<li>");
-            body.push_str(&escape_html(&issue.message));
-            body.push_str("</li>\n");
-        }
-        body.push_str("</ul>\n");
-    }
-    format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <meta name=\"robots\" content=\"noindex, nofollow\">\n\
-         <title>Mission Control &rsaquo; Setup</title>\n</head>\n<body>\n{body}</body>\n</html>\n"
-    )
-}
-
-/// `text` with the characters HTML gives a meaning to replaced by entities.
-fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#039;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// Redirects a request to the installer, as WordPress does for every page of a site that is
 /// not installed (a `302 Found`).
 #[derive(Clone, Copy)]
@@ -275,19 +231,11 @@ mod tests {
         let issues = run_checks(|| panic!("a check failed")).await;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, IssueCode::ChecksFailed);
-        assert!(install_page(&issues).contains("could not run"));
+        assert!(issues[0].message.contains("could not run"));
     }
 
     #[rocket::async_test]
     async fn passing_checks_are_kept() {
         assert!(run_checks(Vec::new).await.is_empty());
-    }
-
-    #[test]
-    fn escapes_html() {
-        assert_eq!(
-            escape_html("<a href=\"x\">'&'</a>"),
-            "&lt;a href=&quot;x&quot;&gt;&#039;&amp;&#039;&lt;/a&gt;"
-        );
     }
 }

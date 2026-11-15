@@ -1,0 +1,75 @@
+@extends('install.layout')
+
+{{-- Step 1 of the installer: the database, as WordPress's setup-config.php asks for it. --}}
+@section('content')
+<ol class="steps"><li class="current">1. Database</li><li>2. Site and administrator</li><li>3. Finished</li></ol>
+<p class="setup-needed">This site is not configured yet. Set up Mission Control to start using it.</p>
+@if ($issues)
+<div class="notice notice-warning">
+<h2>Fix these problems first</h2>
+<ul class="preflight-issues">
+@foreach (issue in issues)
+<li>{{ $issue }}</li>
+@endforeach
+</ul>
+</div>
+@endif
+@if ($error)
+<div class="notice notice-error" role="alert" id="database-error">
+<h2>{{ $error.title }}</h2>
+<p>{{ $error.message }}</p>
+@if ($error.hints)
+<ul>
+@foreach (hint in error.hints)
+<li>{{ $hint }}</li>
+@endforeach
+</ul>
+@endif
+</div>
+@endif
+<p>Below you should enter your database connection details. If you are not sure about these, contact your host. SQLite needs no database server: Mission Control keeps the site in the file <code>database.sqlite</code> in its install folder.</p>
+<form method="post" action="/wp-admin/install.php?step=1" novalidate>
+<input type="hidden" name="_wpnonce" value="{{ $token }}">
+<table class="form-table" role="presentation">
+<tr>
+<th scope="row"><label for="driver">Database Type</label></th>
+<td><select name="driver" id="driver">
+@foreach (driver in drivers)
+@if ($driver.selected)
+<option value="{{ $driver.value }}" selected>{{ $driver.label }}</option>
+@else
+<option value="{{ $driver.value }}">{{ $driver.label }}</option>
+@endif
+@endforeach
+</select>
+<span class="description">SQLite is the default. Choose MySQL, MariaDB or PostgreSQL to use a database server; the fields below are only for a server.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="dbname">Database Name</label></th>
+<td><input name="dbname" id="dbname" type="text" value="{{ $fields.dbname }}" placeholder="mission_control" autocomplete="off">
+<span class="description">The name of the database you want to use with Mission Control.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="uname">Username</label></th>
+<td><input name="uname" id="uname" type="text" value="{{ $fields.uname }}" placeholder="username" autocomplete="off">
+<span class="description">Your database username.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="pwd">Password</label></th>
+<td><input name="pwd" id="pwd" type="password" value="" autocomplete="off">
+<span class="description">Your database password.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="dbhost">Database Host</label></th>
+<td><input name="dbhost" id="dbhost" type="text" value="{{ $fields.dbhost }}" placeholder="localhost" autocomplete="off">
+<span class="description">You should be able to get this info from your web host, if <code>localhost</code> does not work. Empty is <code>localhost</code>.</span></td>
+</tr>
+<tr>
+<th scope="row"><label for="dbport">Port</label></th>
+<td><input name="dbport" id="dbport" type="text" inputmode="numeric" value="{{ $fields.dbport }}" autocomplete="off">
+<span class="description">Leave it empty for the usual port: 3306 for MySQL and MariaDB, 5432 for PostgreSQL.</span></td>
+</tr>
+</table>
+<p><button type="submit" class="button">Submit</button></p>
+</form>
+@endsection

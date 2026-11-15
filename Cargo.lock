@@ -1386,10 +1386,15 @@ dependencies = [
  "mission-control-core",
  "mission-control-testing",
  "orbit-orm",
+ "percent-encoding",
+ "propel_runtime",
  "rocket",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
+ "sqlx",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]
