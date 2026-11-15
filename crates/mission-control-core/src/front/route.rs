@@ -1,5 +1,5 @@
 //! Request routing: a URL to the content it asks for, the inverse of
-//! [`permalink`](crate::content::permalink). It follows WordPress's two steps:
+//! [`permalink`]. It follows WordPress's two steps:
 //!
 //! 1. The rewrite rules (`WP_Rewrite`, `WP::parse_request`) read the path into query variables,
 //!    in WordPress's order: the category and tag bases, custom post types, the root
@@ -12,12 +12,20 @@
 //! The visitor is anonymous: only published content resolves. Private posts, drafts, pending
 //! and scheduled posts and the trash are not found.
 //!
+//! Input is bounded: a path longer than [`MAX_PATH_BYTES`] or with more than
+//! [`MAX_PATH_SEGMENTS`] segments is not found (WordPress pages rarely nest more than a few
+//! levels), and at most [`MAX_TYPE_KEYS`] query keys are tried as custom types, in one query.
+//!
 //! Left for later, as they need layers that do not exist yet:
 //! - Readers who may see private posts (`read_private_posts`): `Router::can_read` is the one
 //!   place to widen once a request carries its user.
-//! - `%author%` and `/author/{nicename}/`: users have no nicename until the profile layer, so a
-//!   structure with `%author%` and the author base do not resolve (WordPress's query finds no
-//!   author, so no posts). Author archives resolve by id, `?author=2`.
+//! - `%author%` and `/author/{nicename}/`: users have no nicename until the profile layer.
+//!   A `%author%` segment in a post's link is matched but not checked (ruling R29), and no
+//!   redirect is made to a post link that needs it (it cannot be rendered yet). The author base
+//!   does not resolve; author archives resolve by id, `?author=2`.
+//! - The post type registry (design 5.2): until it exists, a custom type resolves when the
+//!   database has a post of that type, and WordPress's non-public built-in types
+//!   ([`NON_PUBLIC_TYPES`]) never resolve, by any route.
 //! - Post type archives at a pretty path (`has_archive`), custom rewrite slugs and hierarchical
 //!   custom types need the post type registry; a custom type resolves at `{front}{type}/{slug}`,
 //!   `?{type}={slug}` and `?post_type={type}`, when the database has a post of that type.
@@ -262,7 +270,7 @@ impl Site {
     fn past_the_end(&self, count: i64, paged: u32) -> bool {
         paged > 1
             && match self.per_page {
-                Some(n) => i64::from(paged - 1) * n >= count,
+                Some(n) => i64::from(paged - 1).saturating_mul(n) >= count,
                 None => count == 0,
             }
     }
@@ -327,7 +335,7 @@ struct Vars {
     s: Option<String>,
     paged: Option<u32>,
     /// `?{post_type}={slug}`: a custom type's query variable, for each key that is not one of
-    /// the above.
+    /// the above and could be a public custom type; at most [`MAX_TYPE_KEYS`], without repeats.
     custom: Vec<(String, String)>,
     /// Whether `p` or `page_id` came from the query string, which `redirect_canonical` sends
     /// to the pretty link.
@@ -366,11 +374,24 @@ impl Vars {
                 "author_name" => self.author_name = non_empty(v),
                 "s" => self.s = Some(v.to_owned()),
                 "paged" => self.paged = v.parse().ok(),
-                _ if !v.is_empty() && is_type_name(key) => {
-                    self.custom.push((key.clone(), v.to_owned()));
+                _ if !v.is_empty() && is_custom_type(key) => {
+                    let full = self.custom.len() >= MAX_TYPE_KEYS;
+                    match self.custom.iter_mut().find(|(k, _)| k == key) {
+                        Some(pair) => pair.1 = v.to_owned(),
+                        None if !full => self.custom.push((key.clone(), v.to_owned())),
+                        None => {}
+                    }
                 }
                 _ => {}
             }
+        }
+        // WordPress unsets a `post_type` that is not publicly queryable (`parse_request`).
+        if self
+            .post_type
+            .as_deref()
+            .is_some_and(|t| !is_public_type(t))
+        {
+            self.post_type = None;
         }
     }
 
@@ -394,11 +415,52 @@ fn is_type_name(key: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-/// The built-in post types, which have rules of their own or none.
-const BUILTIN_TYPES: [&str; 5] = ["post", "page", "attachment", "revision", "nav_menu_item"];
+/// The public built-in post types, which have rules of their own rather than the custom type
+/// rule.
+const BUILTIN_TYPES: [&str; 3] = ["post", "page", "attachment"];
 
-/// The built-in types that have no page of their own on the site.
-const INTERNAL_TYPES: [&str; 2] = ["revision", "nav_menu_item"];
+/// WordPress's built-in post types that are not publicly queryable: they never resolve on the
+/// site, by path, id or query variable. The one list to check until the post type registry
+/// (design 5.2) says which types are public.
+pub(crate) const NON_PUBLIC_TYPES: [&str; 13] = [
+    "revision",
+    "nav_menu_item",
+    "custom_css",
+    "customize_changeset",
+    "oembed_cache",
+    "user_request",
+    "wp_block",
+    "wp_template",
+    "wp_template_part",
+    "wp_global_styles",
+    "wp_navigation",
+    "wp_font_family",
+    "wp_font_face",
+];
+
+/// Whether posts of `post_type` may be shown on the site.
+fn is_public_type(post_type: &str) -> bool {
+    !NON_PUBLIC_TYPES.contains(&post_type)
+}
+
+/// Whether `post_type` may resolve through the custom type rule or query variable.
+fn is_custom_type(post_type: &str) -> bool {
+    is_type_name(post_type) && !BUILTIN_TYPES.contains(&post_type) && is_public_type(post_type)
+}
+
+/// The most query string keys tried as custom post types (`?{type}={slug}`).
+pub(crate) const MAX_TYPE_KEYS: usize = 8;
+
+/// The longest path, in bytes, that routing reads; a longer one is not found.
+pub(crate) const MAX_PATH_BYTES: usize = 1024;
+
+/// The most segments a path may have; a deeper one is not found.
+pub(crate) const MAX_PATH_SEGMENTS: usize = 32;
+
+/// Whether `path` is within [`MAX_PATH_BYTES`] and [`MAX_PATH_SEGMENTS`].
+fn within_limits(path: &str) -> bool {
+    path.len() <= MAX_PATH_BYTES && path.split('/').count() <= MAX_PATH_SEGMENTS
+}
 
 /// One request's lookups.
 struct Router<'a> {
@@ -412,6 +474,9 @@ impl Router<'_> {
     /// when no rule matches (a 404). The root gives no variables.
     async fn match_path(&self, path: &str) -> Result<Option<Vars>, Error> {
         let rel = path.trim_matches('/');
+        if !within_limits(rel) {
+            return Ok(None);
+        }
         if rel.is_empty() {
             return Ok(Some(Vars::default()));
         }
@@ -525,7 +590,7 @@ impl Router<'_> {
         let Some((post_type, slug)) = rest.and_then(|r| r.split_once('/')) else {
             return Ok(None);
         };
-        if slug.contains('/') || !is_type_name(post_type) || BUILTIN_TYPES.contains(&post_type) {
+        if slug.contains('/') || !is_custom_type(post_type) {
             return Ok(None);
         }
         if !Post::of_type(post_type).exists(self.db).await? {
@@ -580,16 +645,12 @@ impl Router<'_> {
         if vars.page_id.is_some() || vars.pagename.is_some() {
             return self.page(vars, paged).await;
         }
-        for (post_type, slug) in &vars.custom {
-            if !BUILTIN_TYPES.contains(&post_type.as_str())
-                && Post::of_type(post_type).exists(self.db).await?
-            {
-                let vars = Vars {
-                    name: Some(slug.clone()),
-                    ..Vars::default()
-                };
-                return self.single(&vars, post_type).await;
-            }
+        if let Some((post_type, slug)) = self.custom_query_var(&vars.custom).await? {
+            let vars = Vars {
+                name: Some(slug.clone()),
+                ..Vars::default()
+            };
+            return self.single(&vars, post_type).await;
         }
         // Lists, in the order the template loader checks them.
         if let Some(terms) = &vars.s {
@@ -607,9 +668,7 @@ impl Router<'_> {
             });
         }
         if let Some(post_type) = vars.post_type.as_deref().filter(|t| *t != "post") {
-            if BUILTIN_TYPES.contains(&post_type)
-                || !Post::of_type(post_type).exists(self.db).await?
-            {
+            if !is_custom_type(post_type) || !Post::of_type(post_type).exists(self.db).await? {
                 return Ok(Resolved::NotFound);
             }
             let listing = Listing {
@@ -657,6 +716,27 @@ impl Router<'_> {
         self.home(paged).await
     }
 
+    /// The first `?{type}={slug}` pair whose type has posts, found with one query.
+    async fn custom_query_var<'v>(
+        &self,
+        custom: &'v [(String, String)],
+    ) -> Result<Option<&'v (String, String)>, Error> {
+        if custom.is_empty() {
+            return Ok(None);
+        }
+        let marks = vec!["?"; custom.len()].join(", ");
+        let binds: Vec<Sql> = custom.iter().map(|(t, _)| Sql::from(t.as_str())).collect();
+        let existing: Vec<(String,)> = raw::fetch_all(
+            self.db,
+            &format!("SELECT DISTINCT post_type FROM posts WHERE post_type IN ({marks})"),
+            &binds,
+        )
+        .await?;
+        Ok(custom
+            .iter()
+            .find(|(t, _)| existing.iter().any(|(e,)| e == t)))
+    }
+
     /// A list of `count` posts: not found when the page is past the end, or when it is empty
     /// and nothing named it (`found` is false; a date archive is never found empty).
     fn list(&self, archive: Archive, count: i64, paged: u32, found: bool) -> Resolved {
@@ -689,8 +769,9 @@ impl Router<'_> {
     /// A post of `post_type` by `name` or `p`, which must also match the date, id and category
     /// the URL gives.
     async fn single(&self, vars: &Vars, post_type: &str) -> Result<Resolved, Error> {
-        if vars.author_name.is_some() {
-            // TODO(profiles, Task 8.1): `%author%` needs nicenames.
+        // TODO(profiles, Task 8.1): check a `%author%` segment (`author_name`) against the
+        // post's author's nicename. Until then it is matched but not checked (R29).
+        if !is_public_type(post_type) {
             return Ok(Resolved::NotFound);
         }
         let candidates = if let Some(name) = &vars.name {
@@ -718,13 +799,15 @@ impl Router<'_> {
         let Some(post) = found else {
             return self.not_found(vars, post_type).await;
         };
-        if let Some(path) = &vars.category_name
-            && !self.in_category(&post, path).await?
-        {
-            return self.redirect_to(&post).await;
-        }
-        if vars.id_in_query && !self.structure.is_plain() {
-            return self.redirect_to(&post).await;
+        if self.can_link(&post) {
+            if let Some(path) = &vars.category_name
+                && !self.in_category(&post, path).await?
+            {
+                return self.redirect_to(&post).await;
+            }
+            if vars.id_in_query && !self.structure.is_plain() {
+                return self.redirect_to(&post).await;
+            }
         }
         Ok(match post.post_type.as_str() {
             "attachment" => Resolved::Attachment(post),
@@ -739,6 +822,7 @@ impl Router<'_> {
         if let Some(name) = &vars.name
             && let Some(post) = crate::content::find_by_old_slug(self.db, post_type, name).await?
             && self.dates_match(vars, &post)
+            && self.can_link(&post)
             && self.can_read(&post).await?
         {
             return self.redirect_to(&post).await;
@@ -747,7 +831,8 @@ impl Router<'_> {
         if vars.id_in_query
             && let Some(id) = id
             && let Some(post) = Post::query().find(self.db, id).await?
-            && !INTERNAL_TYPES.contains(&post.post_type.as_str())
+            && is_public_type(&post.post_type)
+            && self.can_link(&post)
             && self.can_read(&post).await?
         {
             return self.redirect_to(&post).await;
@@ -851,7 +936,7 @@ impl Router<'_> {
             month = part(4, 6).or(month);
             day = part(6, 8).or(day);
         }
-        let Some(year) = year else {
+        let Some(year) = year.filter(|y| (1..=9999).contains(y)) else {
             return Ok(Resolved::NotFound);
         };
         let start = NaiveDate::from_ymd_opt(year, month.unwrap_or(1), day.unwrap_or(1));
@@ -866,9 +951,16 @@ impl Router<'_> {
         let Some(end) = end else {
             return Ok(Resolved::NotFound);
         };
-        let utc = |d: NaiveDate| d.and_time(chrono::NaiveTime::MIN) - self.offset();
+        let utc = |d: NaiveDate| {
+            d.and_time(chrono::NaiveTime::MIN)
+                .checked_sub_signed(self.offset())
+                .map(storable)
+        };
+        let (Some(from), Some(to)) = (utc(start), utc(end)) else {
+            return Ok(Resolved::NotFound);
+        };
         let listing = Listing {
-            range: Some((utc(start), utc(end))),
+            range: Some((from, to)),
             ..Listing::default()
         };
         let count = listing.count(self.db).await?;
@@ -882,7 +974,13 @@ impl Router<'_> {
 
     /// Whether `post`'s local publish date matches the date parts in the URL.
     fn dates_match(&self, vars: &Vars, post: &Post) -> bool {
-        let date = post.published_at.unwrap_or(post.modified_at) + self.offset();
+        let Some(date) = post
+            .published_at
+            .unwrap_or(post.modified_at)
+            .checked_add_signed(self.offset())
+        else {
+            return false;
+        };
         vars.year.is_none_or(|y| y == date.year())
             && vars.monthnum.is_none_or(|m| m == date.month())
             && vars.day.is_none_or(|d| d == date.day())
@@ -936,8 +1034,14 @@ impl Router<'_> {
         let Some(last) = parts.last() else {
             return Ok(None);
         };
+        if !within_limits(path) {
+            return Ok(None);
+        }
+        let mut slugs = parts.clone();
+        slugs.sort();
+        slugs.dedup();
         let pages: Vec<Post> = Post::of_type("page")
-            .where_in("slug", parts.clone())
+            .where_in("slug", slugs)
             .get(self.db)
             .await?
             .into_iter()
@@ -981,6 +1085,12 @@ impl Router<'_> {
             .await?
             .iter()
             .any(|t| t.term_taxonomy_id == term.term_taxonomy_id))
+    }
+
+    /// Whether `post`'s permalink can be rendered: not a post under a structure with
+    /// `%author%`, whose nicename is not known yet (Task 8.1).
+    fn can_link(&self, post: &Post) -> bool {
+        post.post_type != "post" || !self.structure.tags().contains(&Tag::Author)
     }
 
     /// A 301 to `post`'s permalink.
@@ -1158,6 +1268,20 @@ impl Listing<'_> {
     }
 }
 
+/// `date` within what every database's datetime column holds (MySQL's `DATETIME` is
+/// 1000-01-01 to 9999-12-31 23:59:59), so a bind is never out of range. A bound clamped to the
+/// top leaves out posts in the last second of 9999.
+fn storable(date: NaiveDateTime) -> NaiveDateTime {
+    let min = NaiveDate::from_ymd_opt(1000, 1, 1)
+        .expect("a valid date")
+        .and_time(chrono::NaiveTime::MIN);
+    let max = NaiveDate::from_ymd_opt(9999, 12, 31)
+        .expect("a valid date")
+        .and_hms_opt(23, 59, 59)
+        .expect("a valid time");
+    date.clamp(min, max)
+}
+
 /// `text` with `!`, `%` and `_` escaped by `!`, for `LIKE ... ESCAPE '!'`, which reads alike on
 /// every database (a backslash does not).
 fn escape_like(text: &str) -> String {
@@ -1305,10 +1429,10 @@ fn match_from(pattern: &[Segment], input: &str, captures: &mut Vec<(Tag, String)
     };
     // The lengths the tag may take, in the order a regex tries them: greedy for runs of
     // digits and segments, lazy for `%category%` (`(.+?)`).
-    let mut ends: Vec<usize> = input
+    let run = run_length(tag, input);
+    let mut ends: Vec<usize> = input[..run]
         .char_indices()
         .map(|(i, c)| i + c.len_utf8())
-        .take_while(|&end| fits(tag, &input[..end]))
         .collect();
     if tag != Tag::Category {
         ends.reverse();
@@ -1327,16 +1451,16 @@ fn match_from(pattern: &[Segment], input: &str, captures: &mut Vec<(Tag, String)
     false
 }
 
-/// Whether `value` can still grow into the tag's text (every prefix of a match fits).
-fn fits(tag: Tag, value: &str) -> bool {
+/// The length in bytes of the longest start of `input` the tag's pattern can take, found in one
+/// pass: every shorter start (at a character boundary) fits too.
+fn run_length(tag: Tag, input: &str) -> usize {
+    let digits = || input.bytes().take_while(u8::is_ascii_digit).count();
     match tag {
-        Tag::Year => value.len() <= 4 && value.bytes().all(|b| b.is_ascii_digit()),
-        Tag::Monthnum | Tag::Day | Tag::Hour | Tag::Minute | Tag::Second => {
-            value.len() <= 2 && value.bytes().all(|b| b.is_ascii_digit())
-        }
-        Tag::PostId => value.bytes().all(|b| b.is_ascii_digit()),
-        Tag::Postname | Tag::Author => !value.contains('/'),
-        Tag::Category => true,
+        Tag::Year => digits().min(4),
+        Tag::Monthnum | Tag::Day | Tag::Hour | Tag::Minute | Tag::Second => digits().min(2),
+        Tag::PostId => digits(),
+        Tag::Postname | Tag::Author => input.find('/').unwrap_or(input.len()),
+        Tag::Category => input.len(),
     }
 }
 

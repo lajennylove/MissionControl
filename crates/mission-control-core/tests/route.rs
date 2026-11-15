@@ -205,11 +205,11 @@ async fn each_permalink_structure_resolves_back_to_its_post() {
 }
 
 #[tokio::test]
-async fn an_author_structure_does_not_resolve_until_users_have_nicenames() {
+async fn an_author_segment_is_matched_but_not_checked_until_users_have_nicenames() {
     let test = database().await;
     let db = test.db();
     let author = setup(db).await;
-    let post = published(db, author, "post", "hello-world", None).await;
+    let mut post = published(db, author, "post", "hello-world", None).await;
     let s = structure("/%author%/%postname%/");
     let ctx = PermalinkContext {
         author: Some("ann".into()),
@@ -217,7 +217,18 @@ async fn an_author_structure_does_not_resolve_until_users_have_nicenames() {
     };
     let url = link(db, &s, &post, &ctx).await;
     assert_eq!(url, "/ann/hello-world/");
-    assert_eq!(get(db, &s, &url).await, Resolved::NotFound);
+    assert_eq!(get(db, &s, &url).await, single(&post));
+    // Any author segment matches until Task 8.1 checks it (R29).
+    assert_eq!(get(db, &s, "/someone/hello-world/").await, single(&post));
+    // No redirect to a link that cannot be rendered yet: `?p=` is served as it is.
+    assert_eq!(
+        get(db, &s, &format!("/?p={}", post.id)).await,
+        single(&post)
+    );
+    post.slug = "renamed".into();
+    post.save(db).await.unwrap();
+    assert_eq!(get(db, &s, "/ann/hello-world/").await, Resolved::NotFound);
+    // The author base still needs nicenames.
     assert_eq!(
         get(db, &PermalinkStructure::post_name(), "/author/ann/").await,
         Resolved::NotFound
@@ -754,4 +765,147 @@ async fn a_post_outside_the_category_in_its_link_redirects() {
     // A page's path does not start with a category.
     let page = published(db, author, "page", "about", None).await;
     assert_eq!(get(db, &s, "/about/").await, Resolved::Page(page));
+}
+
+#[tokio::test]
+async fn non_public_types_never_resolve() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let template = published(db, author, "wp_template", "tpl", None).await;
+    let item = published(db, author, "nav_menu_item", "menu-item", None).await;
+    let pretty = PermalinkStructure::post_name();
+    let numeric = PermalinkStructure::numeric();
+    let plain = PermalinkStructure::plain();
+    for (post, post_type) in [(&template, "wp_template"), (&item, "nav_menu_item")] {
+        let (id, slug) = (post.id, post.slug.as_str());
+        let urls = [
+            format!("/{post_type}/{slug}/"),
+            format!("/archives/{post_type}/{slug}"),
+            format!("/?post_type={post_type}&name={slug}"),
+            format!("/?p={id}"),
+            format!("/?p={id}&post_type={post_type}"),
+            format!("/?page_id={id}"),
+            format!("/?attachment_id={id}"),
+        ];
+        for s in [&pretty, &numeric, &plain] {
+            for url in &urls {
+                assert_eq!(get(db, s, url).await, Resolved::NotFound, "{s}: {url}");
+            }
+            // WordPress drops a `post_type` that is not public, and such a type has no query
+            // variable: the request is the home page.
+            for url in [
+                format!("/?post_type={post_type}"),
+                format!("/?{post_type}={slug}"),
+            ] {
+                assert_eq!(get(db, s, &url).await, get(db, s, "/").await, "{s}: {url}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn attachments_and_old_slugs_of_unpublished_posts_are_not_found() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let s = PermalinkStructure::post_name();
+    for status in [PostStatus::Draft, PostStatus::Private] {
+        let parent = post_at(
+            db,
+            author,
+            "post",
+            "parent",
+            status,
+            None,
+            at(2026, 3, 7, 0, 0, 0),
+        )
+        .await;
+        let file = post_at(
+            db,
+            author,
+            "attachment",
+            "photo",
+            PostStatus::Inherit,
+            Some(parent.id),
+            at(2026, 3, 7, 0, 0, 0),
+        )
+        .await;
+        assert_eq!(
+            get(db, &s, &format!("/?attachment_id={}", file.id)).await,
+            Resolved::NotFound,
+            "{status:?}"
+        );
+    }
+    let mut post = published(db, author, "post", "old-name", None).await;
+    post.slug = "new-name".into();
+    post.save(db).await.unwrap();
+    assert_eq!(get(db, &s, "/old-name/").await, redirect("/new-name/"));
+    post.status = PostStatus::Draft;
+    post.save(db).await.unwrap();
+    assert_eq!(get(db, &s, "/old-name/").await, Resolved::NotFound);
+}
+
+#[tokio::test]
+async fn long_paths_and_many_query_keys_are_bounded() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let book = published(db, author, "book", "dune", None).await;
+    let s = PermalinkStructure::post_name();
+    let plain = PermalinkStructure::plain();
+    // Past 1,024 bytes or 32 segments: not found, by path and by `pagename`.
+    let long = format!("/{}/", "x".repeat(2000));
+    let deep = format!("/{}", "a/".repeat(40));
+    for url in [&long, &deep] {
+        assert_eq!(get(db, &s, url).await, Resolved::NotFound);
+        assert_eq!(get(db, &plain, url).await, Resolved::NotFound);
+    }
+    let pagename = format!("/?pagename={}", "a/".repeat(40));
+    assert_eq!(get(db, &plain, &pagename).await, Resolved::NotFound);
+    let category = format!("/category/{}", "c/".repeat(40));
+    assert_eq!(get(db, &s, &category).await, Resolved::NotFound);
+    // A long single segment under the limit is read without trouble.
+    let near = format!("/{}/", "y".repeat(1000));
+    assert_eq!(get(db, &s, &near).await, Resolved::NotFound);
+
+    // Many keys: only the first eight distinct type-shaped keys are tried, in one query.
+    let junk: Vec<String> = (0..200).map(|i| format!("k{i}=x")).collect();
+    let first = format!("/?book=dune&{}", junk.join("&"));
+    assert_eq!(get(db, &plain, &first).await, single(&book));
+    let last = format!("/?{}&book=dune", junk.join("&"));
+    assert_eq!(get(db, &plain, &last).await, get(db, &plain, "/").await);
+    // A repeated key counts once, its last value winning.
+    let repeated = format!("/?{}&book=dune", vec!["book=nope"; 50].join("&"));
+    assert_eq!(get(db, &plain, &repeated).await, single(&book));
+}
+
+#[tokio::test]
+async fn out_of_range_dates_and_pages_are_not_found() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    published(db, author, "post", "hello-world", None).await;
+    let s = PermalinkStructure::post_name();
+    for offset in [json!(0), json!(14), json!(-12)] {
+        option(db, "gmt_offset", offset).await;
+        for url in [
+            "/?year=0",
+            "/?year=-5",
+            "/?year=10000",
+            "/?year=2147483647",
+            "/?year=9999",
+            "/?year=1",
+            "/?year=9999&monthnum=12&day=31",
+            "/?m=99999999",
+            "/?m=00010101",
+            "/9999/12/31/",
+            "/0000/",
+        ] {
+            assert_eq!(get(db, &s, url).await, Resolved::NotFound, "{url}");
+        }
+    }
+    option(db, "posts_per_page", json!(9_000_000_000_000_000_000u64)).await;
+    assert_eq!(get(db, &s, "/page/4294967295/").await, Resolved::NotFound);
+    assert_eq!(get(db, &s, "/?paged=4294967295").await, Resolved::NotFound);
 }
