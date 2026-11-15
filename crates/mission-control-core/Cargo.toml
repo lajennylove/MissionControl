@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 [dependencies]
+# Decodes HTTP Basic credentials and encodes application password hashes (MIT OR Apache-2.0).
+base64 = "0.22"
+# BLAKE2b for application password hashes, as WordPress 6.8's `wp_fast_hash` (MIT OR Apache-2.0).
+blake2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Reads legacy Office (OLE compound) files to check their type (MIT). The version `infer` uses.
 cfb = "0.14"
@@ -14,6 +18,8 @@ cfb = "0.14"
 deunicode = "1.6"
 dotenvy = "0.15"
 fs4 = "1.1.0"
+# The operating system's CSPRNG, for application passwords (MIT OR Apache-2.0).
+getrandom = "0.4"
 # `catch_unwind` on the scheduler's tick future.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Decodes, resizes and encodes image sub-sizes (MIT OR Apache-2.0). Only the four web formats
@@ -27,10 +33,14 @@ orbit-orm.workspace = true
 serde = { version = "1", features = ["derive"] }
 # Scheduled event payloads are stored as JSON.
 serde_json = "1"
+# Constant-time comparison of password hashes (BSD-3-Clause).
+subtle = "2.6"
 # The `Decode` and `Type` traits, so `PostStatus` reads from a row. Orbit's own sqlx version.
 sqlx = { version = "0.9", default-features = false }
 # The scheduler's background loop, and blocking threads for hook callbacks.
 tokio = { workspace = true, features = ["time"] }
+# Version 4 UUIDs for application passwords, as `wp_generate_uuid4` (MIT OR Apache-2.0).
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }

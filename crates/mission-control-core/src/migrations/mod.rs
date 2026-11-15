@@ -19,6 +19,7 @@ mod m20261114000500_create_term_relationships_table;
 mod m20261114000600_create_post_meta_table;
 mod m20261114000700_create_user_meta_table;
 mod m20261114000800_create_term_meta_table;
+mod m20261114000900_create_application_passwords_table;
 
 /// Every core migration, in order. `run` applies the pending ones as one batch, and `rollback`
 /// reverts the last batch.
@@ -37,5 +38,6 @@ pub fn migrator() -> Result<Migrator, Error> {
         m20261114000600_create_post_meta_table::migration(),
         m20261114000700_create_user_meta_table::migration(),
         m20261114000800_create_term_meta_table::migration(),
+        m20261114000900_create_application_passwords_table::migration(),
     ])
 }
