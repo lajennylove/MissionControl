@@ -1,0 +1,5 @@
+<footer class="site-footer mt-16 border-t border-hairline py-8 text-sm text-muted">
+  <div class="site-container">
+    <p>{{ $site.name }} · Proudly powered by Mission Control</p>
+  </div>
+</footer>

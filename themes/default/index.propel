@@ -1,0 +1,12 @@
+@extends('layouts.app')
+
+{{-- The fallback for every request no other template answers. --}}
+@section('content')
+<main id="primary" class="site-main site-container" data-template="index">
+  @if ($post)
+  @include('partials.entry')
+  @else
+  @include('partials.loop')
+  @endif
+</main>
+@endsection

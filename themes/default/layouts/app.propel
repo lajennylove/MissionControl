@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="{{ $site.language }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ $document_title }}</title>
+    @if ($site.description)
+    <meta name="description" content="{{ $site.description }}">
+    @endif
+    {{-- The theme's built CSS and JavaScript, when built (WordPress's wp_head). --}}
+    {!! $head !!}
+    @stack('head')
+  </head>
+  <body class="{{ $body_class }}">
+    <a class="skip-link" href="#primary">Skip to content</a>
+    @include('partials.header')
+    @yield('content')
+    @include('partials.footer')
+  </body>
+</html>

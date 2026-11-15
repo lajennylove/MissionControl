@@ -1,0 +1,15 @@
+<header class="site-header border-b border-hairline bg-surface">
+  <div class="site-container flex flex-wrap items-center justify-between gap-4 py-6">
+    <div>
+      @if ($is.front_page)
+      <h1 class="site-title text-2xl font-bold"><a href="{{ $site.url }}" rel="home" class="text-heading">{{ $site.name }}</a></h1>
+      @else
+      <p class="site-title text-2xl font-bold"><a href="{{ $site.url }}" rel="home" class="text-heading">{{ $site.name }}</a></p>
+      @endif
+      @if ($site.description)
+      <p class="site-description text-sm text-muted">{{ $site.description }}</p>
+      @endif
+    </div>
+    @include('partials.search-form')
+  </div>
+</header>

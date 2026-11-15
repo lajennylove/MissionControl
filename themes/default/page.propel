@@ -1,0 +1,8 @@
+@extends('layouts.app')
+
+{{-- One page. --}}
+@section('content')
+<main id="primary" class="site-main site-container py-10" data-template="page">
+  @include('partials.entry')
+</main>
+@endsection

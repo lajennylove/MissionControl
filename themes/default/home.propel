@@ -1,0 +1,8 @@
+@extends('layouts.app')
+
+{{-- The blog: the latest posts, on the front page or on the posts page. --}}
+@section('content')
+<main id="primary" class="site-main site-container" data-template="home">
+  @include('partials.loop')
+</main>
+@endsection

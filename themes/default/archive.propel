@@ -1,0 +1,14 @@
+@extends('layouts.app')
+
+{{-- A category, a tag, an author, a date or a post type's posts. --}}
+@section('content')
+<main id="primary" class="site-main site-container" data-template="archive">
+  <header class="page-header pt-10">
+    <h1 class="page-title text-3xl font-semibold text-heading">{{ $archive.title }}</h1>
+    @if ($archive.description)
+    <div class="archive-description mt-2 text-muted">{{ $archive.description }}</div>
+    @endif
+  </header>
+  @include('partials.loop')
+</main>
+@endsection

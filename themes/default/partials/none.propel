@@ -1,0 +1,8 @@
+<section class="no-results not-found py-8">
+  <h2 class="entry-title">Nothing Found</h2>
+  @if ($is.search)
+  <p class="mt-4">Sorry, but nothing matched your search terms. Please try again with some different keywords.</p>
+  @else
+  <p class="mt-4">It seems we can’t find what you’re looking for. Perhaps searching can help.</p>
+  @endif
+</section>

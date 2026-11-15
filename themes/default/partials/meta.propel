@@ -1,0 +1,6 @@
+<p class="entry-meta">
+  <time class="entry-date published" datetime="{{ $post.datetime }}">{{ $post.date }}</time>
+  @if ($post.author)
+  <span class="byline">by <span class="author">{{ $post.author }}</span></span>
+  @endif
+</p>

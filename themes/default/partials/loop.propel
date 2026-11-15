@@ -1,0 +1,7 @@
+{{-- The Loop: a summary of each post on this page, then the links to the other pages. --}}
+@forelse (post in posts)
+  @include('partials.summary')
+@empty
+  @include('partials.none')
+@endforelse
+@include('partials.pagination')

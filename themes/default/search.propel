@@ -1,0 +1,11 @@
+@extends('layouts.app')
+
+{{-- Search results. --}}
+@section('content')
+<main id="primary" class="site-main site-container" data-template="search">
+  <header class="page-header pt-10">
+    <h1 class="page-title text-3xl font-semibold text-heading">Search Results for: <span>{{ $search_query }}</span></h1>
+  </header>
+  @include('partials.loop')
+</main>
+@endsection

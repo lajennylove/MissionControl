@@ -1,0 +1,12 @@
+{{-- One post or page in full. Its content went through the_content and is output as saved. --}}
+<article id="post-{{ $post.id }}" class="{{ $post.classes }}">
+  <header class="entry-header">
+    <h1 class="entry-title">{{ $post.title }}</h1>
+    @if ($is.single)
+    @include('partials.meta')
+    @endif
+  </header>
+  <div class="entry-content">
+    {!! $post.content !!}
+  </div>
+</article>

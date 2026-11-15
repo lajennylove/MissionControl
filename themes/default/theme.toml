@@ -1,0 +1,9 @@
+# The default theme shipped with Mission Control, in the role of WordPress's yearly default theme.
+name = "Default"
+author = "RocketBoost"
+author_uri = "https://rocketboost.rs"
+version = "1.0.0"
+description = "The default theme shipped with Mission Control: a clean, readable blog layout built with Propel views, Tailwind CSS and Vite."
+license = "GPL-2.0-or-later"
+requires = "0.1"
+supports = ["title-tag", "menus", "post-thumbnails", "html5", "responsive-embeds"]

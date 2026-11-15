@@ -1,0 +1,11 @@
+@if ($pagination.has_pages)
+<nav class="navigation posts-navigation mt-8 flex justify-between" aria-label="Posts">
+  <h2 class="screen-reader-text">Posts navigation</h2>
+  @if ($pagination.next)
+  <a class="nav-previous" href="{{ $pagination.next }}">← Older posts</a>
+  @endif
+  @if ($pagination.previous)
+  <a class="nav-next ml-auto" href="{{ $pagination.previous }}">Newer posts →</a>
+  @endif
+</nav>
+@endif
