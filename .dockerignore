@@ -1,0 +1,16 @@
+# Keep the build context small and free of secrets.
+target/
+.git/
+.github/
+.superpowers/
+docs/
+.env
+.env.*
+!.env.example
+**/node_modules/
+public/build/
+public/hot
+database.sqlite*
+uploads/
+Dockerfile
+.dockerignore

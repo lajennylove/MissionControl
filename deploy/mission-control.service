@@ -1,0 +1,72 @@
+# systemd unit for Mission Control (GPL-2.0-or-later).
+#
+# Install (as root), assuming the install folder /opt/mission-control:
+#   useradd --system --home-dir /opt/mission-control --shell /usr/sbin/nologin mission-control
+#   install -d -o mission-control -g mission-control /opt/mission-control
+#   install -m 0755 -o root -g root mission-control-app /usr/local/bin/mission-control-app
+#   cp -r themes /opt/mission-control/themes
+#   chown -R mission-control:mission-control /opt/mission-control
+#   cp deploy/mission-control.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now mission-control
+#
+# The install folder holds .env, database.sqlite, uploads/ and themes/. With no .env the
+# service starts in setup mode; open /wp-admin/install.php. The wizard writes .env, and the
+# binary exits with status 0 so systemd starts it again in normal mode.
+#
+# Keep DATABASE_URL and IGNITE_SECRET_KEY out of this file: they live in .env (mode 0600).
+# The binary is root-owned in /usr/local/bin, outside the writable folder, so the service
+# cannot replace its own executable. If you change the install folder, change
+# WorkingDirectory and ReadWritePaths.
+
+[Unit]
+# Shown in `systemctl status` and the journal.
+Description=Mission Control (WordPress-compatible CMS)
+# Start after the network is up (a MySQL, MariaDB or PostgreSQL server may be remote).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The binary is a plain Rocket server; it does not notify systemd, so the default type fits.
+Type=simple
+# The unprivileged account that owns the install folder.
+User=mission-control
+Group=mission-control
+# The install folder: .env, database.sqlite, uploads/ and themes/ are read and written here.
+WorkingDirectory=/opt/mission-control
+# The prebuilt binary (root-owned, not writable by the service).
+ExecStart=/usr/local/bin/mission-control-app
+# Restart after any exit, including status 0. The wizard ends setup mode with a clean exit
+# and relies on this; Restart=on-failure would leave the site stopped after setup.
+Restart=always
+# Wait two seconds before restarting, so a broken .env does not spin the CPU.
+RestartSec=2
+# Non-secret settings only. Rocket listens on localhost:8000 by default; put a reverse proxy in
+# front, or set the address here (for example 0.0.0.0) to listen on every interface.
+Environment=ROCKET_ADDRESS=127.0.0.1
+Environment=ROCKET_PORT=8000
+# Stop signal is SIGTERM (the default); Rocket finishes in-flight requests first.
+TimeoutStopSec=30
+
+# Hardening, chosen so that writing .env, the SQLite file and uploads still works.
+# The process and its children can never gain new privileges (no setuid escalation).
+NoNewPrivileges=yes
+# The whole file system is read-only for the service, except the paths listed below.
+ProtectSystem=strict
+# The only writable path: the data (install) folder.
+ReadWritePaths=/opt/mission-control
+# /tmp and /var/tmp are private to the service.
+PrivateTmp=yes
+# /home, /root and /run/user are hidden from the service.
+ProtectHome=yes
+# No access to physical devices.
+PrivateDevices=yes
+# Kernel tunables, modules and control groups are read-only or hidden.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# Files the service creates (.env, uploads) are not readable by other users.
+UMask=0027
+
+[Install]
+# Start at boot.
+WantedBy=multi-user.target

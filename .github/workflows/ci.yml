@@ -85,3 +85,43 @@ jobs:
       - name: Test (release)
         if: matrix.database == 'sqlite'
         run: cargo test --workspace --release
+
+  systemd-unit:
+    name: systemd unit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # `systemd-analyze verify` checks that ExecStart exists and is executable. It does not
+      # check the user or WorkingDirectory. A stub binary at the ExecStart path stands in for
+      # the real one (verify does not run it), so this job needs no Rust build.
+      - name: Put a stub binary at the ExecStart path
+        run: |
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/mission-control-app > /dev/null
+          sudo chmod 0755 /usr/local/bin/mission-control-app
+      # verify can print warnings (unknown keys, bad values) and still exit 0, so any output
+      # fails the job.
+      - name: Verify the unit
+        run: |
+          output="$(sudo systemd-analyze verify "$PWD/deploy/mission-control.service" 2>&1)" || status=$?
+          printf '%s\n' "$output"
+          test -z "$output" && test "${status:-0}" -eq 0
+      - name: The unit restarts after a clean exit
+        run: grep -qx 'Restart=always' deploy/mission-control.service
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Build only: the image is never pushed.
+      - name: Build the image
+        run: docker build --tag mission-control:ci .
+      - name: Starts in setup mode with no configuration
+        run: |
+          docker run -d --name mc --restart unless-stopped -p 8000:8000 mission-control:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/wp-admin/install.php -o /dev/null && exit 0
+            sleep 1
+          done
+          docker logs mc
+          exit 1

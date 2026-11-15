@@ -1,0 +1,22 @@
+# Example Compose file for Mission Control. Run from the repository root:
+#   docker compose -f deploy/docker-compose.yml up -d
+# The first start is setup mode: open http://localhost:8000/wp-admin/install.php
+# and finish setup at once.
+services:
+  mission-control:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Required: the wizard ends with a clean exit (status 0), and only `unless-stopped` or
+    # `always` start the container again. `on-failure` would leave the site stopped.
+    restart: unless-stopped
+    ports:
+      # Setup mode is open to the first visitor. Keep 127.0.0.1 until the wizard is finished,
+      # then publish "8000:8000" (or put a reverse proxy in front).
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # The install folder: .env, database.sqlite, uploads/ and themes/.
+      - mission-control-data:/data
+
+volumes:
+  mission-control-data:
