@@ -344,7 +344,7 @@ async fn slugs_may_repeat_and_may_be_empty() {
 }
 
 /// Whether `error` is a refused `ON DELETE RESTRICT`. SQLite reports it with the extended code
-/// `SQLITE_CONSTRAINT_TRIGGER` (1811), which Orbit at c2ee11f leaves as `Error::Database`, not
+/// `SQLITE_CONSTRAINT_TRIGGER` (1811), which Orbit may report as `Error::Database` rather than
 /// `ForeignKeyViolation`; the message is SQLite's foreign key message.
 fn restricted(error: &Error) -> bool {
     matches!(error, Error::ForeignKeyViolation { .. })

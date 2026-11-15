@@ -26,10 +26,15 @@ use crate::front::{Archive, Resolved};
 ///
 /// `page_template` is the post's `_wp_page_template` meta, which the caller reads: the template
 /// chosen in the editor for a page, or for any post of a type whose theme offers templates. It is
-/// used for a page, a post, an attachment's single rules and a static front page. It is ignored
-/// when it is empty, `default`, or not a safe path (`..`, `./`, a leading slash or backslash, a
-/// drive letter), as WordPress's `validate_file` refuses it; it is listed as stored, with its
-/// own extension, because it names a file of the theme.
+/// used for a page, a post, an attachment's single rules and a static front page. It is listed
+/// without its file extension, like every name (`templates/wide.php` is `templates/wide`), and
+/// may have one folder level. It is ignored when it is empty, `default`, or not safe (a leading
+/// slash, a backslash, `.` or `..` segments, more than one folder, a drive letter, a control
+/// character).
+///
+/// Every name is checked before it is returned: a name with a `/` (other than the page
+/// template's folder), a backslash, `..`, a control character or a drive prefix is dropped, so a
+/// hostile slug, post type or MIME type cannot name a file outside the theme.
 ///
 /// A slug with letters outside ASCII is listed in both forms, decoded and percent-encoded
 /// (`page-café`, `page-caf%c3%a9`), because WordPress stores such slugs encoded and themes name
@@ -44,7 +49,8 @@ use crate::front::{Archive, Resolved};
 /// ```
 pub fn templates_for(resolved: &Resolved, page_template: Option<&str>) -> Vec<String> {
     let mut names = Vec::new();
-    let custom = page_template.filter(|template| is_usable_template(template));
+    let custom = page_template.and_then(custom_template_name);
+    let custom = custom.as_deref();
     match resolved {
         Resolved::Redirect { .. } => return names,
         Resolved::NotFound => names.push("404".to_owned()),
@@ -76,6 +82,9 @@ pub fn templates_for(resolved: &Resolved, page_template: Option<&str>) -> Vec<St
         }
     }
     names.push("index".to_owned());
+    // Task 9.2 maps every name to a file, so a hostile slug, post type or MIME type never gets
+    // through. Only the page template may have a folder.
+    names.retain(|name| custom == Some(name.as_str()) || is_safe_name(name));
     names
 }
 
@@ -150,17 +159,52 @@ fn page_rules(names: &mut Vec<String>, post: &Post, custom: Option<&str>) {
     names.push("page".to_owned());
 }
 
-/// Whether a stored page template names a file the theme may be asked for: not empty, not
-/// `default` (the "no template" choice), and passing `validate_file`'s path checks.
-fn is_usable_template(template: &str) -> bool {
-    let bytes = template.as_bytes();
-    !template.is_empty()
-        && template != "default"
-        && !template.contains("..")
-        && !template.contains("./")
-        && !template.contains('\\')
-        && !template.starts_with('/')
-        && bytes.get(1) != Some(&b':')
+/// The name of a stored page template, or `None` when it is empty, `default` (the "no template"
+/// choice) or not safe. The file extension is dropped, as for every name (`templates/wide.php`
+/// is `templates/wide`). One folder level is allowed, as WordPress allows template subfolders.
+fn custom_template_name(template: &str) -> Option<String> {
+    if template.is_empty()
+        || template == "default"
+        || template.as_bytes().get(1).copied() == Some(b':')
+    {
+        return None;
+    }
+    let segments: Vec<&str> = template.split('/').collect();
+    if segments.len() > 2 || !segments.iter().all(|segment| is_safe_segment(segment)) {
+        return None;
+    }
+    let (folder, file) = match segments.as_slice() {
+        [file] => (None, *file),
+        [folder, file] => (Some(*folder), *file),
+        _ => return None,
+    };
+    let stem = match file.rfind('.') {
+        Some(dot) if dot > 0 => &file[..dot],
+        _ => file,
+    };
+    Some(match folder {
+        Some(folder) => format!("{folder}/{stem}"),
+        None => stem.to_owned(),
+    })
+}
+
+/// A path segment that cannot leave the theme: not empty, not `.` or `..`, no backslash and no
+/// control character (NUL included).
+fn is_safe_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('\\')
+        && !segment.chars().any(char::is_control)
+}
+
+/// Whether a generated name may be passed on to load a file: one segment, no `..` anywhere, no
+/// drive prefix.
+fn is_safe_name(name: &str) -> bool {
+    is_safe_segment(name)
+        && !name.contains('/')
+        && !name.contains("..")
+        && name.as_bytes().get(1).copied() != Some(b':')
 }
 
 /// The forms of a slug a theme may name a file by: decoded (`café`) first, then percent-encoded

@@ -84,7 +84,7 @@ fn the_hierarchy_for_each_kind_of_request() {
             Resolved::Single(post(7, "post", "hello-world")),
             Some("templates/wide.php"),
             vec![
-                "templates/wide.php",
+                "templates/wide",
                 "single-post-hello-world",
                 "single-post",
                 "single",
@@ -103,7 +103,7 @@ fn the_hierarchy_for_each_kind_of_request() {
             Resolved::Page(post(12, "page", "about")),
             Some("templates/wide.php"),
             vec![
-                "templates/wide.php",
+                "templates/wide",
                 "page-about",
                 "page-12",
                 "page",
@@ -233,7 +233,7 @@ fn the_hierarchy_for_each_kind_of_request() {
             Some("templates/landing.php"),
             vec![
                 "front-page",
-                "templates/landing.php",
+                "templates/landing",
                 "page-welcome",
                 "page-20",
                 "page",
@@ -321,4 +321,48 @@ fn a_term_slug_with_encoded_letters_lists_both_forms() {
             "index"
         ]
     );
+}
+
+#[test]
+fn a_page_template_loses_its_extension_and_keeps_one_folder() {
+    let page = Resolved::Page(post(12, "page", "about"));
+    for (stored, name) in [
+        ("templates/wide.php", "templates/wide"),
+        ("templates/wide.propel", "templates/wide"),
+        ("wide.propel", "wide"),
+        ("wide", "wide"),
+    ] {
+        assert_eq!(templates_for(&page, Some(stored))[0], name, "{stored}");
+    }
+}
+
+#[test]
+fn hostile_values_are_dropped_not_passed_on() {
+    let safe_page = ["page-about", "page-12", "page", "singular", "index"];
+    let page = Resolved::Page(post(12, "page", "about"));
+    for stored in [
+        "/abs", "a\\b", "C:x", "x/./y", "x\0y", "a/b/c", "../x", "a/../b", "",
+    ] {
+        assert_eq!(templates_for(&page, Some(stored)), safe_page, "{stored:?}");
+    }
+
+    let slug = Resolved::Page(post(12, "page", "%2e%2e%2f.."));
+    assert_eq!(
+        templates_for(&slug, None),
+        ["page-12", "page", "singular", "index"]
+    );
+    // The decoded form has a slash and is dropped; the encoded form is one harmless name.
+    let slug = Resolved::Page(post(12, "page", "a%2fb"));
+    assert_eq!(
+        templates_for(&slug, None),
+        ["page-a%2fb", "page-12", "page", "singular", "index"]
+    );
+
+    let kind = Resolved::Single(post(7, "a/b", "x"));
+    assert_eq!(templates_for(&kind, None), ["single", "singular", "index"]);
+
+    let image = Resolved::Attachment(attachment(30, "photo", "image/a/b"));
+    let names = templates_for(&image, None);
+    assert!(names.iter().all(|name| !name.contains('/')), "{names:?}");
+    assert!(names.contains(&"attachment".to_owned()));
 }
