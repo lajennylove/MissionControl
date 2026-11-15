@@ -96,3 +96,42 @@ pub(crate) fn strip_all_tags(text: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// `text` with `&`, `<`, `>`, `"` and `'` escaped, as `esc_html`.
+pub(crate) fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#039;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `sanitize_html_class`: percent-encoded octets are removed, then every character but ASCII
+/// letters, digits, `_` and `-`.
+pub(crate) fn html_class(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+        {
+            i += 3;
+            continue;
+        }
+        let b = bytes[i];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            out.push(b as char);
+        }
+        i += 1;
+    }
+    out
+}

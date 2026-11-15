@@ -15,7 +15,7 @@ use super::slug::{make_slug, sanitize_title};
 
 /// A taxonomy: its name and whether its terms nest. A minimal stand-in for the taxonomy
 /// definitions that custom taxonomies bring later; for now the built-ins are
-/// [`CATEGORY`](Self::CATEGORY) and [`POST_TAG`](Self::POST_TAG).
+/// [`CATEGORY`](Self::CATEGORY), [`POST_TAG`](Self::POST_TAG) and [`NAV_MENU`](Self::NAV_MENU).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Taxonomy {
     /// The name stored in `term_taxonomy.taxonomy`, at most 32 characters.
@@ -41,9 +41,17 @@ impl Taxonomy {
         object_types: &["post"],
     };
 
+    /// Navigation menus: each menu is a term, flat, and its items (`nav_menu_item` posts) are
+    /// its objects, as WordPress registers `nav_menu`. Not public: it has no archive.
+    pub const NAV_MENU: Self = Self {
+        name: "nav_menu",
+        hierarchical: false,
+        object_types: &["nav_menu_item"],
+    };
+
     /// The built-in taxonomy named `name`, if there is one.
     pub fn builtin(name: &str) -> Option<Self> {
-        [Self::CATEGORY, Self::POST_TAG]
+        [Self::CATEGORY, Self::POST_TAG, Self::NAV_MENU]
             .into_iter()
             .find(|t| t.name == name)
     }
@@ -726,36 +734,49 @@ async fn set_terms(
 ) -> Result<(), Error> {
     let taxonomy = *taxonomy;
     db.transaction(async |tx| {
-        let wanted: HashSet<i64> = TermTaxonomyRow::query()
-            .where_in("id", term_taxonomy_ids.iter().copied())
-            .where_eq("taxonomy", taxonomy.name)
-            .get(tx.exec())
-            .await?
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-        let current: HashSet<i64> = related(tx, object_id, &taxonomy)
-            .await?
-            .into_iter()
-            .collect();
-        let mut changed: Vec<i64> = wanted.difference(&current).copied().collect();
-        for &id in &changed {
-            raw::execute(
-                tx.exec(),
-                "INSERT INTO term_relationships (object_id, term_taxonomy_id, term_order) \
-                 VALUES (?, ?, 0)",
-                &[object_id.into(), id.into()],
-            )
-            .await?;
-        }
-        if !append {
-            let removed: Vec<i64> = current.difference(&wanted).copied().collect();
-            unrelate(tx, object_id, &removed).await?;
-            changed.extend(removed);
-        }
-        recount(tx, &taxonomy, &changed).await
+        set_terms_in(tx, object_id, &taxonomy, term_taxonomy_ids, append).await
     })
     .await
+}
+
+/// [`set_terms`] on the connection of a transaction the caller holds, so the relationships
+/// commit or roll back with the caller's other writes (a menu item's post and meta).
+pub(crate) async fn set_terms_in(
+    tx: &mut Transaction,
+    object_id: i64,
+    taxonomy: &Taxonomy,
+    term_taxonomy_ids: &[i64],
+    append: bool,
+) -> Result<(), Error> {
+    let taxonomy = *taxonomy;
+    let wanted: HashSet<i64> = TermTaxonomyRow::query()
+        .where_in("id", term_taxonomy_ids.iter().copied())
+        .where_eq("taxonomy", taxonomy.name)
+        .get(tx.exec())
+        .await?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let current: HashSet<i64> = related(tx, object_id, &taxonomy)
+        .await?
+        .into_iter()
+        .collect();
+    let mut changed: Vec<i64> = wanted.difference(&current).copied().collect();
+    for &id in &changed {
+        raw::execute(
+            tx.exec(),
+            "INSERT INTO term_relationships (object_id, term_taxonomy_id, term_order) \
+             VALUES (?, ?, 0)",
+            &[object_id.into(), id.into()],
+        )
+        .await?;
+    }
+    if !append {
+        let removed: Vec<i64> = current.difference(&wanted).copied().collect();
+        unrelate(tx, object_id, &removed).await?;
+        changed.extend(removed);
+    }
+    recount(tx, &taxonomy, &changed).await
 }
 
 /// The `term_taxonomy_id`s of post `object_id`'s terms in `taxonomy`.

@@ -50,4 +50,5 @@ pub use shortcode::{Attributes, InvalidShortcodeTag, Shortcodes};
 pub use slug::{
     MAX_SLUG_LENGTH, find_by_old_slug, is_hierarchical, make_slug, unique_slug, unique_slug_for,
 };
+pub(crate) use taxonomy::set_terms_in;
 pub use taxonomy::{MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermError, update_term_counts};

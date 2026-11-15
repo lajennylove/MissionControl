@@ -22,7 +22,7 @@
 //! levels), and at most [`MAX_TYPE_KEYS`] query keys are tried as custom types, in one query.
 //!
 //! Left for later, as they need layers that do not exist yet:
-//! - Readers who may see private posts (`read_private_posts`): `Router::can_read` is the one
+//! - Readers who may see private posts (`read_private_posts`): `visitor_can_read` is the one
 //!   place to widen once a request carries its user.
 //! - `%author%` and `/author/{nicename}/`: users have no nicename until the profile layer.
 //!   A `%author%` segment in a post's link is matched but not checked (ruling R29), and no
@@ -333,6 +333,78 @@ pub async fn post_links(
         links.push(router.link(post).await?);
     }
     Ok(links)
+}
+
+/// The archive links of `terms`, in order, each a path from the site's root as `get_term_link`
+/// gives it: `/category/news/local/` (the category's ancestors in the path) and `/tag/rust/`
+/// under the category and tag bases, or `/?cat=3` and `/?tag=rust` with plain permalinks.
+/// `None` for a term of a taxonomy without archives (`nav_menu`, or one not built in). Prefix
+/// the site address for an absolute link.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn term_links(
+    db: &Database,
+    structure: &PermalinkStructure,
+    terms: &[Term],
+) -> Result<Vec<Option<String>>, Error> {
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let site = Site::load(db).await?;
+    let router = Router {
+        db,
+        structure,
+        site: &site,
+    };
+    let categories = if terms.iter().any(|t| t.taxonomy == Taxonomy::CATEGORY.name) {
+        Some(Categories::load(db).await?)
+    } else {
+        None
+    };
+    Ok(terms
+        .iter()
+        .map(|term| {
+            let plain = structure.is_plain();
+            if term.taxonomy == Taxonomy::CATEGORY.name {
+                let categories = categories.as_ref()?;
+                Some(if plain {
+                    format!("/?cat={}", term.term_id)
+                } else {
+                    router.list_link(&router.category_prefix(), &categories.path(term), 1)
+                })
+            } else if term.taxonomy == Taxonomy::POST_TAG.name {
+                Some(if plain {
+                    format!("/?tag={}", term.slug)
+                } else {
+                    router.list_link(&router.tag_prefix(), &term.slug, 1)
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+/// Whether the anonymous visitor may read `post`: a published post, or an attachment
+/// (`inherit`) whose parent is published or that has none, as WordPress shows them to a visitor
+/// who is not logged in. Password-protected posts count as readable; the template asks for the
+/// password. The one rule routing, menus and widgets share.
+// TODO(users, Task 8.x): a logged-in reader with `read_private_posts` also reads private posts,
+// and `read_post` decides the rest.
+pub(crate) async fn visitor_can_read(db: &Database, post: &Post) -> Result<bool, Error> {
+    Ok(match post.status {
+        PostStatus::Publish => true,
+        PostStatus::Inherit if post.post_type == "attachment" => match post.parent_id {
+            None => true,
+            Some(parent) => Post::query()
+                .find(db, parent)
+                .await?
+                .is_none_or(|p| p.status == PostStatus::Publish),
+        },
+        _ => false,
+    })
 }
 
 /// The options routing reads, once per request.
@@ -1151,24 +1223,9 @@ impl Router<'_> {
             && vars.second.is_none_or(|s| s == date.second())
     }
 
-    /// Whether the anonymous visitor may read `post`: a published post, or an attachment
-    /// (`inherit`) whose parent is published or that has none, as WordPress shows them to a
-    /// visitor who is not logged in. Password-protected posts resolve; the template asks for
-    /// the password.
-    // TODO(users, Task 8.x): a logged-in reader with `read_private_posts` also reads private
-    // posts, and `read_post` decides the rest.
+    /// Whether the anonymous visitor may read `post`; see [`visitor_can_read`].
     async fn can_read(&self, post: &Post) -> Result<bool, Error> {
-        Ok(match post.status {
-            PostStatus::Publish => true,
-            PostStatus::Inherit if post.post_type == "attachment" => match post.parent_id {
-                None => true,
-                Some(parent) => Post::query()
-                    .find(self.db, parent)
-                    .await?
-                    .is_none_or(|p| p.status == PostStatus::Publish),
-            },
-            _ => false,
-        })
+        visitor_can_read(self.db, post).await
     }
 
     /// Post `id` of `post_type`, when the visitor may read it.

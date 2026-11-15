@@ -35,12 +35,19 @@
 //! | `search_query` | the search terms as typed | `get_search_query` |
 //! | `pagination.*` | `current`, `total`, `has_pages`, and the `previous` (newer) and `next` (older) page links or `null` | `posts_nav_link` |
 //! | `theme.slug`, `theme.name`, `theme.version` | the active theme | `wp_get_theme` |
+//! | `menus.{location}` | each menu location the theme declares: its assigned [`NavMenu`] (`id`, `name`, `slug`, `items`), or `null` | `wp_nav_menu` |
+//! | `sidebars.{id}` | each widget area the theme declares: `id`, `name`, `active` and its rendered `widgets` ([`SidebarView`]) | `dynamic_sidebar` |
 //!
 //! A post has `id`, `post_type`, `slug`, `title`, `url`, `content` (filtered by `the_content`;
 //! output raw), `excerpt` (HTML-safe: an auto excerpt is tag-stripped, a manual one escaped; output raw), `date`, `datetime` (ISO 8601), `author`,
 //! `classes` and `password_required`.
+//!
+//! A menu item ([`NavMenuItem`]) has `id`, `title`, `url` (empty when there is no safe link),
+//! `target`, `rel`, `attr_title`, `description`, `classes`, `current`, `aria_current` and
+//! `children`; every value is text. A widget has `id`, `id_base`, `classes`, `title` (text) and
+//! `content` (HTML with every value escaped; output raw). See [`crate::theme`]'s menus and widgets.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,8 +61,13 @@ use super::route::{number, option, text};
 use super::{Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve};
 use crate::content::{MetaError, PermalinkStructure, Post, get_post_meta};
 use crate::hooks::{Hooks, THE_CONTENT};
-use crate::text::strip_all_tags;
-use crate::theme::{Theme, ThemeError, ThemeLoader, load_theme, templates_for};
+use crate::text::{escape_html, html_class, strip_all_tags};
+#[cfg(doc)]
+use crate::theme::NavMenuItem;
+use crate::theme::{
+    NavMenu, PageRequest, SidebarView, Theme, ThemeError, ThemeLoader, load_theme, templates_for,
+    theme_menus, theme_sidebars,
+};
 
 /// The theme used when the active theme cannot be loaded, as WordPress's `WP_DEFAULT_THEME`.
 pub const DEFAULT_THEME: &str = "default";
@@ -370,6 +382,21 @@ impl Frontend {
                 next: (paged < main.max_num_pages).then(|| link(paged + 1)),
             }
         };
+        let request = PageRequest {
+            resolved,
+            home: &options.home,
+            path,
+            query,
+            structure: &options.structure,
+            utc_offset: options.offset,
+            search_query: &search_query,
+        };
+        let menus = theme_menus(&self.db, &self.theme, &request).await?;
+        let sidebars = theme_sidebars(&self.db, &self.theme, &request)
+            .await?
+            .into_iter()
+            .map(|sidebar| (sidebar.id.clone(), sidebar))
+            .collect();
         let manifest = self.theme.manifest();
         let document_title = document_title(options, resolved, &archive);
         let body_class = body_class(resolved, main.found_posts, page_template);
@@ -398,6 +425,8 @@ impl Frontend {
                 name: manifest.name.clone(),
                 version: manifest.version.clone().unwrap_or_default(),
             },
+            menus,
+            sidebars,
         })
     }
 
@@ -599,22 +628,6 @@ fn trim_excerpt(content: &str) -> String {
     }
 }
 
-/// `text` with `&`, `<`, `>`, `"` and `'` escaped, as `esc_html`.
-fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#039;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// `post_class`: `post-{id}`, the type, `type-{type}`, `status-{status}` and `hentry`.
 fn post_class(post: &Post) -> String {
     let post_type = html_class(&post.post_type);
@@ -629,29 +642,6 @@ fn post_class(post: &Post) -> String {
     }
     classes.push("hentry".to_owned());
     classes.join(" ")
-}
-
-/// `sanitize_html_class`: percent-encoded octets are removed, then every character but ASCII
-/// letters, digits, `_` and `-`.
-fn html_class(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
-            && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
-        {
-            i += 3;
-            continue;
-        }
-        let b = bytes[i];
-        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
-            out.push(b as char);
-        }
-        i += 1;
-    }
-    out
 }
 
 /// The `{type}-template...` classes of a singular post, as `get_body_class`: for a chosen
@@ -924,6 +914,8 @@ struct Context {
     search_query: String,
     pagination: Pagination,
     theme: ThemeView,
+    menus: BTreeMap<String, Option<NavMenu>>,
+    sidebars: BTreeMap<String, SidebarView>,
 }
 
 #[derive(Debug, Serialize)]

@@ -17,4 +17,7 @@ pub use render::{
     ActiveThemeError, DEFAULT_THEME, FrontError, Frontend, Response, THEME_ENTRIES,
     load_active_theme,
 };
-pub use route::{Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve};
+pub use route::{
+    Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve, term_links,
+};
+pub(crate) use route::{NON_PUBLIC_TYPES, visitor_can_read};
