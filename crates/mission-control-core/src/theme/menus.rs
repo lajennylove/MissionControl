@@ -56,9 +56,9 @@ use serde_json::{Map, Value, json};
 use super::{PageRequest, Theme};
 use crate::content::{
     MetaError, NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermError, get_option, now,
-    put_post_meta_in, set_option, set_terms_in,
+    put_post_meta_in, set_option, set_terms_in, terms_by_term_id,
 };
-use crate::front::{Archive, NON_PUBLIC_TYPES, Resolved, post_links, term_links, visitor_can_read};
+use crate::front::{Archive, NON_PUBLIC_TYPES, Resolved, post_links, term_links, visitor_readable};
 use crate::text::html_class;
 
 /// The post type of menu items.
@@ -637,14 +637,12 @@ async fn linked_posts(
         .filter(|i| i.item_type == "post_type")
         .filter_map(|i| i.object_id)
         .collect();
-    let mut readable = Vec::new();
-    for post in posts_by_id(db, &ids).await? {
-        if !NON_PUBLIC_TYPES.contains(&post.post_type.as_str())
-            && visitor_can_read(db, &post).await?
-        {
-            readable.push(post);
-        }
-    }
+    let candidates: Vec<Post> = posts_by_id(db, &ids)
+        .await?
+        .into_iter()
+        .filter(|post| !NON_PUBLIC_TYPES.contains(&post.post_type.as_str()))
+        .collect();
+    let readable = visitor_readable(db, candidates).await?;
     let links = post_links(db, request.structure, &readable).await?;
     Ok(readable
         .into_iter()
@@ -669,21 +667,17 @@ async fn linked_terms(
     request: &PageRequest<'_>,
     items: &[StoredItem],
 ) -> Result<HashMap<(String, i64), (String, String)>, Error> {
-    let mut wanted: HashSet<(String, i64)> = HashSet::new();
-    for item in items.iter().filter(|i| i.item_type == "taxonomy") {
-        if let Some(id) = item.object_id {
-            wanted.insert((item.object.clone(), id));
-        }
-    }
     let mut terms = Vec::new();
     for taxonomy in [Taxonomy::CATEGORY, Taxonomy::POST_TAG] {
-        if wanted.iter().any(|(name, _)| name == taxonomy.name) {
-            terms.extend(
-                Term::all(db, &taxonomy)
-                    .await?
-                    .into_iter()
-                    .filter(|t| wanted.contains(&(t.taxonomy.clone(), t.term_id))),
-            );
+        let mut ids: Vec<i64> = items
+            .iter()
+            .filter(|i| i.item_type == "taxonomy" && i.object == taxonomy.name)
+            .filter_map(|i| i.object_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if !ids.is_empty() {
+            terms.extend(terms_by_term_id(db, &taxonomy, &ids).await?);
         }
     }
     let links = term_links(db, request.structure, &terms).await?;

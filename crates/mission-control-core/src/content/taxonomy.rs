@@ -569,6 +569,29 @@ pub(crate) async fn recount_post_terms<C: Conn>(c: &mut C, post_id: i64) -> Resu
     Ok(())
 }
 
+/// The terms of `taxonomy` with these `term_id`s, in no order, read in one query per 500 ids
+/// (and one for their names), without loading the rest of the taxonomy.
+pub(crate) async fn terms_by_term_id(
+    db: &Database,
+    taxonomy: &Taxonomy,
+    term_ids: &[i64],
+) -> Result<Vec<Term>, Error> {
+    let mut c = db;
+    let mut rows = Vec::new();
+    for chunk in term_ids.chunks(500) {
+        rows.extend(
+            TermTaxonomyRow::query()
+                .where_in("term_id", chunk.iter().copied())
+                .where_eq("taxonomy", taxonomy.name)
+                .get(c.exec())
+                .await?,
+        );
+    }
+    // Exact comparison: MySQL compares text without case.
+    rows.retain(|row| row.taxonomy == taxonomy.name);
+    with_terms(&mut c, rows).await
+}
+
 /// The term with this `term_taxonomy_id`, if there is one.
 async fn find<C: Conn>(c: &mut C, term_taxonomy_id: i64) -> Result<Option<Term>, Error> {
     let Some(row) = TermTaxonomyRow::query()

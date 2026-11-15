@@ -162,7 +162,7 @@ impl Manifest {
             path: path.to_path_buf(),
             message,
         };
-        let menus = declared(raw.menus, "menus")
+        let menus = declared(raw.menus, "menus", &[])
             .map_err(invalid)?
             .into_iter()
             .map(|(location, description)| MenuLocation {
@@ -170,7 +170,7 @@ impl Manifest {
                 description,
             })
             .collect::<Vec<_>>();
-        let sidebars = declared(raw.sidebars, "sidebars")
+        let sidebars = declared(raw.sidebars, "sidebars", &super::widgets::RESERVED_AREAS)
             .map_err(invalid)?
             .into_iter()
             .map(|(id, name)| Sidebar { id, name })
@@ -207,11 +207,18 @@ impl Manifest {
 pub const MAX_AREA_ID: usize = 64;
 
 /// The `(id, text)` pairs of the `[menus]` or `[sidebars]` table, in order: each id a template
-/// name ([`is_area_id`]) and each value a string that is not empty once trimmed. The error names
+/// name ([`is_area_id`]) and not `reserved`, and each value a string that is not empty once trimmed. The error names
 /// the table, and the id when it is safe to repeat, never a value.
-fn declared(table: Option<toml::Table>, name: &str) -> Result<Vec<(String, String)>, String> {
+fn declared(
+    table: Option<toml::Table>,
+    name: &str,
+    reserved: &[&str],
+) -> Result<Vec<(String, String)>, String> {
     let mut pairs = Vec::new();
     for (id, value) in table.unwrap_or_default() {
+        if reserved.contains(&id.as_str()) {
+            return Err(format!("`[{name}]` id `{id}` is reserved"));
+        }
         if !is_area_id(&id) {
             return Err(match echoable(&id) {
                 Some(id) => format!(

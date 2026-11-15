@@ -30,6 +30,6 @@ pub use menus::{
 };
 pub use request::PageRequest;
 pub use widgets::{
-    SIDEBARS_WIDGETS, SidebarView, WIDGET_TYPES, WidgetError, WidgetView, save_widget,
-    set_sidebar_widgets, sidebars_widgets, theme_sidebars,
+    RESERVED_AREAS, SIDEBARS_WIDGETS, SidebarView, WIDGET_TYPES, WidgetError, WidgetView,
+    save_widget, set_sidebar_widgets, sidebars_widgets, theme_sidebars,
 };

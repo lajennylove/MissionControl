@@ -636,3 +636,46 @@ async fn theme_menus_has_every_location_with_null_for_an_unassigned_one() {
         .unwrap();
     assert!(menus.get("primary").unwrap().is_none());
 }
+
+#[tokio::test]
+async fn a_chain_deeper_than_the_cap_is_shown_flat_past_it() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let menu = create_nav_menu(db, "Deep").await.unwrap();
+    let depth = mission_control_core::theme::MAX_MENU_DEPTH + 4;
+    let mut parent = None;
+    for level in 0..depth {
+        let item = item(
+            db,
+            author,
+            &menu,
+            NewMenuItem {
+                parent,
+                ..NewMenuItem::custom(&format!("L{level}"), &format!("/l{level}/"))
+            },
+        )
+        .await;
+        parent = Some(item.id);
+    }
+
+    let rendered = menu_for(db, &menu, "/").await;
+    fn deepest(items: &[NavMenuItem]) -> usize {
+        items
+            .iter()
+            .map(|i| 1 + deepest(&i.children))
+            .max()
+            .unwrap_or(0)
+    }
+    fn count(items: &[NavMenuItem]) -> usize {
+        items.iter().map(|i| 1 + count(&i.children)).sum()
+    }
+    assert_eq!(
+        deepest(&rendered.items),
+        mission_control_core::theme::MAX_MENU_DEPTH
+    );
+    assert_eq!(count(&rendered.items), depth, "each item shows once");
+    // The first item holds the capped tree; the rest follow at the top level, in order.
+    assert_eq!(rendered.items.len(), 1 + 4);
+    assert_eq!(rendered.items[1].title, format!("L{}", depth - 4));
+}

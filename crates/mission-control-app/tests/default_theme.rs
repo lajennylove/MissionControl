@@ -662,6 +662,14 @@ async fn a_menu_assigned_to_the_primary_location_appears_in_the_header() {
         ..NewMenuItem::post(&team)
     })
     .await;
+    // A third level, opening in a new tab.
+    let ann = add(NewMenuItem {
+        parent: Some(team_item.id),
+        target: "_blank".to_owned(),
+        attr_title: "Ann's page".to_owned(),
+        ..NewMenuItem::custom("Ann", "https://example.org/ann")
+    })
+    .await;
     add(NewMenuItem::post(&draft)).await;
     let evil = add(NewMenuItem::custom("Evil", "javascript:alert(1)")).await;
     // Written straight to the meta, as an importer could.
@@ -706,12 +714,29 @@ async fn a_menu_assigned_to_the_primary_location_appears_in_the_header() {
         "the sub-menu closes before the next top-level item: {header}"
     );
 
+    // Three levels: Ann's item is inside Team's, in a second sub-menu.
+    let ann_at = header.find(menu_li(header, ann.id)).unwrap();
+    let second_sub = header[team_at..].find("<ul class=\"sub-menu\">").unwrap() + team_at;
+    assert!(
+        team_at < second_sub && second_sub < ann_at && ann_at < evil_at,
+        "{header}"
+    );
+    assert!(
+        header.contains(
+            "<a href=\"https://example.org/ann\" target=\"_blank\" rel=\"noopener\" \
+             title=\"Ann&#x27;s page\">Ann</a>"
+        ),
+        "{header}"
+    );
+    // Empty attributes are left out.
+    for empty in ["target=\"\"", "rel=\"\"", "title=\"\"", "aria-current=\"\""] {
+        assert!(!header.contains(empty), "{empty}: {header}");
+    }
+
     let team_li = menu_li(header, team_item.id);
     assert!(team_li.contains("current-menu-item"), "{team_li}");
     assert!(
-        header.contains(
-            "href=\"/about/team/\" target=\"\" rel=\"\" title=\"\" aria-current=\"page\">Team</a>"
-        ),
+        header.contains("<a href=\"/about/team/\" aria-current=\"page\">Team</a>"),
         "{header}"
     );
     let about_li = menu_li(header, about_item.id);

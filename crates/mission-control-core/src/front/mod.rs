@@ -20,4 +20,4 @@ pub use render::{
 pub use route::{
     Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve, term_links,
 };
-pub(crate) use route::{NON_PUBLIC_TYPES, visitor_can_read};
+pub(crate) use route::{NON_PUBLIC_TYPES, visitor_readable};

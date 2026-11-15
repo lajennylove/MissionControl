@@ -56,6 +56,10 @@ pub const WIDGET_TYPES: [&str; 4] = ["text", "recent-posts", "categories", "sear
 /// The most posts a Recent Posts widget lists.
 pub const MAX_RECENT_POSTS: i64 = 100;
 
+/// Keys of `sidebars_widgets` that are not theme areas: the option's version, and the inactive
+/// widgets, which the admin manages. [`set_sidebar_widgets`] refuses them.
+pub const RESERVED_AREAS: [&str; 2] = ["array_version", "wp_inactive_widgets"];
+
 /// The longest `id_base`.
 const MAX_ID_BASE: usize = 64;
 
@@ -68,7 +72,10 @@ pub enum WidgetError {
     InvalidInstance,
     /// The instance number is 0.
     InvalidNumber,
-    /// The area id is not a theme's area id (lowercase letters, digits and `_`).
+    /// The type's highest stored number is the largest there is, so a new instance has none.
+    NoFreeNumber,
+    /// The area id is not a theme's area id (lowercase letters, digits and `_`), or is one of
+    /// [`RESERVED_AREAS`].
     InvalidSidebarId,
     /// A widget id is not `{id_base}-{number}`.
     InvalidWidgetId,
@@ -86,6 +93,7 @@ impl fmt::Display for WidgetError {
             }
             Self::InvalidInstance => f.write_str("a widget instance must be a JSON object"),
             Self::InvalidNumber => f.write_str("a widget number must be 1 or more"),
+            Self::NoFreeNumber => f.write_str("the widget type has no free instance number"),
             Self::InvalidSidebarId => f.write_str(
                 "a widget area id must be lowercase letters, digits and `_`, starting with a \
                  letter or `_`",
@@ -151,13 +159,20 @@ pub async fn save_widget(
         Some(Value::Object(instances)) => instances,
         _ => Map::new(),
     };
-    let number = number.unwrap_or_else(|| {
-        instances
+    let number = match number {
+        Some(number) => number,
+        None => match instances
             .keys()
             .filter_map(|key| key.parse::<u64>().ok())
             .max()
-            .map_or(2, |highest| (highest + 1).max(2))
-    });
+        {
+            None => 2,
+            Some(highest) => highest
+                .checked_add(1)
+                .ok_or(WidgetError::NoFreeNumber)?
+                .max(2),
+        },
+    };
     instances.insert(number.to_string(), instance.clone());
     instances.insert("_multiwidget".to_owned(), json!(1));
     set_option(db, &name, &Value::Object(instances)).await?;
@@ -176,7 +191,7 @@ pub async fn set_sidebar_widgets(
     sidebar_id: &str,
     widget_ids: &[&str],
 ) -> Result<(), WidgetError> {
-    if !is_area_id(sidebar_id) {
+    if !is_area_id(sidebar_id) || RESERVED_AREAS.contains(&sidebar_id) {
         return Err(WidgetError::InvalidSidebarId);
     }
     if widget_ids.iter().any(|id| parse_widget_id(id).is_none()) {
@@ -423,34 +438,31 @@ async fn categories_widget(
     let show_count = instance.get("count").is_some_and(truthy);
     let hierarchical = instance.get("hierarchical").is_some_and(truthy);
     let terms = Term::all(db, &Taxonomy::CATEGORY).await?;
-    let has_posts = |term: &Term| -> bool {
-        // A term or, when nested, one of its descendants has posts. Ids are checked against a
-        // seen list, so a parent cycle cannot loop.
-        let mut stack = vec![term.term_id];
-        let mut seen = Vec::new();
-        while let Some(id) = stack.pop() {
-            if seen.contains(&id) {
-                continue;
-            }
-            seen.push(id);
-            let Some(t) = terms.iter().find(|t| t.term_id == id) else {
-                continue;
-            };
-            if t.count > 0 {
-                return true;
-            }
-            if hierarchical {
-                stack.extend(
-                    terms
-                        .iter()
-                        .filter(|c| c.parent_id == Some(id))
-                        .map(|c| c.term_id),
-                );
+    let index_of: HashMap<i64, usize> = terms
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.term_id, i))
+        .collect();
+    // A term is shown when it has posts or, when nested, one of its descendants has: each term
+    // with posts marks itself and its ancestors. The walk stops at a term already marked, so a
+    // parent cycle cannot loop.
+    let mut has_posts = vec![false; terms.len()];
+    for (i, term) in terms.iter().enumerate().filter(|(_, t)| t.count > 0) {
+        has_posts[i] = true;
+        if hierarchical {
+            let mut next = term.parent_id.and_then(|p| index_of.get(&p).copied());
+            while let Some(at) = next.filter(|&at| !has_posts[at]) {
+                has_posts[at] = true;
+                next = terms[at].parent_id.and_then(|p| index_of.get(&p).copied());
             }
         }
-        false
-    };
-    let shown: Vec<&Term> = terms.iter().filter(|t| has_posts(t)).collect();
+    }
+    let shown: Vec<&Term> = terms
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| has_posts[*i])
+        .map(|(_, t)| t)
+        .collect();
     if shown.is_empty() {
         return Ok("<ul>\n<li class=\"cat-item-none\">No categories</li>\n</ul>".to_owned());
     }
@@ -489,16 +501,22 @@ async fn categories_widget(
     };
     let mut html = String::from("<ul>\n");
     if hierarchical {
-        let is_shown = |id: i64| shown.iter().any(|t| t.term_id == id);
-        // Top level: no parent, or a parent that is not shown.
-        let roots: Vec<&Term> = shown
+        let shown_ids: std::collections::HashSet<i64> = shown.iter().map(|t| t.term_id).collect();
+        // Children by parent, in name order (`shown` is).
+        let mut children: HashMap<i64, Vec<&Term>> = HashMap::new();
+        for term in &shown {
+            if let Some(parent) = term.parent_id.filter(|p| shown_ids.contains(p)) {
+                children.entry(parent).or_default().push(term);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        // Top level: no parent, or a parent that is not shown; then any term a cycle left out.
+        let roots = shown
             .iter()
-            .copied()
-            .filter(|t| t.parent_id.is_none_or(|p| !is_shown(p)))
-            .collect();
-        let mut seen = Vec::new();
+            .filter(|t| t.parent_id.is_none_or(|p| !shown_ids.contains(&p)))
+            .chain(shown.iter());
         for root in roots {
-            nested(root, &shown, &item, &mut seen, &mut html);
+            nested(root, &children, &item, &mut seen, &mut html);
         }
     } else {
         for term in &shown {
@@ -513,25 +531,28 @@ async fn categories_widget(
 /// One category and its shown children, nested in `<ul class="children">`.
 fn nested(
     term: &Term,
-    shown: &[&Term],
+    children: &HashMap<i64, Vec<&Term>>,
     item: &dyn Fn(&Term) -> String,
-    seen: &mut Vec<i64>,
+    seen: &mut std::collections::HashSet<i64>,
     html: &mut String,
 ) {
-    if seen.contains(&term.term_id) {
+    if !seen.insert(term.term_id) {
         return;
     }
-    seen.push(term.term_id);
     html.push_str(&item(term));
-    let children: Vec<&Term> = shown
-        .iter()
-        .copied()
-        .filter(|t| t.parent_id == Some(term.term_id))
-        .collect();
-    if !children.is_empty() {
+    let kids: Vec<&Term> = children
+        .get(&term.term_id)
+        .map(|kids| {
+            kids.iter()
+                .copied()
+                .filter(|k| !seen.contains(&k.term_id))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !kids.is_empty() {
         html.push_str("\n<ul class=\"children\">\n");
-        for child in children {
-            nested(child, shown, item, seen, html);
+        for child in kids {
+            nested(child, children, item, seen, html);
         }
         html.push_str("</ul>\n");
     }
@@ -618,7 +639,10 @@ fn text_of(value: &Value) -> String {
 /// An instance value as a whole number: a number, or a string of one.
 fn number_of(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(number) => number.as_i64(),
+        // A float (`1e9`) is cut to a whole number, as PHP's `absint` casts it; `as` saturates.
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().filter(|n| n.is_finite()).map(|n| n as i64)),
         Value::String(text) => text.trim().parse().ok(),
         _ => None,
     }

@@ -653,3 +653,15 @@ fn menu_and_sidebar_tables_are_strict() {
     let error = manifest_error(&themes, "name = \"X\"\n[menus]\n\"<script>\" = \"A\"\n");
     assert!(!error.to_string().contains("<script>"), "{error}");
 }
+
+#[test]
+fn reserved_widget_area_ids_are_refused() {
+    let themes = Themes::new();
+    for id in ["wp_inactive_widgets", "array_version"] {
+        let error = manifest_error(
+            &themes,
+            &format!("name = \"X\"\n[sidebars]\n{id} = \"A\"\n"),
+        );
+        assert!(error.to_string().contains("reserved"), "{error}");
+    }
+}

@@ -328,11 +328,27 @@ pub async fn post_links(
         structure,
         site: &site,
     };
-    let mut links = Vec::with_capacity(posts.len());
-    for post in posts {
-        links.push(router.link(post).await?);
-    }
-    Ok(links)
+    router.links(posts).await
+}
+
+/// How many `IN (...)` ids one query binds, below every database's limit on bind parameters.
+const IN_CHUNK: usize = 500;
+
+/// How many levels of parents [`Router::links`] reads for page ancestors. Pages deeper than
+/// [`MAX_PATH_SEGMENTS`] do not resolve anyway; this only bounds a long or broken chain.
+const MAX_ANCESTOR_LEVELS: usize = 64;
+
+#[cfg(test)]
+thread_local! {
+    /// The queries [`Router::links`] has run on this thread beyond the options, for the tests
+    /// that check links are read in batches.
+    static LINK_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one query of the link path, in tests.
+fn count_link_query() {
+    #[cfg(test)]
+    LINK_QUERIES.with(|n| n.set(n.get() + 1));
 }
 
 /// The archive links of `terms`, in order, each a path from the site's root as `get_term_link`
@@ -390,21 +406,46 @@ pub async fn term_links(
 /// Whether the anonymous visitor may read `post`: a published post, or an attachment
 /// (`inherit`) whose parent is published or that has none, as WordPress shows them to a visitor
 /// who is not logged in. Password-protected posts count as readable; the template asks for the
-/// password. The one rule routing, menus and widgets share.
+/// password. The one rule routing and menus share; [`visitor_readable`] applies it to many posts.
 // TODO(users, Task 8.x): a logged-in reader with `read_private_posts` also reads private posts,
 // and `read_post` decides the rest.
 pub(crate) async fn visitor_can_read(db: &Database, post: &Post) -> Result<bool, Error> {
-    Ok(match post.status {
-        PostStatus::Publish => true,
-        PostStatus::Inherit if post.post_type == "attachment" => match post.parent_id {
-            None => true,
-            Some(parent) => Post::query()
-                .find(db, parent)
-                .await?
-                .is_none_or(|p| p.status == PostStatus::Publish),
-        },
-        _ => false,
-    })
+    Ok(!visitor_readable(db, vec![post.clone()]).await?.is_empty())
+}
+
+/// The posts of `posts` the anonymous visitor may read ([`visitor_can_read`]), in order, with
+/// the attachments' parents read in one query per [`IN_CHUNK`] parents.
+pub(crate) async fn visitor_readable(db: &Database, posts: Vec<Post>) -> Result<Vec<Post>, Error> {
+    let attached = |post: &Post| {
+        (post.status == PostStatus::Inherit && post.post_type == "attachment")
+            .then_some(post.parent_id)
+            .flatten()
+    };
+    let mut parents: Vec<i64> = posts.iter().filter_map(attached).collect();
+    parents.sort_unstable();
+    parents.dedup();
+    let mut unpublished = std::collections::HashSet::new();
+    for chunk in parents.chunks(IN_CHUNK) {
+        for parent in Post::query()
+            .where_in(Post::PRIMARY_KEY, chunk.to_vec())
+            .get(db)
+            .await?
+        {
+            if parent.status != PostStatus::Publish {
+                unpublished.insert(parent.id);
+            }
+        }
+    }
+    Ok(posts
+        .into_iter()
+        .filter(|post| match post.status {
+            PostStatus::Publish => true,
+            PostStatus::Inherit if post.post_type == "attachment" => {
+                attached(post).is_none_or(|parent| !unpublished.contains(&parent))
+            }
+            _ => false,
+        })
+        .collect())
 }
 
 /// The options routing reads, once per request.
@@ -1336,29 +1377,66 @@ impl Router<'_> {
         })
     }
 
-    /// `post`'s permalink as a path from the root, with the values its tags need: the page's
-    /// ancestors and the post's first category (by id, or the default category), as
-    /// `get_permalink` takes them. The author's nicename is not known yet.
+    /// `post`'s permalink as a path from the root; see [`links`](Self::links).
     async fn link(&self, post: &Post) -> Result<String, Error> {
-        let mut ctx = PermalinkContext {
-            utc_offset: self.site.offset,
-            ancestors: crate::content::page_ancestors(self.db, post).await?,
-            ..PermalinkContext::new("")
+        Ok(self
+            .links(std::slice::from_ref(post))
+            .await?
+            .pop()
+            .expect("one link for one post"))
+    }
+
+    /// The permalinks of `posts` as paths from the root, with the values their tags need: each
+    /// page's ancestors and each post's first category (by id, or the default category), as
+    /// `get_permalink` takes them. The author's nicename is not known yet.
+    ///
+    /// Read in batches, whatever the number of posts: the categories once, the posts'
+    /// categories in one query, and the ancestors one level of parents per query (at most
+    /// [`MAX_ANCESTOR_LEVELS`]), each per [`IN_CHUNK`] ids.
+    async fn links(&self, posts: &[Post]) -> Result<Vec<String>, Error> {
+        let ancestors = ancestors_of(self.db, posts).await?;
+        let with_category: Vec<i64> = if self.structure.tags().contains(&Tag::Category) {
+            posts
+                .iter()
+                .filter(|p| p.post_type == "post")
+                .map(|p| p.id)
+                .collect()
+        } else {
+            Vec::new()
         };
-        if post.post_type == "post" && self.structure.tags().contains(&Tag::Category) {
-            let categories = Categories::load(self.db).await?;
-            let mut terms = post.terms(self.db, &Taxonomy::CATEGORY).await?;
-            terms.sort_by_key(|t| t.term_id);
-            let term = match terms.first() {
-                Some(t) => Some(t.clone()),
-                None => self
-                    .site
-                    .default_category
-                    .and_then(|id| categories.by_term_id(id).cloned()),
-            };
-            ctx.category = term.map(|t| categories.path(&t));
-        }
-        Ok(permalink(self.structure, post, &ctx))
+        let (categories, first) = if with_category.is_empty() {
+            (None, HashMap::new())
+        } else {
+            count_link_query();
+            (
+                Some(Categories::load(self.db).await?),
+                first_categories(self.db, &with_category).await?,
+            )
+        };
+        Ok(posts
+            .iter()
+            .map(|post| {
+                let mut ctx = PermalinkContext {
+                    utc_offset: self.site.offset,
+                    ancestors: ancestors.get(&post.id).cloned().unwrap_or_default(),
+                    ..PermalinkContext::new("")
+                };
+                if let Some(categories) = &categories
+                    && post.post_type == "post"
+                {
+                    let term = first
+                        .get(&post.id)
+                        .and_then(|&id| categories.by_term_id(id))
+                        .or_else(|| {
+                            self.site
+                                .default_category
+                                .and_then(|id| categories.by_term_id(id))
+                        });
+                    ctx.category = term.map(|t| categories.path(t));
+                }
+                permalink(self.structure, post, &ctx)
+            })
+            .collect())
     }
 
     /// The link of a list at `prefix/path`, with `page/N` for a later page, ending with a slash
@@ -1435,6 +1513,85 @@ impl Categories {
         }
         ids
     }
+}
+
+/// Each post's category with the lowest term id (the one `get_permalink` takes), by post id,
+/// read in one query per [`IN_CHUNK`] posts.
+async fn first_categories(db: &Database, post_ids: &[i64]) -> Result<HashMap<i64, i64>, Error> {
+    let mut first: HashMap<i64, i64> = HashMap::new();
+    for chunk in post_ids.chunks(IN_CHUNK) {
+        count_link_query();
+        let marks = vec!["?"; chunk.len()].join(", ");
+        let mut binds = vec![Sql::from(Taxonomy::CATEGORY.name)];
+        binds.extend(chunk.iter().map(|&id| Sql::from(id)));
+        let rows: Vec<(i64, i64)> = raw::fetch_all(
+            db,
+            &format!(
+                "SELECT r.object_id, tt.term_id FROM term_relationships r \
+                 INNER JOIN term_taxonomy tt ON tt.id = r.term_taxonomy_id \
+                 WHERE tt.taxonomy = ? AND r.object_id IN ({marks})"
+            ),
+            &binds,
+        )
+        .await?;
+        for (post, term) in rows {
+            let entry = first.entry(post).or_insert(term);
+            *entry = (*entry).min(term);
+        }
+    }
+    Ok(first)
+}
+
+/// The slugs of each post's ancestors, the top one first, by post id, as
+/// [`page_ancestors`](crate::content::page_ancestors) gives them for one post: parents are read
+/// one level per query for every post at once, and a cycle or a missing parent ends a chain.
+async fn ancestors_of(db: &Database, posts: &[Post]) -> Result<HashMap<i64, Vec<String>>, Error> {
+    let mut known: HashMap<i64, (String, Option<i64>)> = posts
+        .iter()
+        .map(|p| (p.id, (p.slug.clone(), p.parent_id)))
+        .collect();
+    let mut asked: std::collections::HashSet<i64> = known.keys().copied().collect();
+    let mut wanted: Vec<i64> = posts.iter().filter_map(|p| p.parent_id).collect();
+    for _ in 0..MAX_ANCESTOR_LEVELS {
+        wanted.retain(|id| asked.insert(*id));
+        if wanted.is_empty() {
+            break;
+        }
+        let mut next = Vec::new();
+        for chunk in wanted.chunks(IN_CHUNK) {
+            count_link_query();
+            for parent in Post::query()
+                .where_in(Post::PRIMARY_KEY, chunk.to_vec())
+                .get(db)
+                .await?
+            {
+                next.extend(parent.parent_id);
+                known.insert(parent.id, (parent.slug, parent.parent_id));
+            }
+        }
+        wanted = next;
+    }
+    Ok(posts
+        .iter()
+        .map(|post| {
+            let mut slugs = Vec::new();
+            let mut seen = vec![post.id];
+            let mut next = post.parent_id;
+            while let Some(id) = next {
+                if seen.contains(&id) {
+                    break;
+                }
+                seen.push(id);
+                let Some((slug, parent)) = known.get(&id) else {
+                    break;
+                };
+                slugs.push(slug.clone());
+                next = *parent;
+            }
+            slugs.reverse();
+            (post.id, slugs)
+        })
+        .collect())
 }
 
 /// The published posts a list shows, counted to tell an empty page from a page of results.
@@ -1861,5 +2018,126 @@ mod tests {
     #[test]
     fn escape_like_escapes_wildcards() {
         assert_eq!(escape_like("50%_off!"), "50!%!_off!!");
+    }
+
+    /// A fresh SQLite database with the core tables, a stand-in `users` table and an author.
+    async fn link_site() -> (tempfile::TempDir, Database, i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+        let db = Database::connect(&url).await.unwrap();
+        let users = orbit_orm::schema::create("users", |t| {
+            t.id();
+            t.string("name");
+            t.string("email");
+            t.string("password_hash");
+        });
+        for sql in users.to_sql(db.driver()) {
+            raw::execute(&db, &sql, &[]).await.unwrap();
+        }
+        crate::migrations::migrator()
+            .unwrap()
+            .run(&db)
+            .await
+            .unwrap();
+        raw::execute(
+            &db,
+            "INSERT INTO users (name, email, password_hash) VALUES ('A', 'a@x.test', 'h')",
+            &[],
+        )
+        .await
+        .unwrap();
+        (dir, db, 1)
+    }
+
+    async fn new_post(
+        db: &Database,
+        author: i64,
+        post_type: &str,
+        slug: &str,
+        parent: Option<i64>,
+    ) -> Post {
+        Post::create(
+            db,
+            crate::content::NewPost {
+                status: PostStatus::Publish,
+                title: slug.to_owned(),
+                slug: slug.to_owned(),
+                parent_id: parent,
+                published_at: Some(
+                    NaiveDate::from_ymd_opt(2026, 3, 7)
+                        .unwrap()
+                        .and_hms_opt(8, 0, 0)
+                        .unwrap(),
+                ),
+                ..crate::content::NewPost::new(author, post_type)
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The link-path queries `post_links` runs for `posts`, and the links.
+    async fn counted_links(
+        db: &Database,
+        structure: &PermalinkStructure,
+        posts: &[Post],
+    ) -> (usize, Vec<String>) {
+        LINK_QUERIES.with(|n| n.set(0));
+        let links = post_links(db, structure, posts).await.unwrap();
+        (LINK_QUERIES.with(std::cell::Cell::get), links)
+    }
+
+    #[tokio::test]
+    async fn post_links_read_categories_and_ancestors_in_batches() {
+        let (_dir, db, author) = link_site().await;
+        let news = crate::content::Term::create(
+            &db,
+            &Taxonomy::CATEGORY,
+            crate::content::NewTerm::new("News"),
+        )
+        .await
+        .unwrap();
+        let local = crate::content::Term::create(
+            &db,
+            &Taxonomy::CATEGORY,
+            crate::content::NewTerm {
+                parent_id: Some(news.term_id),
+                ..crate::content::NewTerm::new("Local")
+            },
+        )
+        .await
+        .unwrap();
+        let mut posts = Vec::new();
+        for i in 0..9 {
+            let post = new_post(&db, author, "post", &format!("post-{i}"), None).await;
+            let term = if i % 2 == 0 { &news } else { &local };
+            post.sync_terms(&db, &Taxonomy::CATEGORY, &[term.term_taxonomy_id])
+                .await
+                .unwrap();
+            posts.push(post);
+        }
+        let top = new_post(&db, author, "page", "top", None).await;
+        let mid = new_post(&db, author, "page", "mid", Some(top.id)).await;
+        for i in 0..9 {
+            posts.push(new_post(&db, author, "page", &format!("leaf-{i}"), Some(mid.id)).await);
+        }
+        let structure: PermalinkStructure = "/%category%/%postname%/".parse().unwrap();
+
+        let few: Vec<Post> = posts[..3].iter().chain(&posts[9..12]).cloned().collect();
+        let (few_queries, _) = counted_links(&db, &structure, &few).await;
+        let (all_queries, links) = counted_links(&db, &structure, &posts).await;
+        // One categories load, one relationships query, two levels of parents (mid, then top),
+        // whatever the number of posts.
+        assert_eq!(few_queries, 4);
+        assert_eq!(all_queries, 4);
+
+        assert_eq!(links[0], "/news/post-0/");
+        assert_eq!(links[1], "/news/local/post-1/");
+        assert_eq!(links[9], "/top/mid/leaf-0/");
+        // The batched links are the links of each post on its own.
+        for (post, link) in posts.iter().zip(&links) {
+            let (_, one) = counted_links(&db, &structure, std::slice::from_ref(post)).await;
+            assert_eq!(&one[0], link);
+        }
     }
 }

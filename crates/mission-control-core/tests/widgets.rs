@@ -350,3 +350,151 @@ async fn widget_text_and_titles_are_escaped() {
         widgets[1].content
     );
 }
+
+/// Writes `text` as option `name`'s stored value, valid JSON or not, as a broken import could.
+async fn raw_option(db: &Database, name: &str, text: &str) {
+    set_option(db, name, &json!(null)).await.unwrap();
+    raw::execute(
+        db,
+        "UPDATE options SET value = ? WHERE name = ?",
+        &[text.into(), name.into()],
+    )
+    .await
+    .unwrap();
+}
+
+fn li_count(html: &str) -> usize {
+    html.matches("<li>").count()
+}
+
+#[tokio::test]
+async fn malformed_widget_data_from_the_database_is_skipped() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let (_dir, theme) = theme();
+    for day in 1..=6 {
+        post(db, author, &format!("Post {day}"), day, PostStatus::Publish).await;
+    }
+
+    // Options that are not JSON: nothing renders, nothing fails, and a save starts afresh.
+    raw_option(db, "sidebars_widgets", "{not json").await;
+    raw_option(db, "widget_text", "not json either").await;
+    let areas = sidebars(db, &theme, "/").await;
+    assert!(areas.iter().all(|a| !a.active && a.widgets.is_empty()));
+    assert_eq!(
+        save_widget(db, "text", None, &json!({"text": "ok"}))
+            .await
+            .unwrap(),
+        "text-2"
+    );
+
+    // Instances that are not objects are skipped; numbers that are not numbers fall back.
+    set_option(
+        db,
+        "widget_text",
+        &json!({"2": "a string", "3": [1, 2], "4": {"title": "Kept", "text": "t"}, "_multiwidget": 1}),
+    )
+    .await
+    .unwrap();
+    set_option(
+        db,
+        "widget_recent-posts",
+        &json!({
+            "2": {"number": "abc"},
+            "3": {"number": -1},
+            "4": {"number": 1e9},
+            "5": {"number": "3"},
+            "_multiwidget": 1
+        }),
+    )
+    .await
+    .unwrap();
+    set_option(
+        db,
+        "sidebars_widgets",
+        &json!({
+            "footer": "text-4",
+            "sidebar": [
+                "text-2", "text-3", "text-4", 7, "text-99999999999999999999",
+                "recent-posts-2", "recent-posts-3", "recent-posts-4", "recent-posts-5"
+            ],
+            "array_version": 3
+        }),
+    )
+    .await
+    .unwrap();
+    let areas = sidebars(db, &theme, "/").await;
+    let sidebar = &areas[0];
+    let footer = &areas[1];
+    assert!(!footer.active, "an area that is not a list is empty");
+    let ids: Vec<&str> = sidebar.widgets.iter().map(|w| w.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "text-4",
+            "recent-posts-2",
+            "recent-posts-3",
+            "recent-posts-4",
+            "recent-posts-5"
+        ]
+    );
+    let counts: Vec<usize> = sidebar.widgets[1..]
+        .iter()
+        .map(|w| li_count(&w.content))
+        .collect();
+    // "abc" and -1 give the default 5; 1e9 is capped (all six posts); "3" is 3.
+    assert_eq!(counts, [5, 5, 6, 3]);
+}
+
+#[tokio::test]
+async fn a_new_widget_number_never_overflows() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    let stored = json!({
+        "2": {"text": "first"},
+        "18446744073709551615": {"text": "last"},
+        "_multiwidget": 1
+    });
+    set_option(db, "widget_text", &stored).await.unwrap();
+
+    let result = save_widget(db, "text", None, &json!({"text": "new"})).await;
+    assert!(
+        matches!(result, Err(WidgetError::NoFreeNumber)),
+        "{result:?}"
+    );
+    assert_eq!(
+        get_option(db, "widget_text").await.unwrap().unwrap(),
+        stored
+    );
+    // A key past u64 is not a number, so it is ignored.
+    set_option(
+        db,
+        "widget_text",
+        &json!({"99999999999999999999": {"text": "x"}, "_multiwidget": 1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        save_widget(db, "text", None, &json!({})).await.unwrap(),
+        "text-2"
+    );
+}
+
+#[tokio::test]
+async fn reserved_and_overlong_ids_are_refused() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    for area in ["wp_inactive_widgets", "array_version"] {
+        assert!(matches!(
+            set_sidebar_widgets(db, area, &["text-2"]).await,
+            Err(WidgetError::InvalidSidebarId)
+        ));
+    }
+    assert!(matches!(
+        set_sidebar_widgets(db, "footer", &["text-99999999999999999999"]).await,
+        Err(WidgetError::InvalidWidgetId)
+    ));
+}
