@@ -494,7 +494,7 @@ async fn write_extras(
 }
 
 /// The post, read again, as the edit context shows it.
-async fn respond(
+pub(super) async fn respond(
     ctl: &PostsController<'_>,
     site: &Site,
     id: i64,

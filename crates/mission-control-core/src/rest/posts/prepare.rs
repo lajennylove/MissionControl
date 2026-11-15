@@ -16,8 +16,8 @@ use super::query::constant_time_eq;
 use crate::content::{Post, PostStatus, make_slug, now};
 use crate::front::{post_links, term_links, trim_excerpt};
 use crate::hooks::THE_CONTENT;
-use crate::rest::RestError;
 use crate::rest::shared::{Context, Fields, Site, curies, database_error};
+use crate::rest::{RestError, media, users};
 use crate::text::{escape_html, html_class};
 
 /// How many ids one `IN (...)` binds.
@@ -26,6 +26,9 @@ const IN_CHUNK: usize = 500;
 /// The post meta the response reads.
 const THUMBNAIL: &str = "_thumbnail_id";
 const TEMPLATE: &str = "_wp_page_template";
+pub(crate) const ATTACHED_FILE: &str = "_wp_attached_file";
+pub(crate) const ATTACHMENT_METADATA: &str = "_wp_attachment_metadata";
+pub(crate) const ATTACHMENT_ALT: &str = "_wp_attachment_image_alt";
 
 /// How the posts of a request are shown.
 #[derive(Debug, Clone)]
@@ -51,7 +54,7 @@ struct TermRow {
 
 /// What the posts of a page need beyond their rows.
 #[derive(Debug, Default)]
-struct Batch {
+pub(crate) struct Batch {
     /// Each post's link path, in order.
     links: Vec<String>,
     /// Each post's sample link path (`%postname%` in place of the slug), in order; edit context
@@ -60,7 +63,7 @@ struct Batch {
     /// Each post's terms, by post id, ordered by name.
     terms: HashMap<i64, Vec<TermRow>>,
     /// Post meta by post id and key.
-    meta: HashMap<(i64, String), Value>,
+    pub(crate) meta: HashMap<(i64, String), Value>,
     /// Each post's revision count and latest revision id.
     revisions: HashMap<i64, (i64, i64)>,
 }
@@ -192,11 +195,19 @@ fn full_item(
     put("id", json!(post.id));
     put("date", json!(local_date(date, site.offset)));
     put("date_gmt", json!(utc_date(date)));
-    let guid = guid(site, post);
+    // An attachment's GUID is its file's address, as `wp_insert_attachment` stores it.
+    let guid = if post_type.is_attachment() {
+        media::source_url(site, batch, post.id)
+    } else {
+        guid(site, post)
+    };
     put("guid", json!({"rendered": guid, "raw": guid}));
     put("modified", json!(local_date(post.modified_at, site.offset)));
     put("modified_gmt", json!(utc_date(post.modified_at)));
-    put("password", json!(post.password.clone().unwrap_or_default()));
+    // The attachments controller removes `password` from its schema.
+    if !post_type.is_attachment() {
+        put("password", json!(post.password.clone().unwrap_or_default()));
+    }
     put("slug", json!(post.slug));
     put("status", json!(post.status.as_str()));
     put("type", json!(post.post_type));
@@ -317,6 +328,17 @@ fn full_item(
             post_type.supports.post_formats
         )),
     );
+    if post_type.is_attachment() {
+        media::add_fields(
+            &mut item,
+            ctl,
+            site,
+            post,
+            batch,
+            options.context,
+            &options.fields,
+        );
+    }
     item
 }
 
@@ -383,7 +405,13 @@ fn by_context(mut item: Map<String, Value>, context: Context) -> Map<String, Val
     if context == Context::Edit {
         return item;
     }
-    const EDIT_ONLY: &[&str] = &["password", "permalink_template", "generated_slug"];
+    const EDIT_ONLY: &[&str] = &[
+        "password",
+        "permalink_template",
+        "generated_slug",
+        "missing_image_sizes",
+    ];
+    // The attachment fields after `featured_media` are an attachment's only.
     const EMBED: &[&str] = &[
         "id",
         "date",
@@ -394,6 +422,12 @@ fn by_context(mut item: Map<String, Value>, context: Context) -> Map<String, Val
         "excerpt",
         "author",
         "featured_media",
+        "caption",
+        "alt_text",
+        "media_type",
+        "mime_type",
+        "media_details",
+        "source_url",
     ];
     item.retain(|key, _| {
         !EDIT_ONLY.contains(&key.as_str())
@@ -468,10 +502,12 @@ fn links(
             json!([{"embeddable": true, "href": site.rest_url(&format!("wp/v2/media/{media}"))}]),
         );
     }
-    put(
-        "wp:attachment",
-        json!([{"href": format!("{}?parent={}", site.rest_url("wp/v2/media"), post.id)}]),
-    );
+    if !post_type.is_attachment() {
+        put(
+            "wp:attachment",
+            json!([{"href": format!("{}?parent={}", site.rest_url("wp/v2/media"), post.id)}]),
+        );
+    }
     if !post_type.taxonomies.is_empty() {
         let terms: Vec<Value> = post_type
             .taxonomies
@@ -554,30 +590,16 @@ impl Embeds {
                 .collect();
             ids.sort_unstable();
             ids.dedup();
-            let names = user_names(ctl.db, &ids).await?;
-            for id in ids {
-                let value = match names.get(&id) {
-                    Some(name) => json!({
-                        "id": id,
-                        "name": name,
-                        "url": "",
-                        "description": "",
-                        "link": format!("{}/?author={id}", site.home),
-                        "slug": "",
-                        "avatar_urls": {},
-                        "_links": {
-                            "self": [{"href": site.rest_url(&format!("wp/v2/users/{id}"))}],
-                            "collection": [{"href": site.rest_url("wp/v2/users")}],
-                        },
-                    }),
-                    None => json!({
-                        "code": "rest_user_invalid_id",
-                        "message": "Invalid user ID.",
-                        "data": {"status": 404},
-                    }),
-                };
-                authors.insert(id, value);
+            // The types whose published posts make an author public: until the post type
+            // registry (Task 5.2) reaches here, the built-in types and this one.
+            let mut types: Vec<String> = ["post", "page", "attachment"]
+                .iter()
+                .map(|t| (*t).to_owned())
+                .collect();
+            if !types.contains(&ctl.post_type.name) {
+                types.push(ctl.post_type.name.clone());
             }
+            authors = users::embed_authors(ctl.db, site, &ids, ctl.user, &types).await?;
         }
         let mut terms = HashMap::new();
         let mut post_terms: HashMap<i64, Vec<(String, i64)>> = HashMap::new();
@@ -690,24 +712,6 @@ impl Embeds {
     }
 }
 
-/// The names of users `ids`, from Ignite's `users` table.
-async fn user_names(db: &Database, ids: &[i64]) -> Result<HashMap<i64, String>, RestError> {
-    let mut names = HashMap::new();
-    for chunk in ids.chunks(IN_CHUNK) {
-        let marks = vec!["?"; chunk.len()].join(", ");
-        let binds: Vec<Sql> = chunk.iter().map(|id| Sql::from(*id)).collect();
-        let rows: Vec<(i64, String)> = raw::fetch_all(
-            db,
-            &format!("SELECT id, name FROM users WHERE id IN ({marks})"),
-            &binds,
-        )
-        .await
-        .map_err(|e| database_error(&e))?;
-        names.extend(rows);
-    }
-    Ok(names)
-}
-
 /// The terms of posts `ids`, by post, ordered by name as `get_the_terms` orders them.
 async fn post_terms(db: &Database, ids: &[i64]) -> Result<HashMap<i64, Vec<TermRow>>, RestError> {
     let mut terms: HashMap<i64, Vec<TermRow>> = HashMap::new();
@@ -745,7 +749,14 @@ async fn post_terms(db: &Database, ids: &[i64]) -> Result<HashMap<i64, Vec<TermR
 /// The meta the response reads, for posts `ids`: the first value of each key. A value that is
 /// not JSON is left out.
 async fn post_meta(db: &Database, ids: &[i64]) -> Result<HashMap<(i64, String), Value>, RestError> {
-    const KEYS: [&str; 3] = [THUMBNAIL, TEMPLATE, "_wp_trash_meta_status"];
+    const KEYS: [&str; 6] = [
+        THUMBNAIL,
+        TEMPLATE,
+        "_wp_trash_meta_status",
+        ATTACHED_FILE,
+        ATTACHMENT_METADATA,
+        ATTACHMENT_ALT,
+    ];
     let mut meta = HashMap::new();
     for chunk in ids.chunks(IN_CHUNK) {
         let marks = vec!["?"; chunk.len()].join(", ");
@@ -755,7 +766,7 @@ async fn post_meta(db: &Database, ids: &[i64]) -> Result<HashMap<(i64, String), 
             db,
             &format!(
                 "SELECT post_id, meta_key, meta_value FROM post_meta \
-                 WHERE post_id IN ({marks}) AND meta_key IN (?, ?, ?) ORDER BY id"
+                 WHERE post_id IN ({marks}) AND meta_key IN (?, ?, ?, ?, ?, ?) ORDER BY id"
             ),
             &binds,
         )

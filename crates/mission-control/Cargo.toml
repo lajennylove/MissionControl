@@ -12,6 +12,8 @@ publish.workspace = true
 log = "0.4"
 mission-control-core = { path = "../mission-control-core" }
 orbit-orm.workspace = true
+# Reads multipart upload bodies (MIT). The version and feature Rocket's forms use.
+multer = { version = "3", features = ["tokio-io"] }
 # Render limits for theme templates, set once at start (MIT).
 propel_runtime = "0.3.0"
 rocket = "0.5.2"

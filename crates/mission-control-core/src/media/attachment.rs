@@ -142,8 +142,50 @@ impl From<StorageError> for AttachmentError {
     }
 }
 
+/// Where a new attachment's title comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentTitle<'a> {
+    /// The admin's default, as `media_handle_upload` makes it: the client's file name
+    /// ([`ValidatedUpload::client_name`]) without its extension, cleaned as `sanitize_text_field`
+    /// does (tags stripped, whitespace collapsed and trimmed). `Sunset Beach.jpg` stored as
+    /// `Sunset-Beach-1.jpg` is titled `Sunset Beach`.
+    ClientName,
+    /// The REST API's default, as `WP_REST_Attachments_Controller::insert_attachment` makes it:
+    /// the stored file's name without its extension. `Sunset Beach.jpg` stored as
+    /// `Sunset-Beach-1.jpg` is titled `Sunset-Beach-1`.
+    StoredName,
+    /// This title, as it is.
+    Given(&'a str),
+}
+
 /// Stores a validated upload and creates its attachment, as WordPress's `media_handle_upload`
 /// does, and returns it.
+///
+/// The title is `title` when given (see [`AttachmentTitle::Given`]); otherwise it is the
+/// admin's default, from the client's file name ([`AttachmentTitle::ClientName`]).
+/// [`create_attachment_titled`] takes the REST API's rule instead.
+///
+/// # Errors
+///
+/// As [`create_attachment_titled`].
+pub async fn create_attachment(
+    db: &Database,
+    storage: &Arc<dyn Storage>,
+    sizes: &Arc<ImageSizes>,
+    upload: &ValidatedUpload<'_>,
+    parent: Option<i64>,
+    author: i64,
+    title: Option<&str>,
+) -> Result<Attachment, AttachmentError> {
+    let title = match title {
+        Some(title) => AttachmentTitle::Given(title),
+        None => AttachmentTitle::ClientName,
+    };
+    create_attachment_titled(db, storage, sizes, upload, parent, author, title).await
+}
+
+/// Stores a validated upload and creates its attachment titled by `title`, as WordPress's
+/// `media_handle_upload` does, and returns it.
 ///
 /// 1. The file is written under a free name ([`store`]) in the `YYYY/MM` folder of now, or, when
 ///    `parent` is given and is not a page, of the parent's publish date, as WordPress files an
@@ -152,13 +194,6 @@ impl From<StorageError> for AttachmentError {
 /// 3. The attachment row (status `inherit`, parent `parent`, the upload's MIME type) and its
 ///    meta `_wp_attached_file` and, for an image, `_wp_attachment_metadata` are inserted in one
 ///    transaction, as `wp_insert_attachment` and `wp_update_attachment_metadata` write them.
-///
-/// The title is `title` when given (the REST API passes the stored file name without its
-/// extension, as `WP_REST_Attachments_Controller` does). Otherwise it is the admin's default,
-/// as `media_handle_upload` makes it: the client's file name
-/// ([`ValidatedUpload::client_name`]) without its extension, cleaned as `sanitize_text_field`
-/// does (tags stripped, whitespace collapsed and trimmed). So `Sunset Beach.jpg` stored as
-/// `Sunset-Beach-1.jpg` is titled `Sunset Beach`.
 ///
 /// Steps 1 and 2 are disk and CPU work, run on a blocking thread (`spawn_blocking`); the bytes
 /// are copied for it. When step 3 returns an error, the original and its sub-sizes are deleted
@@ -172,14 +207,14 @@ impl From<StorageError> for AttachmentError {
 /// attachment or a revision (nothing is written); with [`AttachmentError::Upload`] or
 /// [`AttachmentError::Storage`] when a file cannot be written; or with
 /// [`AttachmentError::Database`], for example when the author does not exist.
-pub async fn create_attachment(
+pub async fn create_attachment_titled(
     db: &Database,
     storage: &Arc<dyn Storage>,
     sizes: &Arc<ImageSizes>,
     upload: &ValidatedUpload<'_>,
     parent: Option<i64>,
     author: i64,
-    title: Option<&str>,
+    title: AttachmentTitle<'_>,
 ) -> Result<Attachment, AttachmentError> {
     let date = match parent {
         Some(id) => upload_date(db, id).await?,
@@ -208,8 +243,9 @@ pub async fn create_attachment(
     };
 
     let title = match title {
-        Some(title) => title.to_owned(),
-        None => default_title(&upload.client_name),
+        AttachmentTitle::Given(title) => title.to_owned(),
+        AttachmentTitle::ClientName => default_title(&upload.client_name),
+        AttachmentTitle::StoredName => stored_title(&path),
     };
     let new = NewPost {
         status: PostStatus::Inherit,
@@ -270,6 +306,17 @@ fn default_title(client_name: &str) -> String {
     sanitize_text_field(stem)
 }
 
+/// The REST API's default title for a file stored at `path`: its name without the last
+/// extension, trimmed, as `WP_REST_Attachments_Controller::insert_attachment` cuts it from
+/// `wp_basename( $file )`.
+fn stored_title(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .trim()
+        .to_owned()
+}
+
 /// The date whose `YYYY/MM` folder an upload to `parent` goes in, as `media_handle_upload`
 /// picks it: the parent's publish date, unless the parent is a page or has none; then now.
 /// Refuses a parent that does not exist or cannot have attachments.
@@ -315,7 +362,7 @@ fn delete_files(storage: &dyn Storage, path: &str, metadata: Option<&AttachmentM
         });
     for file in std::iter::once(path.to_owned()).chain(sub_sizes) {
         if let Err(e) = storage.delete(&file) {
-            log::warn!("could not delete {file:?} after a failed upload: {e}");
+            log::warn!("could not delete {file:?}: {e}");
         }
     }
 }
@@ -377,6 +424,57 @@ pub async fn get_attachment(db: &Database, id: i64) -> Result<Option<Attachment>
         mime_type: post.mime_type,
         metadata,
     }))
+}
+
+/// Deletes an attachment for good, as WordPress's `wp_delete_attachment` with `force_delete`:
+/// the row (its meta and term relationships go with it, as [`Post::delete`] removes them), every
+/// `_thumbnail_id` that points at it, then its file and its sub-sizes from `storage`. Returns
+/// `false` when there is no attachment with this id (nothing is deleted).
+///
+/// The files are deleted after the row, on a blocking thread, as WordPress deletes them after
+/// the post: a file that cannot be deleted is logged and left, and the attachment is gone.
+///
+/// # Errors
+///
+/// Fails with the database's error, or [`AttachmentError::Meta`] when the attachment's meta is
+/// not JSON (nothing is deleted then).
+pub async fn delete_attachment(
+    db: &Database,
+    storage: &Arc<dyn Storage>,
+    id: i64,
+) -> Result<bool, AttachmentError> {
+    let Some(attachment) = get_attachment(db, id).await? else {
+        return Ok(false);
+    };
+    let Some(post) = Post::query().find(db, id).await? else {
+        return Ok(false);
+    };
+    if !post.delete(db).await? {
+        return Ok(false);
+    }
+    // `delete_metadata( 'post', null, '_thumbnail_id', $post_id, true )`: the id is stored as a
+    // JSON number, or as a string by code that wrote it so.
+    orbit_orm::raw::execute(
+        db,
+        "DELETE FROM post_meta WHERE meta_key = ? AND meta_value IN (?, ?)",
+        &[
+            "_thumbnail_id".into(),
+            id.to_string().into(),
+            format!("\"{id}\"").into(),
+        ],
+    )
+    .await?;
+    if !attachment.file.is_empty() {
+        let storage = Arc::clone(storage);
+        let deleted = blocking(move || {
+            delete_files(&*storage, &attachment.file, attachment.metadata.as_ref());
+        })
+        .await;
+        if let Err(e) = deleted {
+            log::warn!("could not delete the files of attachment {id}: {e}");
+        }
+    }
+    Ok(true)
 }
 
 /// A meta value read as text: a JSON string as it is, nothing as empty, anything else as its

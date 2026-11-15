@@ -16,6 +16,10 @@ rocket = "0.5.2"
 # Encodes HTTP Basic credentials in the REST authentication tests.
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Makes the JPEG uploads of the media tests.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Gravatar hashes in the users tests.
+sha2 = "0.11"
 mission-control-testing = { path = "../mission-control-testing" }
 orbit-orm.workspace = true
 serde_json = "1"

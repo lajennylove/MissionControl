@@ -19,6 +19,10 @@ pub struct Config {
     /// The folder that holds the installed themes, one folder per theme (`MC_THEMES_DIR`), as
     /// WordPress's `wp-content/themes`. Default `themes`, relative to the working directory.
     pub themes_dir: PathBuf,
+    /// The folder uploads are stored in, in `YYYY/MM` folders (`MC_UPLOADS_DIR`), as WordPress's
+    /// `wp-content/uploads`, and served at `/wp-content/uploads/`. Default `uploads`, relative to
+    /// the working directory.
+    pub uploads_dir: PathBuf,
     /// The kind of environment the site runs in (`MC_ENV`), as WordPress's
     /// `wp_get_environment_type`. Default `production`.
     pub environment: Environment,
@@ -142,6 +146,7 @@ impl fmt::Debug for Config {
             .field("debug", &self.debug)
             .field("upload_max_bytes", &self.upload_max_bytes)
             .field("themes_dir", &self.themes_dir)
+            .field("uploads_dir", &self.uploads_dir)
             .field("environment", &self.environment)
             .field("trusted_proxies", &self.trusted_proxies)
             .finish()
@@ -218,6 +223,16 @@ pub fn load_from(
         }
         Some(value) => PathBuf::from(value),
     };
+    let uploads_dir = match get("MC_UPLOADS_DIR") {
+        None => PathBuf::from("uploads"),
+        Some(value) if value.trim().is_empty() => {
+            return Err(ConfigError::Invalid {
+                name: "MC_UPLOADS_DIR",
+                value,
+            });
+        }
+        Some(value) => PathBuf::from(value),
+    };
     let environment = match get("MC_ENV") {
         None => Environment::Production,
         Some(value) => Environment::parse(&value).ok_or(ConfigError::Invalid {
@@ -239,6 +254,7 @@ pub fn load_from(
         debug,
         upload_max_bytes,
         themes_dir,
+        uploads_dir,
         environment,
         trusted_proxies,
     })

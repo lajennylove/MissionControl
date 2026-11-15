@@ -1,12 +1,19 @@
 //! The REST API's routes: discovery (`GET /wp-json/`, the namespace indexes and WordPress's
-//! `?rest_route=` form on the site root), the posts controller ([`posts`]) and the terms
-//! controller ([`terms`]). Every route takes a guard from [`auth`], so refused credentials end
-//! any REST request with WordPress's error.
+//! `?rest_route=` form on the site root), the posts controller ([`posts`]), the terms
+//! controller ([`terms`]), the users controller ([`users`]) and the media controller
+//! ([`media`]). Every route takes a guard from [`auth`], so refused credentials end any REST
+//! request with WordPress's error.
 
 pub mod auth;
+pub(crate) mod media;
 pub(crate) mod posts;
 mod request;
 pub(crate) mod terms;
+pub(crate) mod users;
+
+/// The rank of the routes with a fixed `rest_base` (`users`, `media`): before the posts and
+/// terms routes, whose `/wp-json/wp/v2/<_>/<id>` paths they share at the default rank.
+const FIXED_BASE_RANK: isize = -20;
 
 use std::sync::Arc;
 
@@ -22,7 +29,8 @@ pub(crate) type Json = (Status, (ContentType, String));
 
 /// The REST routes, at `rank`: before the public site's catch-all, after every route with a
 /// path of its own (those rank below zero). The terms routes share the posts routes' paths and
-/// rank just above `rank`, after the posts routes and before the catch-alls.
+/// rank just above `rank`, after the posts routes and before the catch-alls. The users and media
+/// routes rank first ([`FIXED_BASE_RANK`]).
 pub(crate) fn routes(rank: isize) -> Vec<Route> {
     let mut routes = rocket::routes![wp_json, rest_route];
     for route in &mut routes {
@@ -31,6 +39,8 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes.extend(posts::no_route_routes(rank));
     routes.extend(posts::routes());
     routes.extend(terms::routes(rank - 1));
+    routes.extend(users::routes(FIXED_BASE_RANK));
+    routes.extend(media::routes(FIXED_BASE_RANK));
     routes
 }
 

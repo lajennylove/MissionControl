@@ -44,6 +44,7 @@ async fn site() -> (TestDatabase, Client) {
         themes_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../themes")
             .to_path_buf(),
+        uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
         environment: Environment::Production,
         trusted_proxies: TrustedProxies::None,
     };
@@ -134,12 +135,17 @@ async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
             "/wp/v2",
             "/wp/v2/categories",
             "/wp/v2/categories/(?P<id>[\\d]+)",
+            "/wp/v2/media",
+            "/wp/v2/media/(?P<id>[\\d]+)",
             "/wp/v2/pages",
             "/wp/v2/pages/(?P<id>[\\d]+)",
             "/wp/v2/posts",
             "/wp/v2/posts/(?P<id>[\\d]+)",
             "/wp/v2/tags",
             "/wp/v2/tags/(?P<id>[\\d]+)",
+            "/wp/v2/users",
+            "/wp/v2/users/(?P<id>[\\d]+)",
+            "/wp/v2/users/me",
         ]
     );
     // A route with a regex parameter has no `self` link (Controller ruling R44).
@@ -196,6 +202,7 @@ async fn an_unset_site_uses_wordpresss_defaults() {
         debug: false,
         upload_max_bytes: 1024,
         themes_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../themes"),
+        uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
         environment: Environment::Production,
         trusted_proxies: TrustedProxies::None,
     };
@@ -231,12 +238,17 @@ async fn the_namespace_index_lists_its_routes() {
                 "/wp/v2",
                 "/wp/v2/categories",
                 "/wp/v2/categories/(?P<id>[\\d]+)",
+                "/wp/v2/media",
+                "/wp/v2/media/(?P<id>[\\d]+)",
                 "/wp/v2/pages",
                 "/wp/v2/pages/(?P<id>[\\d]+)",
                 "/wp/v2/posts",
                 "/wp/v2/posts/(?P<id>[\\d]+)",
                 "/wp/v2/tags",
                 "/wp/v2/tags/(?P<id>[\\d]+)",
+                "/wp/v2/users",
+                "/wp/v2/users/(?P<id>[\\d]+)",
+                "/wp/v2/users/me",
             ]
         );
         assert_eq!(routes["/wp/v2"]["namespace"], "wp/v2");

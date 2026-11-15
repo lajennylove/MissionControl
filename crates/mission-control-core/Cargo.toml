@@ -32,12 +32,18 @@ image = { version = "0.25", default-features = false, features = ["gif", "jpeg",
 infer = "0.22"
 # The logging facade Rocket 0.5 logs through.
 log = "0.4"
+# MD5 for the `Content-MD5` upload check, as WordPress checks it (MIT OR Apache-2.0). The version
+# sqlx already builds.
+md-5 = "0.11"
 orbit-orm.workspace = true
 # The parsed template type `propel_runtime::Loader::template` returns (MIT).
 propel_parser = "0.3.0"
 # Renders themes from disk, confined to the theme and its parent (MIT).
 propel_runtime = "0.3.0"
 serde = { version = "1", features = ["derive"] }
+# SHA-256 for Gravatar addresses, as WordPress 6.8 hashes emails (MIT OR Apache-2.0). A version
+# already in the lock.
+sha2 = "0.11"
 # Scheduled event payloads are stored as JSON.
 serde_json = "1"
 # Constant-time comparison of password hashes (BSD-3-Clause).

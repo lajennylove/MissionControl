@@ -21,18 +21,23 @@
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
 //! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
 //! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the kses
-//! limiter (`Arc<KsesLimiter>`) and the front end (`Arc<Frontend>`). The scheduler's loop starts
-//! at liftoff, once the server listens, and runs due events every minute.
+//! limiter (`Arc<KsesLimiter>`), the uploads' storage (`Arc<dyn Storage>`, on the local disk in
+//! the uploads folder, `MC_UPLOADS_DIR`), the image size registry (`Arc<ImageSizes>`, WordPress's
+//! default sizes) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
+//! once the server listens, and runs due events every minute.
 //!
 //! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, posts, pages and every
-//! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`, and categories, tags and every
-//! taxonomy in [`Taxonomies`] the same way. REST clients sign in with
+//! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`, categories, tags and every
+//! taxonomy in [`Taxonomies`] the same way, users at `/wp-json/wp/v2/users` (reads only) and
+//! media at `/wp-json/wp/v2/media`. Uploads are served at `/wp-content/uploads/`, as data
+//! (`nosniff`, a sandbox policy, the stored type). REST clients sign in with
 //! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
 //! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
 //! role). Not mounted yet: the admin (Ignite).
 
 mod front;
 mod rest;
+mod uploads;
 
 pub use rest::auth::{RestAuth, RestUser};
 
@@ -43,6 +48,7 @@ use mission_control_core::config::Config;
 use mission_control_core::content::{Shortcodes, register_publish_future_post};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
+use mission_control_core::media::{ImageSizes, LocalStorage, Storage};
 use mission_control_core::rest::posts::PostTypes;
 use mission_control_core::rest::terms::Taxonomies;
 use mission_control_core::rest::{KsesLimiter, RestRoutes};
@@ -122,6 +128,13 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     post_types.register_routes(&rest_routes);
     let taxonomies = Arc::new(Taxonomies::new());
     taxonomies.register_routes(&rest_routes);
+    mission_control_core::rest::users::register_routes(&rest_routes);
+    mission_control_core::rest::media::register_routes(&rest_routes);
+    let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(config.uploads_dir.clone()));
+    let image_sizes = Arc::new(ImageSizes::new());
+    let upload_settings = rest::media::UploadSettings {
+        max_bytes: config.upload_max_bytes,
+    };
     let kses = Arc::new(KsesLimiter::new(
         kses_concurrency.unwrap_or(KsesLimiter::DEFAULT_CONCURRENCY),
     ));
@@ -139,7 +152,11 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(taxonomies)
         .manage(kses)
         .manage(auth)
+        .manage(storage)
+        .manage(image_sizes)
+        .manage(upload_settings)
         .mount("/", rest::routes(REST_RANK))
+        .mount("/", uploads::routes())
         .mount("/", rest::auth::refused_routes())
         .register("/", rest::auth::catchers())
         .attach(rest::auth::RestAuthFairing)

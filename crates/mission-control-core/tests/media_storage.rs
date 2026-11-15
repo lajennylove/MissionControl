@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use chrono::NaiveDate;
-use mission_control_core::media::{LocalStorage, Storage, StorageError, upload_subdir};
+use mission_control_core::media::{LocalStorage, OpenedFile, Storage, StorageError, upload_subdir};
 
 /// A fresh temp folder, removed on drop.
 struct Temp(PathBuf);
@@ -322,4 +322,71 @@ fn list_refuses_a_folder_that_leaves_the_root() {
         s.list("escape"),
         Err(StorageError::InvalidPath(_))
     ));
+}
+
+#[test]
+fn open_hands_out_a_file_with_its_length() {
+    use std::io::Read;
+
+    let (temp, s) = setup("open");
+    s.put("2026/11/a.txt", b"hello").unwrap();
+    match s.open("2026/11/a.txt").unwrap() {
+        OpenedFile::File(mut file, length) => {
+            assert_eq!(length, 5);
+            let mut text = String::new();
+            file.read_to_string(&mut text).unwrap();
+            assert_eq!(text, "hello");
+        }
+        OpenedFile::Bytes(_) => panic!("the local disk opens a file"),
+    }
+    assert!(matches!(s.open("2026/11"), Err(StorageError::NotFound(_))));
+    assert!(matches!(
+        s.open("2026/11/missing.txt"),
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        s.open("../a.txt"),
+        Err(StorageError::InvalidPath(_))
+    ));
+    #[cfg(unix)]
+    {
+        fs::write(temp.0.join("outside.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(temp.0.join("outside.txt"), temp.0.join("uploads/link.txt"))
+            .unwrap();
+        assert!(matches!(
+            s.open("link.txt"),
+            Err(StorageError::InvalidPath(_))
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_no_file_and_never_blocks() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (_t, s) = setup("fifo");
+    s.put("2026/11/a.txt", b"a").unwrap();
+    let fifo = s.root().join("2026/11/pipe.txt");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (send, receive) = mpsc::channel();
+    let storage = s.clone();
+    std::thread::spawn(move || {
+        let opened = storage.open("2026/11/pipe.txt").map(|_| ());
+        let read = storage.get("2026/11/pipe.txt").map(|_| ());
+        let _ = send.send((opened, read));
+    });
+    let (opened, read) = receive
+        .recv_timeout(Duration::from_secs(10))
+        .expect("opening a FIFO does not block");
+    assert!(
+        matches!(opened, Err(StorageError::NotFound(_))),
+        "{opened:?}"
+    );
+    assert!(matches!(read, Err(StorageError::NotFound(_))), "{read:?}");
 }

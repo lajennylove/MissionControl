@@ -25,7 +25,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -124,6 +124,14 @@ pub trait Storage: Send + Sync {
     /// Reads the file at `path`, or [`StorageError::NotFound`].
     fn get(&self, path: &str) -> StorageResult<Vec<u8>>;
 
+    /// Opens the file at `path` for sending, or [`StorageError::NotFound`] (also for a folder).
+    /// The default reads it whole ([`Storage::get`]); storage on a disk overrides it to hand
+    /// out an open file, which is streamed, so a large upload is never read into memory to be
+    /// served.
+    fn open(&self, path: &str) -> StorageResult<OpenedFile> {
+        self.get(path).map(OpenedFile::Bytes)
+    }
+
     /// Deletes the file at `path`. Deleting a file that is not there succeeds,
     /// as WordPress's `wp_delete_file` does (it unlinks without complaint).
     fn delete(&self, path: &str) -> StorageResult<()>;
@@ -139,6 +147,15 @@ pub trait Storage: Send + Sync {
     /// keep an image's future sub-size names free, as WordPress's
     /// `wp_unique_filename` reads the upload folder.
     fn list(&self, folder: &str) -> StorageResult<Vec<String>>;
+}
+
+/// A stored file opened for sending ([`Storage::open`]).
+#[derive(Debug)]
+pub enum OpenedFile {
+    /// A file on the local disk, opened for reading, and its length in bytes.
+    File(fs::File, u64),
+    /// The file's bytes, read whole.
+    Bytes(Vec<u8>),
 }
 
 /// The `YYYY/MM` folder an upload made on `date` goes in (WordPress's
@@ -218,6 +235,69 @@ impl LocalStorage {
         }
         Ok(target)
     }
+}
+
+impl LocalStorage {
+    /// Opens the regular file at `path` for reading, and gives its length.
+    ///
+    /// The path is checked ([`LocalStorage::resolve_existing`]: no `..`, no symlink out of the
+    /// root), then its canonical form, which holds no link, is opened. On Unix it is opened with
+    /// `O_NOFOLLOW`, so a link swapped in after the check is refused (`ELOOP`, as
+    /// [`StorageError::InvalidPath`]), and `O_NONBLOCK`, so a FIFO cannot block the thread. The
+    /// handle itself must be a regular file; a folder, a FIFO or a device is
+    /// [`StorageError::NotFound`].
+    fn open_regular(&self, path: &str) -> StorageResult<(fs::File, u64)> {
+        let not_found = || StorageError::NotFound(path.to_string());
+        let target = self.resolve_existing(path)?;
+        let canonical = target.canonicalize().map_err(|err| match err.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => not_found(),
+            _ => err.into(),
+        })?;
+        if let Ok(root) = self.root.canonicalize()
+            && !canonical.starts_with(&root)
+        {
+            return Err(StorageError::InvalidPath(path.to_string()));
+        }
+        let file = open_no_follow(&canonical).map_err(|err| {
+            if err.raw_os_error() == Some(ELOOP) {
+                return StorageError::InvalidPath(path.to_string());
+            }
+            match err.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => not_found(),
+                _ => err.into(),
+            }
+        })?;
+        // Checked on the open handle, so what was opened is what is read or sent.
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(not_found());
+        }
+        Ok((file, meta.len()))
+    }
+}
+
+/// The `ELOOP` error number, which `O_NOFOLLOW` returns for a symbolic link.
+#[cfg(unix)]
+const ELOOP: i32 = libc::ELOOP;
+#[cfg(not(unix))]
+const ELOOP: i32 = -1;
+
+/// Opens `path` for reading without following a final symbolic link and without blocking on a
+/// FIFO.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens `path` for reading. The path was canonicalized just before, so it holds no link.
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> io::Result<fs::File> {
+    fs::File::open(path)
 }
 
 /// Distinguishes temp files of concurrent writers in one process.
@@ -332,12 +412,19 @@ impl Storage for LocalStorage {
         claimed
     }
 
+    /// Reads the file through [`LocalStorage::open_regular`]: a folder, a FIFO or anything but a
+    /// regular file is [`StorageError::NotFound`].
     fn get(&self, path: &str) -> StorageResult<Vec<u8>> {
-        let target = self.resolve_existing(path)?;
-        fs::read(&target).map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => StorageError::NotFound(path.to_string()),
-            _ => err.into(),
-        })
+        let (mut file, length) = self.open_regular(path)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Opens the file through [`LocalStorage::open_regular`], to be streamed.
+    fn open(&self, path: &str) -> StorageResult<OpenedFile> {
+        let (file, length) = self.open_regular(path)?;
+        Ok(OpenedFile::File(file, length))
     }
 
     fn delete(&self, path: &str) -> StorageResult<()> {

@@ -20,6 +20,22 @@ const STATUSES: &[&str] = &[
     "publish", "future", "draft", "pending", "private", "trash", "any",
 ];
 
+/// The statuses an attachment list may ask for, as `WP_REST_Attachments_Controller` lists them.
+const ATTACHMENT_STATUSES: &[&str] = &["inherit", "private", "trash"];
+
+/// The `media_type` values: the first part of the allowed MIME types, as `get_media_types` groups
+/// them.
+pub(crate) const MEDIA_TYPES: &[&str] = &["image", "video", "text", "application", "audio"];
+
+/// The statuses `post_type`'s lists take, and the default.
+fn statuses_of(post_type: &PostType) -> (&'static [&'static str], &'static str) {
+    if post_type.is_attachment() {
+        (ATTACHMENT_STATUSES, "inherit")
+    } else {
+        (STATUSES, "publish")
+    }
+}
+
 /// The most ids `include`, `exclude` and the other id lists take, so one query stays bounded.
 const MAX_LIST_IDS: usize = 500;
 
@@ -80,6 +96,10 @@ struct ListParams {
     parent_exclude: Vec<i64>,
     menu_order: Option<i64>,
     sticky: Option<bool>,
+    /// An attachment list's `media_type`: the first part of the MIME type.
+    media_type: Option<String>,
+    /// An attachment list's `mime_type`, when it is one of the media types'.
+    mime_type: Option<String>,
     /// Per taxonomy: the `term_id`s a post must have one of, and those it must have none of.
     terms: Vec<(&'static str, Vec<i64>, Vec<i64>)>,
     fields: Fields,
@@ -116,14 +136,26 @@ impl ListParams {
         let author = r.integers("author", 0);
         let author_exclude = r.integers("author_exclude", 0);
         let slug = r.strings("slug");
-        let (parent, parent_exclude, menu_order) = if post_type.has_parent() {
-            (
-                r.integers("parent", 0),
-                r.integers("parent_exclude", 0),
-                r.integer("menu_order", None, None),
-            )
+        let (parent, parent_exclude) = if post_type.filters_by_parent() {
+            (r.integers("parent", 0), r.integers("parent_exclude", 0))
         } else {
-            (Vec::new(), Vec::new(), None)
+            (Vec::new(), Vec::new())
+        };
+        let menu_order = if post_type.has_parent() {
+            r.integer("menu_order", None, None)
+        } else {
+            None
+        };
+        let (media_type, mime_type) = if post_type.is_attachment() {
+            let media_type = r.one_of("media_type", MEDIA_TYPES);
+            // `prepare_items_query` ignores a MIME type outside the media types.
+            let mime_type = r.string("mime_type").filter(|m| {
+                m.split_once('/')
+                    .is_some_and(|(kind, rest)| MEDIA_TYPES.contains(&kind) && !rest.is_empty())
+            });
+            (media_type, mime_type)
+        } else {
+            (None, None)
         };
         let sticky = if post_type.has_sticky() {
             r.boolean("sticky")
@@ -186,6 +218,8 @@ impl ListParams {
             parent_exclude,
             menu_order,
             sticky,
+            media_type,
+            mime_type,
             terms,
             fields,
             embed,
@@ -211,19 +245,21 @@ fn term_list(r: &mut Reader<'_>, name: &str) -> Vec<i64> {
     }
 }
 
-/// The `status` parameter, as `sanitize_post_statuses` checks it: `publish` for anyone, any
-/// other status only for a user with the type's `edit_posts` (or `read_private_posts` for
-/// `private`); otherwise `rest_forbidden_status` inside `rest_invalid_param`.
+/// The `status` parameter, as `sanitize_post_statuses` checks it: `publish` (`inherit` for
+/// attachments, their default) for anyone, any other status only for a user with the type's
+/// `edit_posts` (or `read_private_posts` for `private`); otherwise `rest_forbidden_status` inside
+/// `rest_invalid_param`.
 fn read_statuses(ctl: &PostsController<'_>, r: &mut Reader<'_>) -> Option<Vec<PostStatus>> {
+    let (allowed, default) = statuses_of(ctl.post_type);
     let names = if r.has("status") {
         r.strings("status")
     } else {
-        vec!["publish".to_owned()]
+        vec![default.to_owned()]
     };
     // WordPress validates the values against the enum before the sanitize callback checks
     // permissions.
-    if names.iter().any(|name| !STATUSES.contains(&name.as_str())) {
-        r.invalid.not_in_enum("status", STATUSES);
+    if names.iter().any(|name| !allowed.contains(&name.as_str())) {
+        r.invalid.not_in_enum("status", allowed);
         return Some(Vec::new());
     }
     let caps = ctl.post_type.caps();
@@ -231,6 +267,7 @@ fn read_statuses(ctl: &PostsController<'_>, r: &mut Reader<'_>) -> Option<Vec<Po
     let mut any = false;
     for name in &names {
         if name != "publish"
+            && name != default
             && !(ctl.has(&caps.edit_posts)
                 || (name == "private" && ctl.has(&caps.read_private_posts)))
         {
@@ -448,6 +485,14 @@ impl Sql {
             sql.push_str(" AND p.menu_order = ?");
             binds.push(order.into());
         }
+        if let Some(media_type) = &list.media_type {
+            sql.push_str(" AND p.mime_type LIKE ? ESCAPE '!'");
+            binds.push(format!("{}/%", escape_like(media_type)).into());
+        }
+        if let Some(mime_type) = &list.mime_type {
+            sql.push_str(" AND p.mime_type = ?");
+            binds.push(mime_type.clone().into());
+        }
         if let Some(sticky) = list.sticky {
             match (sticky, site.sticky.is_empty()) {
                 (true, true) => return None,
@@ -479,11 +524,23 @@ impl Sql {
             for term in search_terms(search) {
                 let like = format!("%{}%", escape_like(&term.text.to_lowercase()));
                 sql.push_str(if term.exclude { " AND NOT " } else { " AND " });
-                sql.push_str(
-                    "(LOWER(p.title) LIKE ? ESCAPE '!' OR LOWER(p.excerpt) LIKE ? ESCAPE '!' \
-                     OR LOWER(p.content) LIKE ? ESCAPE '!')",
-                );
-                binds.extend(std::iter::repeat_n(orbit_orm::Value::from(like), 3));
+                if ctl.post_type.is_attachment() {
+                    // `wp_allow_query_attachment_by_filename`: an attachment's file name matches
+                    // too.
+                    sql.push_str(
+                        "(LOWER(p.title) LIKE ? ESCAPE '!' OR LOWER(p.excerpt) LIKE ? ESCAPE '!' \
+                         OR LOWER(p.content) LIKE ? ESCAPE '!' OR EXISTS (SELECT 1 FROM \
+                         post_meta fm WHERE fm.post_id = p.id AND fm.meta_key = '_wp_attached_file' \
+                         AND LOWER(fm.meta_value) LIKE ? ESCAPE '!'))",
+                    );
+                    binds.extend(std::iter::repeat_n(orbit_orm::Value::from(like), 4));
+                } else {
+                    sql.push_str(
+                        "(LOWER(p.title) LIKE ? ESCAPE '!' OR LOWER(p.excerpt) LIKE ? ESCAPE '!' \
+                         OR LOWER(p.content) LIKE ? ESCAPE '!')",
+                    );
+                    binds.extend(std::iter::repeat_n(orbit_orm::Value::from(like), 3));
+                }
             }
             // `WP_Query::parse_search`: a visitor's search never matches a protected post, so
             // its hidden words cannot be probed.
@@ -593,7 +650,7 @@ fn relevance(search: &str, terms: &[SearchTerm]) -> (String, Vec<orbit_orm::Valu
 }
 
 /// The arguments of the collection's `GET`, as WordPress's `get_collection_params` lists them.
-pub(super) fn collection_args(post_type: &PostType) -> Map<String, Value> {
+pub(crate) fn collection_args(post_type: &PostType) -> Map<String, Value> {
     let ids = |description: &str| json!({"description": description, "type": "array", "items": {"type": "integer"}, "default": [], "required": false});
     let mut args = Map::new();
     let mut put = |name: &str, value: Value| {
@@ -630,6 +687,8 @@ pub(super) fn collection_args(post_type: &PostType) -> Map<String, Value> {
             "menu_order",
             json!({"description": "Limit result set to posts with a specific menu_order value.", "type": "integer", "required": false}),
         );
+    }
+    if post_type.filters_by_parent() {
         put(
             "parent",
             ids("Limit result set to items with particular parent IDs."),
@@ -655,10 +714,21 @@ pub(super) fn collection_args(post_type: &PostType) -> Map<String, Value> {
         "slug",
         json!({"description": "Limit result set to posts with one or more specific slugs.", "type": "array", "items": {"type": "string"}, "required": false}),
     );
+    let (statuses, default) = statuses_of(post_type);
     put(
         "status",
-        json!({"default": "publish", "description": "Limit result set to posts assigned one or more statuses.", "type": "array", "items": {"enum": STATUSES, "type": "string"}, "required": false}),
+        json!({"default": default, "description": "Limit result set to posts assigned one or more statuses.", "type": "array", "items": {"enum": statuses, "type": "string"}, "required": false}),
     );
+    if post_type.is_attachment() {
+        put(
+            "media_type",
+            json!({"default": null, "description": "Limit result set to attachments of a particular media type.", "type": "string", "enum": MEDIA_TYPES, "required": false}),
+        );
+        put(
+            "mime_type",
+            json!({"default": null, "description": "Limit result set to attachments of a particular MIME type.", "type": "string", "required": false}),
+        );
+    }
     for taxonomy in &post_type.taxonomies {
         let base = taxonomy.rest_base;
         put(

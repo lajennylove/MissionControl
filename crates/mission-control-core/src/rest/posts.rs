@@ -40,12 +40,17 @@
 //! checked but not stored; no `replies` link), post formats (`format` reads `standard`; writes
 //! are checked, not stored), registered meta (`meta` is `{}` until Task 10.6), the `Allow`
 //! header, `before`/`after` and the other date filters, `search_columns`, `tax_relation`,
-//! embedding featured media (the media routes do not exist yet), autosaves and revisions routes,
-//! and the `?rest_route=` form for these routes.
+//! embedding featured media (`wp:featuredmedia` is linked, not embedded), autosaves and revisions
+//! routes, and the `?rest_route=` form for these routes.
+//!
+//! The media controller ([`super::media`]) runs attachments through this controller's reads
+//! with [`PostType::attachment`], which adds the attachment's fields.
 
-mod prepare;
+pub(crate) mod prepare;
 mod query;
 mod write;
+
+pub(crate) use query::collection_args;
 
 use std::sync::{RwLock, RwLockReadGuard};
 
@@ -56,6 +61,7 @@ use super::params::Params;
 use super::shared::{Site, authorization_status, database_error};
 use crate::content::{MetaError, Post, PostStatus, Taxonomy, get_post_meta};
 use crate::hooks::Hooks;
+use crate::media::ImageSizes;
 use crate::rest::{Endpoint, KsesLimiter, RestError, RestRoutes, RouteSpec};
 use crate::theme::Theme;
 use crate::users::{Object, PostContext, PostTypeCaps, UserCaps, can, has_cap};
@@ -177,6 +183,36 @@ impl PostType {
         }
     }
 
+    /// `attachment`, at `media`: the title, the author and comments, as WordPress registers
+    /// the type; the media controller ([`super::media`]) serves it. It is not in [`PostTypes`],
+    /// whose routes would write it as a post.
+    pub fn attachment() -> Self {
+        Self {
+            name: "attachment".to_owned(),
+            rest_base: "media".to_owned(),
+            hierarchical: false,
+            show_in_rest: true,
+            supports: Supports {
+                title: true,
+                editor: false,
+                author: true,
+                excerpt: false,
+                thumbnail: false,
+                comments: true,
+                revisions: false,
+                page_attributes: false,
+                post_formats: false,
+                custom_fields: true,
+            },
+            taxonomies: Vec::new(),
+        }
+    }
+
+    /// Whether the type is `attachment`.
+    pub(crate) fn is_attachment(&self) -> bool {
+        self.name == "attachment"
+    }
+
     /// The type's capability names.
     // TODO(Task 5.2): from the registered type.
     pub fn caps(&self) -> PostTypeCaps {
@@ -186,6 +222,12 @@ impl PostType {
     /// Whether the type has `parent` and `menu_order`.
     fn has_parent(&self) -> bool {
         self.hierarchical && self.supports.page_attributes
+    }
+
+    /// Whether a list filters by `parent` and `parent_exclude`: a type with parents, or
+    /// attachments, as `get_collection_params` adds them.
+    fn filters_by_parent(&self) -> bool {
+        self.has_parent() || self.is_attachment()
     }
 
     /// Whether the type has the `sticky` field: `post` only, as in WordPress.
@@ -328,6 +370,7 @@ fn route_specs(post_type: &PostType) -> [RouteSpec; 2] {
 ///     user: &caps,
 ///     kses: &kses,
 ///     theme: Some(&theme),
+///     image_sizes: None,
 /// };
 /// let response = controller.list("per_page=5").await?;
 /// ```
@@ -345,6 +388,9 @@ pub struct PostsController<'a> {
     /// The active theme, which decides which page templates may be chosen. `None` refuses every
     /// template but the default.
     pub theme: Option<&'a Theme>,
+    /// The registered image sizes, for an attachment's `missing_image_sizes`. `None` reads as no
+    /// sizes; only the media controller needs them.
+    pub image_sizes: Option<&'a ImageSizes>,
 }
 
 impl PostsController<'_> {
@@ -405,8 +451,19 @@ impl PostsController<'_> {
         write::delete(self, id, params).await
     }
 
+    /// Post `id`, read again, as the edit context shows it, with HTTP `status`: what a write
+    /// answers with.
+    pub(crate) async fn edit_response(
+        &self,
+        id: i64,
+        status: u16,
+    ) -> Result<super::RestResponse, RestError> {
+        let site = Site::load(self.db).await?;
+        write::respond(self, &site, id, status).await
+    }
+
     /// Post `id` if it is of this controller's type, or `rest_post_invalid_id` (404).
-    async fn find(&self, id: i64) -> Result<Post, RestError> {
+    pub(crate) async fn find(&self, id: i64) -> Result<Post, RestError> {
         match Post::query().find(self.db, id).await {
             Ok(Some(post)) if post.post_type == self.post_type.name => Ok(post),
             Ok(_) => Err(invalid_id()),
@@ -415,7 +472,7 @@ impl PostsController<'_> {
     }
 
     /// The status `post` had before it was trashed, for a trashed post.
-    async fn trash_status(&self, post: &Post) -> Result<Option<PostStatus>, RestError> {
+    pub(crate) async fn trash_status(&self, post: &Post) -> Result<Option<PostStatus>, RestError> {
         if post.status != PostStatus::Trash {
             return Ok(None);
         }
@@ -428,7 +485,13 @@ impl PostsController<'_> {
 
     /// Whether the user may do meta capability `cap` on `post`, with its trash status and the
     /// site's special pages.
-    fn can_on(&self, cap: &str, post: &Post, trash: Option<PostStatus>, site: &Site) -> bool {
+    pub(crate) fn can_on(
+        &self,
+        cap: &str,
+        post: &Post,
+        trash: Option<PostStatus>,
+        site: &Site,
+    ) -> bool {
         let context = PostContext {
             post,
             trash_meta_status: trash,
@@ -478,7 +541,7 @@ impl PostsController<'_> {
     }
 
     /// Whether the user holds primitive capability `cap`.
-    fn has(&self, cap: &str) -> bool {
+    pub(crate) fn has(&self, cap: &str) -> bool {
         has_cap(self.user, cap)
     }
 
@@ -488,13 +551,13 @@ impl PostsController<'_> {
     }
 
     /// An error with the status `rest_authorization_required_code` gives.
-    fn forbidden(&self, code: &'static str, message: &'static str) -> RestError {
+    pub(crate) fn forbidden(&self, code: &'static str, message: &'static str) -> RestError {
         RestError::new(code, message, self.auth_status())
     }
 }
 
 /// `rest_post_invalid_id`, 404.
-fn invalid_id() -> RestError {
+pub(crate) fn invalid_id() -> RestError {
     RestError::new("rest_post_invalid_id", "Invalid post ID.", 404)
 }
 

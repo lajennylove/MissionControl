@@ -14,14 +14,15 @@ pub mod storage;
 pub mod upload;
 
 pub use attachment::{
-    Attachment, AttachmentError, create_attachment, get_attachment, update_attachment_details,
+    Attachment, AttachmentError, AttachmentTitle, create_attachment, create_attachment_titled,
+    delete_attachment, get_attachment, update_attachment_details,
 };
 pub use sizes::{
     AttachmentMetadata, ImageSize, ImageSizes, JPEG_QUALITY, MAX_DECODE_BYTES, MAX_IMAGE_DIMENSION,
     ResizeDimensions, SubSize, constrain_dimensions, create_image_subsizes,
     image_resize_dimensions,
 };
-pub use storage::{LocalStorage, Storage, StorageError, StorageResult, upload_subdir};
+pub use storage::{LocalStorage, OpenedFile, Storage, StorageError, StorageResult, upload_subdir};
 pub use upload::{
     MAX_FILE_NAME_BYTES, UploadError, ValidatedUpload, check_size, mime_type_for,
     sanitize_file_name, store, validate,

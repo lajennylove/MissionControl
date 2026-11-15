@@ -107,6 +107,7 @@ impl<'r> App<'r> {
             user: caps,
             kses: self.kses,
             theme: self.frontend.map(Frontend::theme),
+            image_sizes: None,
         }
     }
 }

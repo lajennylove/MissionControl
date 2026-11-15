@@ -214,6 +214,7 @@ fn config() -> Config {
         themes_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../themes")
             .to_path_buf(),
+        uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
         environment: Environment::Local,
         trusted_proxies: TrustedProxies::None,
     }

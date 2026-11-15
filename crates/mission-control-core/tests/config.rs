@@ -153,6 +153,30 @@ fn empty_themes_dir_is_invalid() {
 }
 
 #[test]
+fn uploads_dir_defaults_to_uploads_and_can_be_set() {
+    let path = env_file("uploadsdefault", REQUIRED);
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.uploads_dir, PathBuf::from("uploads"));
+
+    let path = env_file(
+        "uploadsset",
+        &format!("{REQUIRED}MC_UPLOADS_DIR=/srv/site/uploads\n"),
+    );
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.uploads_dir, PathBuf::from("/srv/site/uploads"));
+
+    let path = env_file("uploadsempty", &format!("{REQUIRED}MC_UPLOADS_DIR=\n"));
+    let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+    assert_eq!(
+        error,
+        ConfigError::Invalid {
+            name: "MC_UPLOADS_DIR",
+            value: String::new()
+        }
+    );
+}
+
+#[test]
 fn environment_defaults_to_production_as_wordpress() {
     let path = env_file("envdefault", REQUIRED);
     let config = load_from(Some(&path), lookup(&[])).unwrap();
