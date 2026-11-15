@@ -11,11 +11,23 @@
 //! requires = "0.1"
 //! template = "orbit-base"   # the parent theme's slug, for a child theme
 //! supports = ["menus", "post-thumbnails", "custom-logo"]
+//!
+//! [menus]                   # register_nav_menus: location => description
+//! primary = "Primary menu"
+//!
+//! [sidebars]                # register_sidebar: id => name
+//! footer = "Footer"
 //! ```
 //!
 //! The theme's slug is the name of its folder, as in WordPress; the manifest cannot set it.
 //! Parsing is strict: an unknown key or an unknown `supports` value is refused by name, so a
 //! typo does not pass silently.
+//!
+//! Menu locations and widget area ids are template names (`menus.primary`,
+//! `sidebars.footer`), so they are lowercase ASCII letters, digits and `_`, starting with a letter
+//! or `_`, at most 64 characters. WordPress allows `-` too (`sidebar-1`), which Propel's paths
+//! cannot read. Declaring a menu location or a widget area adds the `menus` or `widgets` support,
+//! as `register_nav_menus` and `register_sidebar` do.
 
 use std::path::Path;
 
@@ -50,8 +62,32 @@ pub struct Manifest {
     /// The parent theme's slug, for a child theme (WordPress's `Template` header). `None` for a
     /// standalone theme; an empty value is the same as none.
     pub template: Option<String>,
-    /// The features the theme supports (`add_theme_support`), in the order written.
+    /// The features the theme supports (`add_theme_support`), in the order written, then
+    /// `menus` and `widgets` when the theme declares menu locations or widget areas and does not
+    /// list them.
     pub supports: Vec<Support>,
+    /// The theme's menu locations (`register_nav_menus`), in the order written.
+    pub menus: Vec<MenuLocation>,
+    /// The theme's widget areas (`register_sidebar`), in the order written.
+    pub sidebars: Vec<Sidebar>,
+}
+
+/// A menu location the theme declares, as `register_nav_menus( array( $location => $description ) )`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuLocation {
+    /// The location's id, such as `primary`; the template reads its menu as `menus.{location}`.
+    pub location: String,
+    /// What the location is for, shown to the site owner.
+    pub description: String,
+}
+
+/// A widget area (WordPress's sidebar) the theme declares, as `register_sidebar`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sidebar {
+    /// The area's id, such as `footer`; the template reads it as `sidebars.{id}`.
+    pub id: String,
+    /// The area's name, shown to the site owner.
+    pub name: String,
 }
 
 /// A feature a theme declares support for, as WordPress's `add_theme_support`. The manifest
@@ -104,6 +140,8 @@ struct RawManifest {
     template: Option<String>,
     #[serde(default)]
     supports: Vec<Support>,
+    menus: Option<toml::Table>,
+    sidebars: Option<toml::Table>,
 }
 
 impl Manifest {
@@ -120,6 +158,30 @@ impl Manifest {
                 path: path.to_path_buf(),
             });
         }
+        let invalid = |message: String| ThemeError::InvalidManifest {
+            path: path.to_path_buf(),
+            message,
+        };
+        let menus = declared(raw.menus, "menus")
+            .map_err(invalid)?
+            .into_iter()
+            .map(|(location, description)| MenuLocation {
+                location,
+                description,
+            })
+            .collect::<Vec<_>>();
+        let sidebars = declared(raw.sidebars, "sidebars")
+            .map_err(invalid)?
+            .into_iter()
+            .map(|(id, name)| Sidebar { id, name })
+            .collect::<Vec<_>>();
+        let mut supports = raw.supports;
+        if !menus.is_empty() && !supports.contains(&Support::Menus) {
+            supports.push(Support::Menus);
+        }
+        if !sidebars.is_empty() && !supports.contains(&Support::Widgets) {
+            supports.push(Support::Widgets);
+        }
         Ok(Manifest {
             name: name.to_owned(),
             author: raw.author,
@@ -129,7 +191,9 @@ impl Manifest {
             license: raw.license,
             requires: raw.requires,
             template: raw.template.filter(|template| !template.is_empty()),
-            supports: raw.supports,
+            supports,
+            menus,
+            sidebars,
         })
     }
 
@@ -137,6 +201,52 @@ impl Manifest {
     pub fn supports(&self, feature: Support) -> bool {
         self.supports.contains(&feature)
     }
+}
+
+/// The longest menu location or widget area id.
+pub const MAX_AREA_ID: usize = 64;
+
+/// The `(id, text)` pairs of the `[menus]` or `[sidebars]` table, in order: each id a template
+/// name ([`is_area_id`]) and each value a string that is not empty once trimmed. The error names
+/// the table, and the id when it is safe to repeat, never a value.
+fn declared(table: Option<toml::Table>, name: &str) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+    for (id, value) in table.unwrap_or_default() {
+        if !is_area_id(&id) {
+            return Err(match echoable(&id) {
+                Some(id) => format!(
+                    "`[{name}]` id `{id}` is not valid: use lowercase letters, digits and `_`, \
+                     starting with a letter or `_`"
+                ),
+                None => format!(
+                    "a `[{name}]` id is not valid: use lowercase letters, digits and `_`, \
+                     starting with a letter or `_`"
+                ),
+            });
+        }
+        let toml::Value::String(text) = value else {
+            return Err(format!(
+                "`[{name}]` `{id}` has the wrong type (expected a string)"
+            ));
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(format!("`[{name}]` `{id}` is empty"));
+        }
+        pairs.push((id, text.to_owned()));
+    }
+    Ok(pairs)
+}
+
+/// Whether `id` can name a menu location or widget area: a Propel path segment (an ASCII
+/// letter or `_`, then letters, digits and `_`), lowercase, at most [`MAX_AREA_ID`] characters.
+pub(crate) fn is_area_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    id.len() <= MAX_AREA_ID
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b == b'_')
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// The longest key or `supports` value repeated in an error message.

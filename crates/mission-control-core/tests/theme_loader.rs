@@ -547,3 +547,109 @@ fn a_child_cannot_extend_outside_the_theme_roots() {
         assert_confined(&render(&loader, view, &json!({})));
     }
 }
+
+#[test]
+fn menu_locations_and_sidebars_are_read_in_order_and_imply_support() {
+    let themes = Themes::new();
+    let dir = themes.theme(
+        "areas",
+        r#"
+name = "Areas"
+supports = ["title-tag"]
+
+[menus]
+primary = "Primary menu"
+footer_links = "Footer links"
+alpha = "Comes last"
+
+[sidebars]
+sidebar = "Sidebar"
+footer = "Footer"
+"#,
+        &[("index.propel", "")],
+    );
+    let theme = load_theme(&dir).unwrap();
+    let manifest = theme.manifest();
+
+    let menus: Vec<(&str, &str)> = manifest
+        .menus
+        .iter()
+        .map(|m| (m.location.as_str(), m.description.as_str()))
+        .collect();
+    assert_eq!(
+        menus,
+        [
+            ("primary", "Primary menu"),
+            ("footer_links", "Footer links"),
+            ("alpha", "Comes last")
+        ]
+    );
+    let sidebars: Vec<(&str, &str)> = manifest
+        .sidebars
+        .iter()
+        .map(|s| (s.id.as_str(), s.name.as_str()))
+        .collect();
+    assert_eq!(sidebars, [("sidebar", "Sidebar"), ("footer", "Footer")]);
+    // `register_nav_menus` and `register_sidebar` add the theme support, as in WordPress.
+    assert!(manifest.supports(Support::Menus));
+    assert!(manifest.supports(Support::Widgets));
+}
+
+#[test]
+fn a_child_theme_inherits_its_parents_menu_locations_and_sidebars() {
+    let themes = Themes::new();
+    themes.theme(
+        "base",
+        "name = \"Base\"\n[menus]\nprimary = \"Primary\"\nsocial = \"Social\"\n[sidebars]\nfooter = \"Footer\"\n",
+        &[("index.propel", "")],
+    );
+    let child = themes.theme(
+        "kid",
+        "name = \"Kid\"\ntemplate = \"base\"\n[menus]\nprimary = \"Main menu\"\n",
+        &[],
+    );
+    let theme = load_theme(&child).unwrap();
+
+    let menus: Vec<(String, String)> = theme
+        .menu_locations()
+        .into_iter()
+        .map(|m| (m.location, m.description))
+        .collect();
+    assert_eq!(
+        menus,
+        [
+            ("primary".to_owned(), "Main menu".to_owned()),
+            ("social".to_owned(), "Social".to_owned())
+        ]
+    );
+    let sidebars: Vec<String> = theme.sidebars().into_iter().map(|s| s.id).collect();
+    assert_eq!(sidebars, ["footer"]);
+}
+
+#[test]
+fn menu_and_sidebar_tables_are_strict() {
+    let themes = Themes::new();
+    for (manifest, expected) in [
+        // Ids are template names: `menus.primary`, so no `-` and no capitals.
+        ("name = \"X\"\n[menus]\nsidebar-1 = \"A\"\n", "sidebar-1"),
+        ("name = \"X\"\n[sidebars]\nFooter = \"A\"\n", "Footer"),
+        ("name = \"X\"\n[sidebars]\n1st = \"A\"\n", "1st"),
+        ("name = \"X\"\n[menus]\nprimary = 3\n", "string"),
+        (
+            "name = \"X\"\n[sidebars]\nfooter = { name = \"A\" }\n",
+            "string",
+        ),
+        ("name = \"X\"\nmenus = [\"primary\"]\n", "expected"),
+        ("name = \"X\"\n[sidebars]\nfooter = \"\"\n", "empty"),
+    ] {
+        let error = manifest_error(&themes, manifest);
+        assert!(
+            matches!(error, ThemeError::InvalidManifest { .. }),
+            "{manifest}: {error:?}"
+        );
+        assert!(error.to_string().contains(expected), "{manifest}: {error}");
+    }
+    // A key that is not safe to repeat is not echoed.
+    let error = manifest_error(&themes, "name = \"X\"\n[menus]\n\"<script>\" = \"A\"\n");
+    assert!(!error.to_string().contains("<script>"), "{error}");
+}

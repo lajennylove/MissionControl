@@ -16,4 +16,6 @@ mod manifest;
 
 pub use hierarchy::templates_for;
 pub use loader::{LocatedTemplate, Theme, ThemeError, ThemeLoader, load_theme};
-pub use manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest, Support};
+pub use manifest::{
+    MANIFEST_FILE, MAX_AREA_ID, MAX_MANIFEST_BYTES, Manifest, MenuLocation, Sidebar, Support,
+};

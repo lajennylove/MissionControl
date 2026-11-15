@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use propel_runtime::{FileLoader, Loader, RenderError};
 
-use super::manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest};
+use super::manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest, MenuLocation, Sidebar};
 
 /// The file extension of a Propel template.
 const VIEW_EXTENSION: &str = "propel";
@@ -366,6 +366,35 @@ impl Theme {
     /// The parent theme, for a child theme.
     pub fn parent(&self) -> Option<&Theme> {
         self.parent.as_deref()
+    }
+
+    /// The menu locations this theme declares, then its parent's that it does not, as a child
+    /// theme's `functions.php` runs before its parent's and both register theme locations. A
+    /// location the child declares again keeps the child's description.
+    pub fn menu_locations(&self) -> Vec<MenuLocation> {
+        let mut locations = self.manifest.menus.clone();
+        if let Some(parent) = self.parent() {
+            for location in &parent.manifest.menus {
+                if !locations.iter().any(|l| l.location == location.location) {
+                    locations.push(location.clone());
+                }
+            }
+        }
+        locations
+    }
+
+    /// The widget areas this theme declares, then its parent's that it does not, as for
+    /// [`menu_locations`](Self::menu_locations).
+    pub fn sidebars(&self) -> Vec<Sidebar> {
+        let mut sidebars = self.manifest.sidebars.clone();
+        if let Some(parent) = self.parent() {
+            for sidebar in &parent.manifest.sidebars {
+                if !sidebars.iter().any(|s| s.id == sidebar.id) {
+                    sidebars.push(sidebar.clone());
+                }
+            }
+        }
+        sidebars
     }
 
     /// The Propel loader that renders this theme: a confined namespace named by the slug, with
