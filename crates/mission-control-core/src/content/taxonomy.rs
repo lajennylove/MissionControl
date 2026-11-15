@@ -109,6 +109,19 @@ impl NewTerm {
     }
 }
 
+/// What [`Term::update`] changes. `None` keeps a field as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TermChanges {
+    /// The name; surrounding whitespace is trimmed.
+    pub name: Option<String>,
+    /// The slug. An empty one is made from the name.
+    pub slug: Option<String>,
+    /// The description.
+    pub description: Option<String>,
+    /// The parent's `term_id`; `Some(None)` makes the term top-level.
+    pub parent_id: Option<Option<i64>>,
+}
+
 /// The most characters a term's name or slug may have: the size of the `terms.name` and
 /// `terms.slug` columns, as in WordPress.
 pub const MAX_TERM_LENGTH: usize = 200;
@@ -132,12 +145,21 @@ pub enum TermError {
     },
     /// The parent is not a term of this taxonomy (`missing_parent`).
     MissingParent,
+    /// An update gave a slug another term of the taxonomy has, without changing the parent
+    /// (`duplicate_term_slug`).
+    DuplicateSlug {
+        /// The slug.
+        slug: String,
+    },
     /// A term with this name already exists with this parent, or in this flat taxonomy
     /// (`term_exists`).
     Exists {
         /// The existing term.
         term_taxonomy_id: i64,
     },
+    /// The term is its taxonomy's default term, which is never deleted (WordPress's
+    /// `wp_delete_term` refuses it).
+    DefaultTerm,
     /// The database refused a query.
     Database(Error),
 }
@@ -159,10 +181,14 @@ impl fmt::Display for TermError {
                 "the {taxonomy} taxonomy is not hierarchical, so a term cannot have a parent"
             ),
             Self::MissingParent => f.write_str("the parent term does not exist in this taxonomy"),
+            Self::DuplicateSlug { slug } => {
+                write!(f, "the slug `{slug}` is already in use by another term")
+            }
             Self::Exists { term_taxonomy_id } => write!(
                 f,
                 "a term with this name already exists here (term {term_taxonomy_id})"
             ),
+            Self::DefaultTerm => f.write_str("the default term of a taxonomy cannot be deleted"),
             Self::Database(e) => e.fmt(f),
         }
     }
@@ -334,6 +360,123 @@ impl Term {
         .await
     }
 
+    /// Updates this term of `taxonomy` (its own) with `changes`, as WordPress's `wp_update_term`
+    /// does, and returns it as stored.
+    ///
+    /// The name, when given, is trimmed and must not be empty or longer than
+    /// [`MAX_TERM_LENGTH`] characters; unlike [`create`](Self::create), it may repeat another
+    /// term's name, as WordPress does not check names on update. A given slug is sanitized as on
+    /// create, and an empty one is made from the name; with no slug given, the term keeps its
+    /// own. A slug another term of the taxonomy has is refused ([`TermError::DuplicateSlug`]),
+    /// unless the slug was made from the name or the parent changes: then it is made unique as on
+    /// create.
+    ///
+    /// A parent must be a term of the same taxonomy, and only a hierarchical taxonomy takes one.
+    /// A parent that is the term itself or one of its descendants makes the term top-level
+    /// instead, as `wp_check_term_hierarchy_for_loops` breaks the loop.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`TermError`] for the cases above, or with the database's error. A term that is
+    /// gone fails with Orbit's [`Error::NotFound`].
+    pub async fn update(
+        &self,
+        db: &Database,
+        taxonomy: &Taxonomy,
+        changes: TermChanges,
+    ) -> Result<Self, TermError> {
+        let name = match &changes.name {
+            Some(name) => name.trim().to_owned(),
+            None => self.name.clone(),
+        };
+        if name.is_empty() {
+            return Err(TermError::EmptyName);
+        }
+        if name.chars().count() > MAX_TERM_LENGTH {
+            return Err(TermError::NameTooLong);
+        }
+        if matches!(changes.parent_id, Some(Some(_))) && !taxonomy.hierarchical {
+            return Err(TermError::NotHierarchical {
+                taxonomy: taxonomy.name,
+            });
+        }
+        let taxonomy = *taxonomy;
+        let term_id = self.term_id;
+        let term_taxonomy_id = self.term_taxonomy_id;
+        let gone = || {
+            TermError::Database(Error::NotFound {
+                table: "term_taxonomy",
+            })
+        };
+        db.transaction(async |tx| {
+            let Some(row) = TermTaxonomyRow::query()
+                .find(tx.exec(), term_taxonomy_id)
+                .await?
+                .filter(|row| row.taxonomy == taxonomy.name)
+            else {
+                return Err(gone());
+            };
+            let parent = match changes.parent_id {
+                None => row.parent_id,
+                Some(None) => None,
+                Some(Some(parent)) => {
+                    let found = TermTaxonomyRow::query()
+                        .where_eq("term_id", parent)
+                        .where_eq("taxonomy", taxonomy.name)
+                        .exists(tx.exec())
+                        .await?;
+                    if !found {
+                        return Err(TermError::MissingParent);
+                    }
+                    loop_free_parent(tx, &taxonomy, term_id, parent).await?
+                }
+            };
+            let Some(current) = TermRow::query().find(tx.exec(), term_id).await? else {
+                return Err(gone());
+            };
+            let given = changes.slug.as_deref().map(sanitize_title);
+            let (mut slug, made_from_name) = match given {
+                Some(given) if !given.is_empty() => (given, false),
+                None if !current.slug.is_empty() => (current.slug.clone(), false),
+                _ => (sanitize_title(&name), true),
+            };
+            let duplicate = find_by_slug(tx, &taxonomy, &slug).await?;
+            if duplicate.is_some_and(|t| t.term_id != term_id) {
+                if made_from_name || parent != row.parent_id {
+                    slug = unique_slug(tx, &taxonomy, slug, parent).await?;
+                } else {
+                    return Err(TermError::DuplicateSlug { slug });
+                }
+            }
+            if slug.chars().count() > MAX_TERM_LENGTH {
+                return Err(TermError::SlugTooLong);
+            }
+            let description = changes
+                .description
+                .clone()
+                .unwrap_or_else(|| row.description.clone());
+            TermRow::query()
+                .where_eq("id", term_id)
+                .update(
+                    tx.exec(),
+                    &[("name", name.clone().into()), ("slug", slug.clone().into())],
+                )
+                .await?;
+            TermTaxonomyRow::query()
+                .where_eq("id", term_taxonomy_id)
+                .update(
+                    tx.exec(),
+                    &[
+                        ("description", description.into()),
+                        ("parent_id", parent.into()),
+                    ],
+                )
+                .await?;
+            find(tx, term_taxonomy_id).await?.ok_or_else(gone)
+        })
+        .await
+    }
+
     /// The term with this `term_taxonomy_id`, if there is one.
     ///
     /// # Errors
@@ -387,15 +530,25 @@ impl Term {
 
     /// Deletes this term, as WordPress's `wp_delete_term` does: its children move to its parent
     /// (or to the top level), its post relationships go, and its `terms` row goes when no other
-    /// taxonomy uses it. Returns `false` when the term was already gone.
+    /// taxonomy uses it. A category's posts left with no category get the default one (the
+    /// `default_category` option), counted. Returns `false` when the term was already gone.
     ///
-    /// WordPress also refuses to delete the default category and gives posts left without a
-    /// category the default one; that arrives with the `default_category` option.
+    /// The taxonomy's default term (see [`default_term_ids`]) is never deleted, as WordPress
+    /// refuses it: [`TermError::DefaultTerm`].
     ///
     /// # Errors
     ///
-    /// Fails with the database's error.
-    pub async fn delete(&self, db: &Database) -> Result<bool, Error> {
+    /// [`TermError::DefaultTerm`] for the default term, or the database's error.
+    pub async fn delete(&self, db: &Database) -> Result<bool, TermError> {
+        let defaults = default_term_ids(db, &self.taxonomy).await?;
+        if defaults.contains(&self.term_id) {
+            return Err(TermError::DefaultTerm);
+        }
+        let default = if self.taxonomy == Taxonomy::CATEGORY.name {
+            defaults.first().copied()
+        } else {
+            None
+        };
         db.transaction(async |tx| {
             let Some(row) = TermTaxonomyRow::query()
                 .find(tx.exec(), self.term_taxonomy_id)
@@ -410,11 +563,23 @@ impl Term {
                 .where_eq("taxonomy", row.taxonomy.as_str())
                 .update(tx.exec(), &[("parent_id", row.parent_id.into())])
                 .await?;
+            let objects: Vec<(i64,)> = raw::fetch_all(
+                tx.exec(),
+                "SELECT object_id FROM term_relationships WHERE term_taxonomy_id = ?",
+                &[row.id.into()],
+            )
+            .await?;
             // The foreign key deletes the term's `term_relationships` rows.
             TermTaxonomyRow::query()
                 .where_eq("id", row.id)
                 .delete(tx.exec())
                 .await?;
+            if let Some(default) = default
+                && let Some(default) = find_by_term_id(tx, &Taxonomy::CATEGORY, default).await?
+            {
+                let objects: Vec<i64> = objects.into_iter().map(|(id,)| id).collect();
+                give_default_term(tx, &Taxonomy::CATEGORY, &default, &objects).await?;
+            }
             let shared = TermTaxonomyRow::query()
                 .where_eq("term_id", row.term_id)
                 .exists(tx.exec())
@@ -623,6 +788,30 @@ pub(crate) async fn terms_by_term_id(
     // Exact comparison: MySQL compares text without case.
     rows.retain(|row| row.taxonomy == taxonomy.name);
     with_terms(&mut c, rows).await
+}
+
+/// `parent` for term `term_id`, or none when `parent` is the term or one of its descendants, as
+/// `wp_check_term_hierarchy_for_loops` breaks a loop. A chain longer than 64 terms is taken as
+/// it is.
+async fn loop_free_parent<C: Conn>(
+    c: &mut C,
+    taxonomy: &Taxonomy,
+    term_id: i64,
+    parent: i64,
+) -> Result<Option<i64>, Error> {
+    let mut next = Some(parent);
+    for _ in 0..64 {
+        let Some(id) = next else {
+            break;
+        };
+        if id == term_id {
+            return Ok(None);
+        }
+        next = find_by_term_id(c, taxonomy, id)
+            .await?
+            .and_then(|t| t.parent_id);
+    }
+    Ok(Some(parent))
 }
 
 /// The term with this `term_taxonomy_id`, if there is one.
@@ -909,6 +1098,97 @@ async fn recount<C: Conn>(
     )
     .await?;
     Ok(())
+}
+
+/// The default terms of the taxonomy named `taxonomy`, which nobody may delete: the term ids in
+/// the `default_{taxonomy}` option (`default_category`) and the `default_term_{taxonomy}` option,
+/// as WordPress's `delete_term` check reads them. An option that is unset or not an id is
+/// skipped.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn default_term_ids(db: &Database, taxonomy: &str) -> Result<Vec<i64>, Error> {
+    let mut ids = Vec::new();
+    for name in [
+        format!("default_{taxonomy}"),
+        format!("default_term_{taxonomy}"),
+    ] {
+        match super::meta::get_option(db, &name).await {
+            Ok(Some(value)) => ids.extend(option_id(&value)),
+            Ok(None) | Err(super::meta::MetaError::InvalidJson(_)) => {}
+            Err(super::meta::MetaError::Database(e)) => return Err(e),
+        }
+    }
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Gives `default`, a term of `taxonomy`, to each of posts `objects` that has no term of
+/// `taxonomy` left, as `wp_delete_term` does, with one insert and one recount per 500 posts
+/// rather than one per post.
+async fn give_default_term(
+    tx: &mut Transaction,
+    taxonomy: &Taxonomy,
+    default: &Term,
+    objects: &[i64],
+) -> Result<(), Error> {
+    let mut given = false;
+    for chunk in objects.chunks(500) {
+        let mut binds = vec![Value::from(taxonomy.name)];
+        binds.extend(chunk.iter().map(|&id| Value::from(id)));
+        let kept: HashSet<i64> = raw::fetch_all::<(i64,)>(
+            tx.exec(),
+            &format!(
+                "SELECT DISTINCT r.object_id FROM term_relationships r \
+                 INNER JOIN term_taxonomy tt ON tt.id = r.term_taxonomy_id \
+                 WHERE tt.taxonomy = ? AND r.object_id IN ({})",
+                marks(chunk.len())
+            ),
+            &binds,
+        )
+        .await?
+        .into_iter()
+        .map(|(id,)| id)
+        .collect();
+        let bare: Vec<i64> = chunk
+            .iter()
+            .copied()
+            .filter(|id| !kept.contains(id))
+            .collect();
+        if bare.is_empty() {
+            continue;
+        }
+        let mut binds = Vec::with_capacity(bare.len() * 2);
+        for id in &bare {
+            binds.push(Value::from(*id));
+            binds.push(Value::from(default.term_taxonomy_id));
+        }
+        raw::execute(
+            tx.exec(),
+            &format!(
+                "INSERT INTO term_relationships (object_id, term_taxonomy_id, term_order) VALUES {}",
+                vec!["(?, ?, 0)"; bare.len()].join(", ")
+            ),
+            &binds,
+        )
+        .await?;
+        given = true;
+    }
+    if given {
+        recount(tx, taxonomy, &[default.term_taxonomy_id]).await?;
+    }
+    Ok(())
+}
+
+/// A term id stored in an option: a positive JSON number or numeric string.
+fn option_id(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|id| *id > 0)
 }
 
 /// `n` comma-separated `?` placeholders.

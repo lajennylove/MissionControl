@@ -132,10 +132,14 @@ async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
         [
             "/",
             "/wp/v2",
+            "/wp/v2/categories",
+            "/wp/v2/categories/(?P<id>[\\d]+)",
             "/wp/v2/pages",
             "/wp/v2/pages/(?P<id>[\\d]+)",
             "/wp/v2/posts",
             "/wp/v2/posts/(?P<id>[\\d]+)",
+            "/wp/v2/tags",
+            "/wp/v2/tags/(?P<id>[\\d]+)",
         ]
     );
     // A route with a regex parameter has no `self` link (Controller ruling R44).
@@ -225,10 +229,14 @@ async fn the_namespace_index_lists_its_routes() {
             routes.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "/wp/v2",
+                "/wp/v2/categories",
+                "/wp/v2/categories/(?P<id>[\\d]+)",
                 "/wp/v2/pages",
                 "/wp/v2/pages/(?P<id>[\\d]+)",
                 "/wp/v2/posts",
                 "/wp/v2/posts/(?P<id>[\\d]+)",
+                "/wp/v2/tags",
+                "/wp/v2/tags/(?P<id>[\\d]+)",
             ]
         );
         assert_eq!(routes["/wp/v2"]["namespace"], "wp/v2");

@@ -4,11 +4,14 @@
 use orbit_orm::{Model, raw};
 use serde_json::{Map, Value, json};
 
-use super::params::{Params, Reader, parse_form};
-use super::prepare::{self, Fields, ItemOptions};
-use super::{Context, PostType, PostsController, Site, database_error};
+use super::prepare::{self, ItemOptions};
+use super::{PostType, PostsController};
 use crate::content::{Post, PostStatus};
-use crate::front::{SearchTerm, decode, escape_like, search_terms};
+use crate::front::{SearchTerm, escape_like, search_terms};
+use crate::rest::params::{Params, Reader, parse_form};
+use crate::rest::shared::{
+    Context, Fields, Site, database_error, page_links, position_case, read_context, read_envelope,
+};
 use crate::rest::{RestError, RestResponse};
 
 /// The statuses a list may ask for, as `get_post_stati( array( 'internal' => false ) )` and
@@ -81,38 +84,6 @@ struct ListParams {
     terms: Vec<(&'static str, Vec<i64>, Vec<i64>)>,
     fields: Fields,
     embed: Option<Vec<String>>,
-}
-
-/// Reads `context`, defaulting to `view`.
-pub(super) fn read_context(reader: &mut Reader<'_>) -> Context {
-    match reader
-        .one_of("context", &["view", "embed", "edit"])
-        .as_deref()
-    {
-        Some("edit") => Context::Edit,
-        Some("embed") => Context::Embed,
-        _ => Context::View,
-    }
-}
-
-/// Reads `_fields` and `_embed`, which WordPress reads before any route.
-pub(super) fn read_envelope(params: &Params) -> (Fields, Option<Vec<String>>) {
-    let fields = params.get("_fields").map(|value| {
-        super::params::as_list(value)
-            .into_iter()
-            .filter_map(|v| v.as_str().map(|s| s.trim().to_owned()))
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    // `_embed`, `_embed=1` and `_embed=true` embed everything; a list embeds those relations.
-    let embed = params.get("_embed").map(|value| match value {
-        Value::String(s) if s.is_empty() || s == "1" || s == "true" => Vec::new(),
-        other => super::params::as_list(other)
-            .into_iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect(),
-    });
-    (Fields(fields), embed)
 }
 
 impl ListParams {
@@ -347,61 +318,10 @@ pub(super) async fn list(
         .with_header("X-WP-Total", total.to_string())
         .with_header("X-WP-TotalPages", max_pages.to_string());
     let base = site.rest_url(&format!("wp/v2/{}", ctl.post_type.rest_base));
-    if list.page > 1 {
-        let prev = (list.page - 1).min(max_pages.max(1));
-        response = response.with_header(
-            "Link",
-            format!("<{}>; rel=\"prev\"", with_page(&base, query, prev)),
-        );
-    }
-    if max_pages > list.page {
-        response = response.with_header(
-            "Link",
-            format!("<{}>; rel=\"next\"", with_page(&base, query, list.page + 1)),
-        );
+    for link in page_links(&base, query, list.page, max_pages) {
+        response = response.with_header("Link", link);
     }
     Ok(response)
-}
-
-/// `base` with the request's query and `page` set to `page`, as `add_query_arg` replaces it in
-/// place or adds it at the end.
-fn with_page(base: &str, query: &str, page: i64) -> String {
-    let mut pairs: Vec<(String, String)> = query
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .map(|pair| {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (decode(key, true), decode(value, true))
-        })
-        .collect();
-    let mut replaced = false;
-    for (key, value) in &mut pairs {
-        if key == "page" {
-            *value = page.to_string();
-            replaced = true;
-        }
-    }
-    if !replaced {
-        pairs.push(("page".to_owned(), page.to_string()));
-    }
-    let query: Vec<String> = pairs
-        .iter()
-        .map(|(key, value)| format!("{}={}", url_encode(key), url_encode(value)))
-        .collect();
-    format!("{base}?{}", query.join("&"))
-}
-
-/// PHP's `urlencode`: letters, digits and `-_.` kept, a space as `+`, the rest `%XX`.
-fn url_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
-            b' ' => out.push('+'),
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 /// `get_item`.
@@ -639,17 +559,6 @@ async fn fetch(
     Ok(posts)
 }
 
-/// `CASE column WHEN ? THEN 0 WHEN ? THEN 1 ... ELSE n END`: the position in a list, as MySQL's
-/// `FIELD` orders, on every database.
-fn position_case(column: &str, n: usize) -> String {
-    let mut case = format!("CASE {column}");
-    for i in 0..n {
-        case.push_str(&format!(" WHEN ? THEN {i}"));
-    }
-    case.push_str(&format!(" ELSE {n} END"));
-    case
-}
-
 /// WordPress's search order (`WP_Query::parse_search_order`): with one term, posts whose title
 /// has it first; with more, the whole phrase in the title, then every term in the title, then
 /// any term in the title, then the phrase in the excerpt, then in the content.
@@ -773,26 +682,6 @@ pub(super) fn collection_args(post_type: &PostType) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pagination_links_replace_or_add_the_page() {
-        assert_eq!(
-            with_page("http://x/wp-json/wp/v2/posts", "per_page=2&page=3", 2),
-            "http://x/wp-json/wp/v2/posts?per_page=2&page=2"
-        );
-        assert_eq!(
-            with_page("http://x/wp-json/wp/v2/posts", "search=a+b", 2),
-            "http://x/wp-json/wp/v2/posts?search=a+b&page=2"
-        );
-    }
-
-    #[test]
-    fn include_order_is_a_case() {
-        assert_eq!(
-            position_case("p.id", 2),
-            "CASE p.id WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END"
-        );
-    }
 
     #[test]
     fn passwords_compare_whole() {

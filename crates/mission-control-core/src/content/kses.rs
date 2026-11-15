@@ -1457,6 +1457,50 @@ fn decode_serialized_text(text: &str) -> String {
     out
 }
 
+/// `text` as WordPress's `sanitize_text_field` leaves a one-line field such as a term's name, in
+/// Mission Control's plain-text form: the tags stripped and the entities decoded as
+/// [`kses_title`] does (Ruling R39), runs of spaces, tabs and line breaks made one space,
+/// percent-encoded octets (`%20`) removed, and the ends trimmed.
+///
+/// WordPress also encodes `&`, `<` and `>` as entities (`_wp_specialchars`) when it saves a
+/// term's name; here the name is stored as text and escaped where it is printed, as a title is.
+pub fn sanitize_text_field(text: &str) -> String {
+    let collapse = |text: &str, chars: &[char]| {
+        let mut out = String::with_capacity(text.len());
+        let mut in_run = false;
+        for c in text.chars() {
+            if chars.contains(&c) {
+                if !in_run {
+                    out.push(' ');
+                }
+                in_run = true;
+            } else {
+                out.push(c);
+                in_run = false;
+            }
+        }
+        out
+    };
+    let mut text = collapse(&kses_title(text), &['\r', '\n', '\t', ' '])
+        .trim()
+        .to_owned();
+    let mut found = false;
+    loop {
+        let bytes = text.as_bytes();
+        let Some(at) = (0..bytes.len().saturating_sub(2)).find(|&i| {
+            bytes[i] == b'%' && bytes[i + 1].is_ascii_hexdigit() && bytes[i + 2].is_ascii_hexdigit()
+        }) else {
+            break;
+        };
+        text.replace_range(at..at + 3, "");
+        found = true;
+    }
+    if found {
+        text = collapse(&text, &[' ']).trim().to_owned();
+    }
+    text
+}
+
 /// The fields of a post that kses filters on save: its title, content and excerpt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostFields {

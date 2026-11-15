@@ -3,8 +3,11 @@
 //!
 //! Ported from WordPress 6.7 (`wp-includes/capabilities.php`, single site) for the post meta
 //! capabilities: `edit_post`, `delete_post`, `read_post` and `publish_post`, their `_page`
-//! names, and `edit_post_meta`, `add_post_meta` and `delete_post_meta`. Every other
-//! capability maps to itself, so `edit_posts` or `read_private_posts` are checked as they are.
+//! names, and `edit_post_meta`, `add_post_meta` and `delete_post_meta`; and for the term meta
+//! capabilities `edit_term`, `delete_term` and `assign_term`, with the category and tag
+//! capabilities WordPress maps (`edit_post_tags` and the like to `manage_categories`,
+//! `assign_categories` and `assign_post_tags` to `edit_posts`). Every other capability maps to
+//! itself, so `edit_posts` or `read_private_posts` are checked as they are.
 //!
 //! The site's special pages count as WordPress counts them: deleting the front page or the
 //! posts page needs `manage_options`, and editing or deleting the privacy policy page needs it
@@ -23,8 +26,10 @@
 //!   TODO(Task 5.2): read each type's capabilities from the post type registry, and map a custom
 //!   type's own meta capabilities (`edit_book`), as WordPress's `$post_type_meta_caps` does.
 //! - **The `map_meta_cap`, `user_has_cap` and `auth_post_meta_*` filters**, and the user,
-//!   comment, term, plugin, theme and multisite meta capabilities: they map to themselves here,
-//!   so they are refused unless granted by name.
+//!   comment, term meta (`edit_term_meta`), plugin, theme and multisite meta capabilities: they
+//!   map to themselves here, so they are refused unless granted by name.
+//! - **Taxonomy capabilities.** As for post types, a taxonomy's capability names come from an
+//!   interim rule (see [`TaxonomyCaps::for_taxonomy`]) until taxonomies are registered.
 
 use crate::content::{Post, PostStatus};
 
@@ -47,14 +52,91 @@ pub enum Object<'a> {
         /// The meta key, such as `_thumbnail_id` or `subtitle`.
         key: &'a str,
     },
+    /// A term, for `edit_term`, `delete_term` and `assign_term`.
+    Term(TermContext<'a>),
 }
 
 impl<'a> Object<'a> {
-    /// The post and its context.
-    fn post(&self) -> PostContext<'a> {
+    /// The post and its context, for a post object.
+    fn post(&self) -> Option<PostContext<'a>> {
         match *self {
-            Self::Post(post) => PostContext::new(post),
-            Self::PostWithContext(context) | Self::PostMeta { post: context, .. } => context,
+            Self::Post(post) => Some(PostContext::new(post)),
+            Self::PostWithContext(context) | Self::PostMeta { post: context, .. } => Some(context),
+            Self::Term(_) => None,
+        }
+    }
+}
+
+/// A term and what `map_meta_cap` reads beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TermContext<'a> {
+    /// The term's `term_id`.
+    pub term_id: i64,
+    /// The term's taxonomy, such as `category`.
+    pub taxonomy: &'a str,
+    /// The taxonomy's default terms, which nobody may delete: the ids in the
+    /// `default_{taxonomy}` option (`default_category`) and the `default_term_{taxonomy}` option,
+    /// as [`default_term_ids`](crate::content::default_term_ids) reads them.
+    pub default_terms: &'a [i64],
+}
+
+/// The primitive capability names of one taxonomy, as `register_taxonomy` sets its `cap`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaxonomyCaps {
+    /// `manage_terms`: see the taxonomy's terms in the admin.
+    pub manage_terms: String,
+    /// `edit_terms`: create and edit terms.
+    pub edit_terms: String,
+    /// `delete_terms`.
+    pub delete_terms: String,
+    /// `assign_terms`: give a post terms.
+    pub assign_terms: String,
+}
+
+impl TaxonomyCaps {
+    /// The capability names of `taxonomy`, as WordPress registers its own taxonomies:
+    ///
+    /// - `category`: `manage_categories`, `edit_categories`, `delete_categories` and
+    ///   `assign_categories`, as WordPress 4.7 names them; [`map_meta_cap`] maps them to
+    ///   `manage_categories` and `edit_posts`.
+    /// - `post_tag`: `manage_post_tags`, `edit_post_tags`, `delete_post_tags` and
+    ///   `assign_post_tags`, which [`map_meta_cap`] maps to `manage_categories` and `edit_posts`.
+    /// - `nav_menu`: `edit_theme_options` for everything.
+    /// - Any other taxonomy: `register_taxonomy`'s defaults, as for categories.
+    ///
+    /// TODO(Task 5.x): read a custom taxonomy's capabilities from its registration.
+    pub fn for_taxonomy(taxonomy: &str) -> Self {
+        let caps = |manage: &str, edit: &str, delete: &str, assign: &str| Self {
+            manage_terms: manage.to_owned(),
+            edit_terms: edit.to_owned(),
+            delete_terms: delete.to_owned(),
+            assign_terms: assign.to_owned(),
+        };
+        match taxonomy {
+            "post_tag" => caps(
+                "manage_post_tags",
+                "edit_post_tags",
+                "delete_post_tags",
+                "assign_post_tags",
+            ),
+            "nav_menu" => caps(
+                "edit_theme_options",
+                "edit_theme_options",
+                "edit_theme_options",
+                "edit_theme_options",
+            ),
+            "category" => caps(
+                "manage_categories",
+                "edit_categories",
+                "delete_categories",
+                "assign_categories",
+            ),
+            _ => caps(
+                "manage_categories",
+                "manage_categories",
+                "manage_categories",
+                "edit_posts",
+            ),
         }
     }
 }
@@ -278,6 +360,25 @@ pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<
         "edit_post_meta" | "add_post_meta" | "delete_post_meta" => {
             on_post(object, |post| post_meta(cap, user, post, object))
         }
+        "manage_post_tags" | "edit_categories" | "edit_post_tags" | "delete_categories"
+        | "delete_post_tags" => vec!["manage_categories".to_owned()],
+        "assign_categories" | "assign_post_tags" => vec!["edit_posts".to_owned()],
+        "edit_term" | "delete_term" | "assign_term" => match object {
+            Some(Object::Term(term)) => {
+                if cap == "delete_term" && term.default_terms.contains(&term.term_id) {
+                    deny()
+                } else {
+                    let caps = TaxonomyCaps::for_taxonomy(term.taxonomy);
+                    let primitive = match cap {
+                        "edit_term" => caps.edit_terms,
+                        "delete_term" => caps.delete_terms,
+                        _ => caps.assign_terms,
+                    };
+                    map_meta_cap(&primitive, user, None)
+                }
+            }
+            _ => deny(),
+        },
         _ => vec![cap.to_owned()],
     };
     dedup(caps)
@@ -342,10 +443,10 @@ fn deny() -> Vec<String> {
 }
 
 /// Maps a post meta capability with `map` when `object` is a post, or to [`DO_NOT_ALLOW`] when
-/// there is no object.
+/// there is no object or it is not a post.
 fn on_post(object: Option<&Object>, map: impl FnOnce(PostContext) -> Vec<String>) -> Vec<String> {
-    match object {
-        Some(object) => map(object.post()),
+    match object.and_then(Object::post) {
+        Some(post) => map(post),
         None => deny(),
     }
 }

@@ -27,5 +27,7 @@ pub use capabilities::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, EXIST, Role, SUBSCRIBER, UserCaps,
     default_role, default_roles, has_cap,
 };
-pub use meta_cap::{Object, PostContext, PostTypeCaps, SitePages, can, map_meta_cap};
+pub use meta_cap::{
+    Object, PostContext, PostTypeCaps, SitePages, TaxonomyCaps, TermContext, can, map_meta_cap,
+};
 pub use user_roles::{InMemoryUserRoles, NoUserRoles, RoleAssignment, RolesFuture, UserRoles};

@@ -11,12 +11,13 @@ use chrono::{FixedOffset, NaiveDateTime};
 use orbit_orm::{Database, Value as Sql, raw};
 use serde_json::{Map, Value, json};
 
+use super::PostsController;
 use super::query::constant_time_eq;
-use super::{Context, PostsController, Site, database_error};
 use crate::content::{Post, PostStatus, make_slug, now};
 use crate::front::{post_links, term_links, trim_excerpt};
 use crate::hooks::THE_CONTENT;
 use crate::rest::RestError;
+use crate::rest::shared::{Context, Fields, Site, curies, database_error};
 use crate::text::{escape_html, html_class};
 
 /// How many ids one `IN (...)` binds.
@@ -25,72 +26,6 @@ const IN_CHUNK: usize = 500;
 /// The post meta the response reads.
 const THUMBNAIL: &str = "_thumbnail_id";
 const TEMPLATE: &str = "_wp_page_template";
-
-/// The `_fields` of a request: `None` for every field.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Fields(pub(crate) Option<Vec<String>>);
-
-impl Fields {
-    /// Whether `field` (a dotted path) is in the response, as `rest_is_field_included`: it is
-    /// named, a parent of it is named, or a field under it is named.
-    pub(crate) fn includes(&self, field: &str) -> bool {
-        let Some(fields) = &self.0 else {
-            return true;
-        };
-        fields.iter().any(|f| {
-            f == field
-                || field
-                    .strip_prefix(f.as_str())
-                    .is_some_and(|rest| rest.starts_with('.'))
-                || f.strip_prefix(field)
-                    .is_some_and(|rest| rest.starts_with('.'))
-        })
-    }
-
-    /// `item` with only the named fields, as `rest_filter_response_fields`: `title` keeps the
-    /// whole title, `title.rendered` only its rendered text.
-    pub(crate) fn filter(&self, item: Map<String, Value>) -> Map<String, Value> {
-        let Some(fields) = &self.0 else {
-            return item;
-        };
-        let mut tree = FieldTree::default();
-        for field in fields {
-            tree.add(field.split('.'));
-        }
-        tree.keep(item)
-    }
-}
-
-/// The named fields as a tree: a leaf keeps a whole value.
-#[derive(Debug, Default)]
-struct FieldTree {
-    leaf: bool,
-    children: BTreeMap<String, FieldTree>,
-}
-
-impl FieldTree {
-    fn add<'a>(&mut self, mut path: impl Iterator<Item = &'a str>) {
-        match path.next() {
-            None => self.leaf = true,
-            Some(name) => self.children.entry(name.to_owned()).or_default().add(path),
-        }
-    }
-
-    fn keep(&self, mut item: Map<String, Value>) -> Map<String, Value> {
-        let mut kept = Map::new();
-        for (name, child) in &self.children {
-            let Some(value) = item.remove(name) else {
-                continue;
-            };
-            if child.leaf {
-                kept.insert(name.clone(), value);
-            } else if let Value::Object(object) = value {
-                kept.insert(name.clone(), Value::Object(child.keep(object)));
-            }
-        }
-        kept
-    }
-}
 
 /// How the posts of a request are shown.
 #[derive(Debug, Clone)]
@@ -585,10 +520,7 @@ fn links(
             }
         }
     }
-    put(
-        "curies",
-        json!([{"name": "wp", "href": "https://api.w.org/{rel}", "templated": true}]),
-    );
+    put("curies", curies());
     links
 }
 
@@ -906,35 +838,6 @@ async fn sample_links(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fields(list: &[&str]) -> Fields {
-        Fields(Some(list.iter().map(|s| (*s).to_owned()).collect()))
-    }
-
-    #[test]
-    fn fields_are_included_by_name_parent_or_child() {
-        let f = fields(&["id", "title.rendered", "content"]);
-        assert!(f.includes("id"));
-        assert!(f.includes("title"));
-        assert!(f.includes("title.rendered"));
-        assert!(!f.includes("title.raw"));
-        assert!(f.includes("content.raw"));
-        assert!(!f.includes("_links"));
-        assert!(Fields(None).includes("_links"));
-    }
-
-    #[test]
-    fn fields_filter_nested_values() {
-        let item = json!({"id": 1, "title": {"raw": "a", "rendered": "b"}, "slug": "s"});
-        let Value::Object(item) = item else {
-            unreachable!()
-        };
-        let kept = fields(&["title.rendered", "id"]).filter(item);
-        assert_eq!(
-            Value::Object(kept),
-            json!({"id": 1, "title": {"rendered": "b"}})
-        );
-    }
 
     #[test]
     fn the_view_context_hides_raw_fields() {

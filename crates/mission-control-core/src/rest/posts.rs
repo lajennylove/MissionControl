@@ -18,7 +18,7 @@
 //!   taxonomies (`categories`, `tags` and their `_exclude`), and answer with `X-WP-Total`,
 //!   `X-WP-TotalPages` and `Link` (`prev`, `next`) headers. A status other than `publish` needs
 //!   the type's `edit_posts` (or `read_private_posts` for `private`).
-//! - Writes check capabilities with [`can`](crate::users::can) and the site's special pages:
+//! - Writes check capabilities with [`can`] and the site's special pages:
 //!   creating needs `edit_posts` (with `publish_posts` to publish, `edit_others_posts` to write
 //!   as someone else), updating `edit_post` and deleting `delete_post`. A delete trashes the post,
 //!   or deletes it for good with `force=true`.
@@ -43,29 +43,22 @@
 //! embedding featured media (the media routes do not exist yet), autosaves and revisions routes,
 //! and the `?rest_route=` form for these routes.
 
-mod params;
 mod prepare;
 mod query;
 mod write;
 
-pub use params::{MAX_INPUT_VARS, Params, parse_form};
+use std::sync::{RwLock, RwLockReadGuard};
 
-use std::sync::{Arc, RwLock, RwLockReadGuard};
-
-use chrono::FixedOffset;
 use orbit_orm::{Database, Model};
 use serde_json::{Map, Value, json};
-use tokio::sync::Semaphore;
 
-use crate::content::{
-    FieldTooLarge, MetaError, PermalinkStructure, Post, PostFields, PostStatus, Taxonomy,
-    get_option, get_post_meta, kses_post_fields,
-};
-use crate::front::site_address;
+use super::params::Params;
+use super::shared::{Site, authorization_status, database_error};
+use crate::content::{MetaError, Post, PostStatus, Taxonomy, get_post_meta};
 use crate::hooks::Hooks;
-use crate::rest::{Endpoint, RestError, RestRoutes, RouteSpec};
+use crate::rest::{Endpoint, KsesLimiter, RestError, RestRoutes, RouteSpec};
 use crate::theme::Theme;
-use crate::users::{Object, PostContext, PostTypeCaps, SitePages, UserCaps, can, has_cap};
+use crate::users::{Object, PostContext, PostTypeCaps, UserCaps, can, has_cap};
 
 /// A taxonomy as a post type shows it in the REST API: the taxonomy and the name of its field
 /// and route (`rest_base`).
@@ -227,8 +220,8 @@ impl PostTypes {
         }
     }
 
-    /// Adds `post_type`, replacing a type with the same name. Call [`register_routes`]
-    /// (Self::register_routes) afterwards so discovery lists it.
+    /// Adds `post_type`, replacing a type with the same name. Call
+    /// [`register_routes`](Self::register_routes) afterwards so discovery lists it.
     pub fn register(&self, post_type: PostType) {
         let mut types = self.types.write().unwrap_or_else(|e| e.into_inner());
         types.retain(|t| t.name != post_type.name);
@@ -240,6 +233,14 @@ impl PostTypes {
         self.read()
             .iter()
             .find(|t| t.show_in_rest && t.rest_base == rest_base)
+            .cloned()
+    }
+
+    /// The type named `name`, if one is shown in the REST API.
+    pub fn by_name(&self, name: &str) -> Option<PostType> {
+        self.read()
+            .iter()
+            .find(|t| t.show_in_rest && t.name == name)
             .cloned()
     }
 
@@ -315,186 +316,6 @@ fn route_specs(post_type: &PostType) -> [RouteSpec; 2] {
             ],
         ),
     ]
-}
-
-/// Bounds how many kses filters run at once, each on a blocking thread, so a burst of saves
-/// cannot take every core (Rulings R37 and R45). The app holds one, shared by every request.
-#[derive(Debug, Clone)]
-pub struct KsesLimiter {
-    permits: Arc<Semaphore>,
-}
-
-impl Default for KsesLimiter {
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_CONCURRENCY)
-    }
-}
-
-impl KsesLimiter {
-    /// How many filters run at once by default.
-    pub const DEFAULT_CONCURRENCY: usize = 4;
-
-    /// A limiter that runs at most `concurrency` filters at once (at least one).
-    pub fn new(concurrency: usize) -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(concurrency.max(1))),
-        }
-    }
-
-    /// `fields` as they may be stored for `user` ([`kses_post_fields`]), filtered on a blocking
-    /// thread once a permit is free.
-    ///
-    /// # Errors
-    ///
-    /// `rest_content_too_large` (413) when a field is too long to filter, or a 500 when the
-    /// filter's thread fails.
-    pub async fn filter(
-        &self,
-        user: &UserCaps,
-        fields: PostFields,
-    ) -> Result<PostFields, RestError> {
-        let permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(|e| {
-                log::error!("The kses limiter is closed: {e}");
-                RestError::internal()
-            })?;
-        let user = user.clone();
-        let filtered = tokio::task::spawn_blocking(move || {
-            let filtered = kses_post_fields(&user, fields);
-            drop(permit);
-            filtered
-        })
-        .await
-        .map_err(|e| {
-            log::error!("The kses filter failed: {e}");
-            RestError::internal()
-        })?;
-        filtered.map_err(|e| too_large(&e))
-    }
-}
-
-/// `rest_content_too_large`, 413, for a field kses will not filter.
-fn too_large(error: &FieldTooLarge) -> RestError {
-    RestError::new(
-        "rest_content_too_large",
-        format!("The {} is too large to save: {error}.", error.field),
-        413,
-    )
-    .with_data("field", json!(error.field))
-}
-
-/// The options a request reads, once.
-#[derive(Debug, Clone)]
-pub(crate) struct Site {
-    /// `home`, without a trailing slash.
-    pub(crate) home: String,
-    /// `permalink_structure`; plain when unset or not valid.
-    pub(crate) structure: PermalinkStructure,
-    /// `gmt_offset`.
-    pub(crate) offset: FixedOffset,
-    /// `sticky_posts`.
-    pub(crate) sticky: Vec<i64>,
-    /// `page_on_front`, `page_for_posts` and `wp_page_for_privacy_policy`.
-    pub(crate) pages: SitePages,
-    /// `default_category`.
-    pub(crate) default_category: Option<i64>,
-}
-
-impl Site {
-    /// Reads the options. A value that is not valid JSON counts as unset.
-    pub(crate) async fn load(db: &Database) -> Result<Self, RestError> {
-        let structure = text(&option(db, "permalink_structure").await?)
-            .parse()
-            .unwrap_or_else(|e| {
-                log::warn!(
-                    "The permalink_structure option is not valid ({e}); plain links are used."
-                );
-                PermalinkStructure::plain()
-            });
-        let hours = number(&option(db, "gmt_offset").await?).unwrap_or(0.0);
-        let offset = FixedOffset::east_opt((hours * 3600.0).round() as i32)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero is a valid offset"));
-        let sticky = match option(db, "sticky_posts").await? {
-            Some(Value::Array(ids)) => ids.iter().filter_map(id_of).collect(),
-            _ => Vec::new(),
-        };
-        let page = async |name| -> Result<Option<i64>, RestError> {
-            Ok(option(db, name).await?.as_ref().and_then(id_of))
-        };
-        Ok(Self {
-            home: site_address(&text(&option(db, "home").await?)),
-            structure,
-            offset,
-            sticky,
-            pages: SitePages {
-                page_on_front: page("page_on_front").await?,
-                page_for_posts: page("page_for_posts").await?,
-                privacy_policy: page("wp_page_for_privacy_policy").await?,
-            },
-            default_category: page("default_category").await?,
-        })
-    }
-
-    /// `rest_url( path )`: `path` (no leading slash) under the API.
-    pub(crate) fn rest_url(&self, path: &str) -> String {
-        format!("{}/{}/{path}", self.home, super::discovery::REST_PREFIX)
-    }
-}
-
-/// Option `name`, with a value that is not valid JSON counted as unset.
-async fn option(db: &Database, name: &str) -> Result<Option<Value>, RestError> {
-    match get_option(db, name).await {
-        Ok(value) => Ok(value),
-        Err(MetaError::InvalidJson(_)) => Ok(None),
-        Err(MetaError::Database(e)) => Err(database_error(&e)),
-    }
-}
-
-/// An option's text; empty when unset or not text.
-fn text(value: &Option<Value>) -> String {
-    match value {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => String::new(),
-    }
-}
-
-/// An option's number, from a JSON number or a numeric string.
-fn number(value: &Option<Value>) -> Option<f64> {
-    match value {
-        Some(Value::Number(n)) => n.as_f64(),
-        Some(Value::String(s)) => s.trim().parse().ok(),
-        _ => None,
-    }
-}
-
-/// A positive id from a JSON number or a numeric string; 0 (WordPress's "none") is `None`.
-fn id_of(value: &Value) -> Option<i64> {
-    let n = match value {
-        Value::Number(n) => n.as_i64()?,
-        Value::String(s) => s.trim().parse().ok()?,
-        _ => return None,
-    };
-    (n > 0).then_some(n)
-}
-
-/// A database error, logged, as WordPress's 500.
-pub(crate) fn database_error(error: &dyn std::fmt::Display) -> RestError {
-    log::error!("A REST posts request failed: {error}");
-    RestError::internal()
-}
-
-/// The request's `context`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Context {
-    /// `view`, the default.
-    View,
-    /// `embed`: the fields an embedding response shows.
-    Embed,
-    /// `edit`: the raw fields, for users who may edit.
-    Edit,
 }
 
 /// One request to the posts controller for one post type.
@@ -662,7 +483,7 @@ impl PostsController<'_> {
 
     /// WordPress's `rest_authorization_required_code`: 401 for a visitor, 403 for a user.
     fn auth_status(&self) -> u16 {
-        if self.user.id() == 0 { 401 } else { 403 }
+        authorization_status(self.user)
     }
 
     /// An error with the status `rest_authorization_required_code` gives.
@@ -723,17 +544,5 @@ mod tests {
         let [collection, item] = route_specs(&PostType::post());
         assert_eq!(collection.methods(), ["GET", "POST"]);
         assert_eq!(item.methods(), ["GET", "POST", "PUT", "PATCH", "DELETE"]);
-    }
-
-    #[test]
-    fn field_too_large_is_413() {
-        let error = too_large(&FieldTooLarge {
-            field: "content",
-            size: 10,
-        });
-        assert_eq!(
-            (error.code.as_ref(), error.status),
-            ("rest_content_too_large", 413)
-        );
     }
 }

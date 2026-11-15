@@ -20,12 +20,13 @@
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
 //! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
-//! REST API serves (`Arc<PostTypes>`), the kses limiter (`Arc<KsesLimiter>`) and the front end
-//! (`Arc<Frontend>`). The scheduler's loop starts
+//! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the kses
+//! limiter (`Arc<KsesLimiter>`) and the front end (`Arc<Frontend>`). The scheduler's loop starts
 //! at liftoff, once the server listens, and runs due events every minute.
 //!
-//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, and posts, pages and every
-//! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`. REST clients sign in with
+//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, posts, pages and every
+//! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`, and categories, tags and every
+//! taxonomy in [`Taxonomies`] the same way. REST clients sign in with
 //! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
 //! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
 //! role). Not mounted yet: the admin (Ignite).
@@ -42,8 +43,9 @@ use mission_control_core::config::Config;
 use mission_control_core::content::{Shortcodes, register_publish_future_post};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
-use mission_control_core::rest::RestRoutes;
-use mission_control_core::rest::posts::{KsesLimiter, PostTypes};
+use mission_control_core::rest::posts::PostTypes;
+use mission_control_core::rest::terms::Taxonomies;
+use mission_control_core::rest::{KsesLimiter, RestRoutes};
 use mission_control_core::scheduler::Scheduler;
 use mission_control_core::users::{NoUserRoles, UserRoles};
 use orbit_orm::Database;
@@ -118,6 +120,8 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let rest_routes = Arc::new(RestRoutes::new());
     let post_types = Arc::new(PostTypes::new());
     post_types.register_routes(&rest_routes);
+    let taxonomies = Arc::new(Taxonomies::new());
+    taxonomies.register_routes(&rest_routes);
     let kses = Arc::new(KsesLimiter::new(
         kses_concurrency.unwrap_or(KsesLimiter::DEFAULT_CONCURRENCY),
     ));
@@ -132,6 +136,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(shortcodes)
         .manage(rest_routes)
         .manage(post_types)
+        .manage(taxonomies)
         .manage(kses)
         .manage(auth)
         .mount("/", rest::routes(REST_RANK))

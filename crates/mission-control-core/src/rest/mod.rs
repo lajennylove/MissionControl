@@ -1,11 +1,14 @@
 //! The REST API: the route registry, the discovery documents and authentication, in WordPress's
 //! shape.
 //!
-//! [`RestRoutes`] lists every route the API serves. Each route group (posts, users, a plugin's
-//! namespace) registers its routes on it, and [`discovery`] builds `GET /wp-json/` and each
-//! namespace index from it, so discovery never changes when a route is added. [`auth`] decides
-//! who a request runs as, and [`RestError`] is WordPress's error body. The core types here hold
-//! no Rocket types: the `mission-control` crate mounts them.
+//! [`RestRoutes`] lists every route the API serves. Each route group (posts, terms, users, a
+//! plugin's namespace) registers its routes on it, and [`discovery`] builds `GET /wp-json/` and
+//! each namespace index from it, so discovery never changes when a route is added. [`auth`]
+//! decides who a request runs as, and [`RestError`] is WordPress's error body. [`posts`] and
+//! [`terms`] are WordPress's posts and terms controllers; [`params`] reads a request's
+//! parameters as `WP_REST_Request` holds them, and [`KsesLimiter`] runs the controllers' kses
+//! filters off the async threads. The core types here hold no Rocket types: the
+//! `mission-control` crate mounts them.
 //!
 //! ```
 //! use mission_control_core::rest::{Endpoint, RestRoutes, RouteSpec};
@@ -21,7 +24,13 @@
 
 pub mod auth;
 pub mod discovery;
+pub mod params;
 pub mod posts;
+mod shared;
+pub mod terms;
+
+pub use params::{MAX_INPUT_VARS, Params, parse_form};
+pub use shared::KsesLimiter;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

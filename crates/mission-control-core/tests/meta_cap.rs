@@ -9,7 +9,7 @@ use chrono::NaiveDateTime;
 use mission_control_core::content::{Post, PostStatus};
 use mission_control_core::users::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, Object, PostContext, SUBSCRIBER,
-    SitePages, UserCaps, can, map_meta_cap,
+    SitePages, TaxonomyCaps, TermContext, UserCaps, can, map_meta_cap,
 };
 
 /// `post` on a site with none of the special pages set.
@@ -713,4 +713,101 @@ fn per_user_grants_count_in_meta_checks() {
         "edit_post",
         Some(&Object::Post(&others_private))
     ));
+}
+
+/// A term of `taxonomy`, with term 1 as the taxonomy's default.
+fn term(term_id: i64, taxonomy: &str) -> Object<'_> {
+    Object::Term(TermContext {
+        term_id,
+        taxonomy,
+        default_terms: &[1],
+    })
+}
+
+#[test]
+fn term_capabilities_map_as_wordpress_maps_them() {
+    // The tag capabilities map to the category ones, as `map_meta_cap` maps them.
+    for cap in [
+        "manage_post_tags",
+        "edit_post_tags",
+        "delete_post_tags",
+        "edit_categories",
+        "delete_categories",
+    ] {
+        assert_eq!(mapped(cap, None), ["manage_categories"], "{cap}");
+    }
+    for cap in ["assign_post_tags", "assign_categories"] {
+        assert_eq!(mapped(cap, None), ["edit_posts"], "{cap}");
+    }
+    assert_eq!(
+        mapped("edit_term", Some(&term(2, "post_tag"))),
+        ["manage_categories"]
+    );
+    assert_eq!(
+        mapped("assign_term", Some(&term(2, "post_tag"))),
+        ["edit_posts"]
+    );
+    assert_eq!(
+        mapped("delete_term", Some(&term(2, "category"))),
+        ["manage_categories"]
+    );
+    // The default term cannot be deleted, and a term check needs a term.
+    assert_eq!(
+        mapped("delete_term", Some(&term(1, "category"))),
+        [DO_NOT_ALLOW]
+    );
+    assert_eq!(mapped("edit_term", None), [DO_NOT_ALLOW]);
+    // WordPress 4.7's category names, which map back to the primitive capabilities.
+    let category = TaxonomyCaps::for_taxonomy("category");
+    assert_eq!(
+        [
+            category.manage_terms.as_str(),
+            category.edit_terms.as_str(),
+            category.delete_terms.as_str(),
+            category.assign_terms.as_str(),
+        ],
+        [
+            "manage_categories",
+            "edit_categories",
+            "delete_categories",
+            "assign_categories"
+        ]
+    );
+    assert_eq!(mapped(&category.assign_terms, None), ["edit_posts"]);
+    assert_eq!(mapped(&category.edit_terms, None), ["manage_categories"]);
+    // A term that is the default by either option cannot be deleted.
+    let by_term_option = Object::Term(TermContext {
+        term_id: 7,
+        taxonomy: "genre",
+        default_terms: &[3, 7],
+    });
+    assert_eq!(mapped("delete_term", Some(&by_term_option)), [DO_NOT_ALLOW]);
+}
+
+#[test]
+fn editors_manage_terms_and_authors_assign_them() {
+    let tag = term(2, "post_tag");
+    let category = term(3, "category");
+    for (role, manage) in [
+        (ADMINISTRATOR, true),
+        (EDITOR, true),
+        (AUTHOR, false),
+        (CONTRIBUTOR, false),
+        (SUBSCRIBER, false),
+    ] {
+        let user = user(role);
+        for object in [&tag, &category] {
+            assert_eq!(can(&user, "edit_term", Some(object)), manage, "{role}");
+            assert_eq!(can(&user, "delete_term", Some(object)), manage, "{role}");
+            assert_eq!(
+                can(&user, "assign_term", Some(object)),
+                role != SUBSCRIBER,
+                "{role}"
+            );
+        }
+        assert!(
+            !can(&user, "delete_term", Some(&term(1, "category"))),
+            "{role}"
+        );
+    }
 }

@@ -4,7 +4,8 @@
 
 use chrono::{Duration, SubsecRound, Utc};
 use mission_control_core::content::{
-    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermError, check_and_publish_future_post,
+    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermChanges, TermError,
+    check_and_publish_future_post, set_option,
 };
 use mission_control_core::migrations::migrator;
 use mission_control_testing::{create_users_table, database, unique_email};
@@ -695,4 +696,292 @@ async fn a_scheduled_publish_counts_the_post() {
 
     assert!(check_and_publish_future_post(db, post.id).await.unwrap());
     assert_eq!(count_of(db, &news).await, 1);
+}
+
+#[tokio::test]
+async fn update_changes_the_name_description_and_parent() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    let food = category(db, "Food", None).await;
+    let fruit = category(db, "Fruit", None).await;
+
+    let updated = fruit
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                name: Some("  Fresh fruit ".into()),
+                description: Some("Apples and pears".into()),
+                parent_id: Some(Some(food.term_id)),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "Fresh fruit");
+    // The slug stays when none is given, as `wp_update_term` keeps it.
+    assert_eq!(updated.slug, "fruit");
+    assert_eq!(updated.description, "Apples and pears");
+    assert_eq!(updated.parent_id, Some(food.term_id));
+    assert_eq!(
+        Term::find(db, fruit.term_taxonomy_id).await.unwrap(),
+        Some(updated.clone())
+    );
+
+    // An empty slug is made from the name; a given one is sanitized.
+    let renamed = updated
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                slug: Some(String::new()),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.slug, "fresh-fruit");
+    let renamed = renamed
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                slug: Some("Ripe Fruit".into()),
+                parent_id: Some(None),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (renamed.slug.as_str(), renamed.parent_id),
+        ("ripe-fruit", None)
+    );
+}
+
+#[tokio::test]
+async fn update_refuses_what_wp_update_term_refuses() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    let food = category(db, "Food", None).await;
+    let fruit = category(db, "Fruit", None).await;
+    let rust = tag(db, "Rust").await;
+
+    let err = fruit
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                name: Some("   ".into()),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TermError::EmptyName), "{err:?}");
+
+    // Another term's slug, with the parent unchanged: `duplicate_term_slug`.
+    let err = fruit
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                slug: Some("food".into()),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, TermError::DuplicateSlug { slug } if slug == "food"),
+        "{err:?}"
+    );
+
+    let err = rust
+        .update(
+            db,
+            &Taxonomy::POST_TAG,
+            TermChanges {
+                parent_id: Some(Some(food.term_id)),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TermError::NotHierarchical { .. }), "{err:?}");
+
+    let err = fruit
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                parent_id: Some(Some(rust.term_id)),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TermError::MissingParent), "{err:?}");
+}
+
+#[tokio::test]
+async fn update_breaks_a_parent_loop_and_makes_a_moved_slug_unique() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    let food = category(db, "Food", None).await;
+    let fruit = category(db, "Fruit", Some(&food)).await;
+    let apple = category(db, "Apple", Some(&fruit)).await;
+
+    // Food under its own grandchild: `wp_check_term_hierarchy_for_loops` makes it top-level.
+    let food = food
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                parent_id: Some(Some(apple.term_id)),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(food.parent_id, None);
+    // A term as its own parent is top-level too.
+    let fruit = fruit
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                parent_id: Some(Some(fruit.term_id)),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fruit.parent_id, None);
+
+    // A taken slug with a new parent is made unique rather than refused, first with the
+    // parent's slug, as `wp_unique_term_slug`.
+    let apple = apple
+        .update(
+            db,
+            &Taxonomy::CATEGORY,
+            TermChanges {
+                slug: Some("food".into()),
+                parent_id: Some(Some(food.term_id)),
+                ..TermChanges::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(apple.slug, "food-food");
+}
+
+#[tokio::test]
+async fn deleting_a_category_gives_its_posts_the_default_category() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let uncategorized = category(db, "Uncategorized", None).await;
+    set_option(
+        db,
+        "default_category",
+        &serde_json::json!(uncategorized.term_id),
+    )
+    .await
+    .unwrap();
+    let news = category(db, "News", None).await;
+    let sport = category(db, "Sport", None).await;
+    let only_news = post(db, author, PostStatus::Publish).await;
+    let both = post(db, author, PostStatus::Publish).await;
+    only_news
+        .sync_terms(db, &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    both.sync_terms(
+        db,
+        &Taxonomy::CATEGORY,
+        &[news.term_taxonomy_id, sport.term_taxonomy_id],
+    )
+    .await
+    .unwrap();
+
+    assert!(news.delete(db).await.unwrap());
+
+    // As `wp_delete_term`: a post left with no category gets the default one, counted.
+    assert_eq!(
+        names(&only_news.terms(db, &Taxonomy::CATEGORY).await.unwrap()),
+        ["Uncategorized"]
+    );
+    assert_eq!(
+        names(&both.terms(db, &Taxonomy::CATEGORY).await.unwrap()),
+        ["Sport"]
+    );
+    assert_eq!(count_of(db, &uncategorized).await, 1);
+
+    // The default category itself is never deleted.
+    let err = uncategorized.delete(db).await.unwrap_err();
+    assert!(matches!(err, TermError::DefaultTerm), "{err:?}");
+    assert!(
+        Term::find(db, uncategorized.term_taxonomy_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_default_term_by_either_option_is_not_deleted() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    let pinned = tag(db, "Pinned").await;
+    let free = tag(db, "Free").await;
+    set_option(
+        db,
+        "default_term_post_tag",
+        &serde_json::json!(pinned.term_id),
+    )
+    .await
+    .unwrap();
+    let err = pinned.delete(db).await.unwrap_err();
+    assert!(matches!(err, TermError::DefaultTerm), "{err:?}");
+    assert!(free.delete(db).await.unwrap());
+}
+
+#[tokio::test]
+async fn deleting_a_category_reassigns_many_posts_at_once() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let uncategorized = category(db, "Uncategorized", None).await;
+    set_option(
+        db,
+        "default_category",
+        &serde_json::json!(uncategorized.term_id),
+    )
+    .await
+    .unwrap();
+    let news = category(db, "News", None).await;
+    let sport = category(db, "Sport", None).await;
+    let mut posts = Vec::new();
+    for i in 0..30 {
+        let post = post(db, author, PostStatus::Publish).await;
+        let mut ids = vec![news.term_taxonomy_id];
+        if i % 3 == 0 {
+            ids.push(sport.term_taxonomy_id);
+        }
+        post.sync_terms(db, &Taxonomy::CATEGORY, &ids)
+            .await
+            .unwrap();
+        posts.push(post);
+    }
+    assert!(news.delete(db).await.unwrap());
+    assert_eq!(count_of(db, &uncategorized).await, 20);
+    assert_eq!(count_of(db, &sport).await, 10);
+    for post in &posts {
+        assert_eq!(post.terms(db, &Taxonomy::CATEGORY).await.unwrap().len(), 1);
+    }
 }

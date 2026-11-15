@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use mission_control_core::content::{
     FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_FORMATTING_ATTRIBUTES,
     MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
-    safecss_filter_attr,
+    safecss_filter_attr, sanitize_text_field,
 };
 use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, UserCaps};
 
@@ -761,4 +761,16 @@ fn unclosed_cells_and_paragraph_ends_are_scanned_in_linear_time() {
         kses_post(&html);
     }
     assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
+}
+
+#[test]
+fn text_fields_are_one_line_of_text() {
+    assert_eq!(
+        sanitize_text_field("  <b>Rust</b> &amp;\n\t news<script>x</script> "),
+        "Rust & news"
+    );
+    // Percent-encoded octets go, and the spaces they leave are closed up.
+    assert_eq!(sanitize_text_field("a %20 b%2fc"), "a bc");
+    assert_eq!(sanitize_text_field("100%"), "100%");
+    assert_eq!(sanitize_text_field("<em></em>"), "");
 }

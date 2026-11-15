@@ -62,6 +62,26 @@ pub fn parse_form(text: &str) -> Params {
     params
 }
 
+/// `rest_missing_callback_param` (400) naming each of `names` that `params` lacks, as
+/// `WP_REST_Request::has_valid_params` refuses a request without a required argument before it
+/// validates the others; `Ok` when none is missing.
+pub(crate) fn require(params: &Params, names: &[&str]) -> Result<(), RestError> {
+    let missing: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| !params.contains_key(*name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(RestError::new(
+        "rest_missing_callback_param",
+        format!("Missing parameter(s): {}", missing.join(", ")),
+        400,
+    )
+    .with_data("params", json!(missing)))
+}
+
 /// The parameters that failed validation, gathered so the error names them all.
 #[derive(Debug, Default)]
 pub(crate) struct Invalid {
@@ -347,6 +367,19 @@ mod tests {
         );
         assert_eq!(list_sentence(&["asc", "desc"]), "asc and desc");
         assert_eq!(list_sentence(&["a", "b", "c"]), "a, b, and c");
+    }
+
+    #[test]
+    fn missing_parameters_are_named() {
+        let params = parse_form("slug=a");
+        assert!(require(&params, &["slug"]).is_ok());
+        let error = require(&params, &["name", "slug", "parent"]).unwrap_err();
+        assert_eq!(
+            (error.code.as_ref(), error.status),
+            ("rest_missing_callback_param", 400)
+        );
+        assert_eq!(error.message, "Missing parameter(s): name, parent");
+        assert_eq!(error.data["params"], json!(["name", "parent"]));
     }
 
     #[test]

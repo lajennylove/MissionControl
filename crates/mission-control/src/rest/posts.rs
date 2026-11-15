@@ -2,32 +2,26 @@
 //! `/wp-json/wp/v2/{rest_base}/{id}` for each post type the [`PostTypes`] registry shows in the
 //! REST API, over the core's [`PostsController`].
 //!
-//! A `rest_base` that is not served, or an id that is not digits, forwards to the REST catch-all
-//! routes, which answer `rest_no_route` as WordPress does. Request bodies are JSON or
-//! form-encoded, as WordPress reads them, up to Rocket's `json` data limit (for both); a larger
-//! body is refused with 413 `rest_request_too_large` (Mission Control's code; PHP refuses such a
-//! body before WordPress runs). Parameters in the body win over those in the query string.
+//! A `rest_base` that is not a served post type, or an id that is not digits, forwards: to the
+//! terms routes ([`super::terms`]), then to the REST catch-all routes, which answer
+//! `rest_no_route` as WordPress does. Bodies are read as [`super::request`] reads them.
 
-use std::io::Cursor;
 use std::sync::Arc;
 
 use mission_control_core::front::Frontend;
 use mission_control_core::hooks::Hooks;
-use mission_control_core::rest::posts::{
-    KsesLimiter, Params, PostType, PostTypes, PostsController, parse_form,
-};
-use mission_control_core::rest::{RestError, RestResponse, discovery};
+use mission_control_core::rest::posts::{PostType, PostTypes, PostsController};
+use mission_control_core::rest::{KsesLimiter, RestResponse, discovery};
 use mission_control_core::users::UserCaps;
 use orbit_orm::Database;
-use rocket::data::{Limits, ToByteUnit};
+use rocket::data::Limits;
 use rocket::http::uri::Origin;
-use rocket::http::{ContentType, Header, Status};
-use rocket::request::{FromParam, FromRequest, Outcome};
-use rocket::response::{self, Responder};
-use rocket::{Data, Request, Response, Route};
-use serde_json::Value;
+use rocket::http::{ContentType, Status};
+use rocket::request::{FromRequest, Outcome};
+use rocket::{Data, Request, Route};
 
 use super::auth::RestAuth;
+use super::request::{Id, Reply, params, query_of};
 
 /// The post type a route's `rest_base` names, when the REST API serves it. Any other forwards.
 struct Served(PostType);
@@ -46,20 +40,6 @@ impl<'r> FromRequest<'r> for Served {
             },
             _ => Outcome::Forward(Status::NotFound),
         }
-    }
-}
-
-/// A post id in a path: digits only, as WordPress's `(?P<id>[\d]+)`, that fit an `i64`.
-struct PostId(i64);
-
-impl<'a> FromParam<'a> for PostId {
-    type Error = ();
-
-    fn from_param(param: &'a str) -> Result<Self, ()> {
-        if param.is_empty() || !param.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(());
-        }
-        param.parse().map(Self).map_err(|_| ())
     }
 }
 
@@ -131,28 +111,6 @@ impl<'r> App<'r> {
     }
 }
 
-/// A REST answer: the response, or WordPress's error body with its status.
-pub(crate) struct Reply(Result<RestResponse, RestError>);
-
-impl<'r> Responder<'r, 'static> for Reply {
-    fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
-        let (status, body, headers) = match self.0 {
-            Ok(response) => (response.status, response.body, response.headers),
-            Err(error) => (error.status, error.to_json(), Vec::new()),
-        };
-        let text = body.to_string();
-        let mut builder = Response::build();
-        builder
-            .status(Status::from_code(status).unwrap_or(Status::InternalServerError))
-            .header(ContentType::new("application", "json").with_params(("charset", "UTF-8")))
-            .sized_body(text.len(), Cursor::new(text));
-        for (name, value) in headers {
-            builder.header_adjoin(Header::new(name, value));
-        }
-        Ok(builder.finalize())
-    }
-}
-
 /// The routes, at their default ranks: below every route with a fixed path, above the REST
 /// catch-alls.
 pub(crate) fn routes() -> Vec<Route> {
@@ -167,68 +125,6 @@ pub(crate) fn routes() -> Vec<Route> {
     ]
 }
 
-/// The request's query string, as sent.
-fn query_of<'a>(origin: &'a Origin<'_>) -> &'a str {
-    origin.query().map_or("", |q| q.as_str())
-}
-
-/// The request's parameters: the query string's, then the body's over them.
-async fn params(
-    origin: &Origin<'_>,
-    content_type: Option<&ContentType>,
-    limits: &Limits,
-    data: Data<'_>,
-) -> Result<Params, RestError> {
-    let mut params = parse_form(query_of(origin));
-    let json = content_type.is_some_and(|c| c.is_json());
-    let form = content_type.is_some_and(|c| c.is_form());
-    if !json && !form {
-        return Ok(params);
-    }
-    // One limit for both kinds, Rocket's `json` limit (1 MiB by default): a post sent as a form
-    // is as large as one sent as JSON, and Rocket's `form` limit (32 KiB) is sized for small
-    // forms.
-    let limit = limits.get("json").unwrap_or(1.mebibytes());
-    let body = data.open(limit).into_string().await.map_err(|e| {
-        log::warn!("Could not read a REST request body: {e}");
-        RestError::new(
-            "rest_invalid_body",
-            "The request body could not be read.",
-            400,
-        )
-    })?;
-    if !body.is_complete() {
-        return Err(RestError::new(
-            "rest_request_too_large",
-            "The request body is too large.",
-            413,
-        ));
-    }
-    let body = body.into_inner();
-    let from_body = if json {
-        if body.trim().is_empty() {
-            Params::new()
-        } else {
-            match serde_json::from_str::<Value>(&body) {
-                Ok(Value::Object(object)) => object,
-                Ok(_) => Params::new(),
-                Err(e) => {
-                    return Err(RestError::new(
-                        "rest_invalid_json",
-                        "Invalid JSON body passed.",
-                        400,
-                    )
-                    .with_data("json_error_message", Value::String(e.to_string())));
-                }
-            }
-        }
-    } else {
-        parse_form(&body)
-    };
-    params.extend(from_body);
-    Ok(params)
-}
-
 #[rocket::get("/wp-json/wp/v2/<_>")]
 async fn list(served: Served, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
@@ -240,13 +136,7 @@ async fn list(served: Served, origin: &Origin<'_>, auth: RestAuth, app: App<'_>)
 }
 
 #[rocket::get("/wp-json/wp/v2/<_>/<id>")]
-async fn get(
-    served: Served,
-    id: PostId,
-    origin: &Origin<'_>,
-    auth: RestAuth,
-    app: App<'_>,
-) -> Reply {
+async fn get(served: Served, id: Id, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
         app.controller(&served.0, &caps)
@@ -278,7 +168,7 @@ async fn create(
 #[allow(clippy::too_many_arguments)]
 async fn update(
     served: Served,
-    id: PostId,
+    id: Id,
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
     limits: &Limits,
@@ -300,7 +190,7 @@ async fn update(
 #[allow(clippy::too_many_arguments)]
 async fn update_post(
     served: Served,
-    id: PostId,
+    id: Id,
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
     limits: &Limits,
@@ -327,7 +217,7 @@ async fn update_post(
 #[allow(clippy::too_many_arguments)]
 async fn update_put(
     served: Served,
-    id: PostId,
+    id: Id,
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
     limits: &Limits,
@@ -354,7 +244,7 @@ async fn update_put(
 #[allow(clippy::too_many_arguments)]
 async fn update_patch(
     served: Served,
-    id: PostId,
+    id: Id,
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
     limits: &Limits,
@@ -381,7 +271,7 @@ async fn update_patch(
 #[allow(clippy::too_many_arguments)]
 async fn delete(
     served: Served,
-    id: PostId,
+    id: Id,
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
     limits: &Limits,

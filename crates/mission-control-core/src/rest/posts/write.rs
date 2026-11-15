@@ -5,14 +5,17 @@ use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime};
 use orbit_orm::{Model, raw};
 use serde_json::{Map, Value, json};
 
-use super::params::{Params, Reader};
-use super::prepare::{self, Fields, ItemOptions};
-use super::{Context, PostType, PostsController, RestTaxonomy, Site, database_error, invalid_id};
+use super::prepare::{self, ItemOptions};
+use super::{PostType, PostsController, RestTaxonomy, invalid_id};
 use crate::content::{
     MetaError, NewPost, Post, PostFields, PostStatus, SaveError, delete_post_meta, now,
     save_revision, set_option, set_post_meta,
 };
 use crate::content::{PUBLISH_FUTURE_POST, terms_by_term_id};
+use crate::rest::params::{Params, Reader, as_integer};
+use crate::rest::shared::{
+    Context, Fields, Site, check_text_capacity, database_error, id_of, option,
+};
 use crate::rest::{RestError, RestResponse};
 use crate::scheduler;
 use crate::theme::page_template_name;
@@ -390,34 +393,15 @@ fn settle_status(
     }
 }
 
-/// The most bytes a `TEXT` column holds on MySQL and MariaDB, where the post's title, content
-/// and excerpt are `TEXT` (WordPress uses `LONGTEXT`; Orbit's schema builder has no such type).
-pub(crate) const MYSQL_TEXT_BYTES: usize = 65_535;
-
-/// Ruling R52: on MySQL and MariaDB, a title, content or excerpt longer than the column holds is
-/// refused with `rest_content_too_large` (413) before the database is touched, rather than fail
-/// with a 500 or be cut short by a non-strict server. Other databases have no such limit.
+/// Ruling R52: on MySQL and MariaDB, a title, content or excerpt longer than its `TEXT` column
+/// holds is refused with `rest_content_too_large` (413) before the database is touched.
 fn check_column_capacity(ctl: &PostsController<'_>, fields: &PostFields) -> Result<(), RestError> {
-    if ctl.db.driver() != orbit_orm::Driver::MySql {
-        return Ok(());
-    }
     for (field, value) in [
         ("title", &fields.title),
         ("content", &fields.content),
         ("excerpt", &fields.excerpt),
     ] {
-        if value.len() > MYSQL_TEXT_BYTES {
-            return Err(RestError::new(
-                "rest_content_too_large",
-                format!(
-                    "The {field} is too large to save: it is {} bytes, and this database holds \
-                     at most {MYSQL_TEXT_BYTES} bytes.",
-                    value.len()
-                ),
-                413,
-            )
-            .with_data("field", json!(field)));
-        }
+        check_text_capacity(ctl.db, field, value)?;
     }
     Ok(())
 }
@@ -449,8 +433,8 @@ async fn write_extras(
         let sticky = changes.sticky.unwrap_or(false);
         // Read again just before the write, so a post made sticky since the request began is
         // kept.
-        let mut list: Vec<i64> = match super::option(db, "sticky_posts").await? {
-            Some(Value::Array(ids)) => ids.iter().filter_map(super::id_of).collect(),
+        let mut list: Vec<i64> = match option(db, "sticky_posts").await? {
+            Some(Value::Array(ids)) => ids.iter().filter_map(id_of).collect(),
             _ => Vec::new(),
         };
         let had = list.contains(&post.id);
@@ -555,7 +539,7 @@ pub(super) async fn create(
     let changes = Changes::read(ctl.post_type, &site, params)?;
     if params
         .get("id")
-        .is_some_and(|id| super::params::as_integer(id).is_some_and(|id| id != 0))
+        .is_some_and(|id| as_integer(id).is_some_and(|id| id != 0))
     {
         return Err(RestError::new(
             "rest_post_exists",

@@ -38,7 +38,7 @@ pub use future::{
 pub use kses::{
     FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_FORMATTING_ATTRIBUTES,
     MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
-    safecss_filter_attr,
+    safecss_filter_attr, sanitize_text_field,
 };
 pub(crate) use meta::put_post_meta_in;
 pub use meta::{
@@ -59,5 +59,8 @@ pub use shortcode::{Attributes, InvalidShortcodeTag, Shortcodes};
 pub use slug::{
     MAX_SLUG_LENGTH, find_by_old_slug, is_hierarchical, make_slug, unique_slug, unique_slug_for,
 };
-pub use taxonomy::{MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermError, update_term_counts};
+pub use taxonomy::{
+    MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermChanges, TermError, default_term_ids,
+    update_term_counts,
+};
 pub(crate) use taxonomy::{set_terms_in, terms_by_term_id};
