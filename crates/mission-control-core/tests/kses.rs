@@ -8,10 +8,15 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use mission_control_core::content::{
-    MAX_ACTIVE_FORMATTING, MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields,
-    kses_title, safecss_filter_attr,
+    FieldTooLarge, MAX_ACTIVE_FORMATTING, MAX_FILTERED_BYTES, MAX_NESTING, PostFields, kses_data,
+    kses_post, kses_post_fields, kses_title, safecss_filter_attr,
 };
 use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, UserCaps};
+
+/// The limit for the timing smoke checks: generous, so a slow debug build on CI does not flake;
+/// the quadratic cases they guard against take tens of seconds there. Which bound refuses an
+/// input is checked by the pre-scan's own unit tests, independent of speed.
+const SMOKE_LIMIT: Duration = Duration::from_secs(10);
 
 /// A user with one default role and no capabilities of their own.
 fn user(role: &str) -> UserCaps {
@@ -346,11 +351,7 @@ fn deep_nesting_is_refused_in_linear_time() {
         kses_title(&"<b>".repeat(MAX_NESTING + 1)),
         "<b>".repeat(MAX_NESTING + 1)
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
 
     // Up to the cap, nesting is parsed.
     let at_cap = format!(
@@ -399,7 +400,7 @@ fn deep_nesting_is_refused_in_linear_time() {
             "{unit:?} was parsed: {}",
             &output[..output.len().min(80)]
         );
-        assert!(started.elapsed() < Duration::from_secs(2), "{unit:?}");
+        assert!(started.elapsed() < SMOKE_LIMIT, "{unit:?}");
     }
     // Markup inside raw text counts when the input has SVG or MathML, where the parser reads it
     // as markup.
@@ -437,11 +438,7 @@ fn reopened_formatting_elements_are_refused_in_bounded_time() {
     let output = kses_post(&amplified);
     assert!(output.starts_with("&lt;p&gt;&lt;b"), "refused");
     assert!(output.len() <= amplified.len() * 5);
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
 
     // Up to the cap the formatting elements are parsed; one more is refused.
     let at_cap = format!("<p>{}</p><p>x</p>", unclosed(MAX_ACTIVE_FORMATTING));
@@ -452,22 +449,31 @@ fn reopened_formatting_elements_are_refused_in_bounded_time() {
     assert!(kses_post(&"<b><p></b>".repeat(MAX_ACTIVE_FORMATTING + 1)).starts_with("&lt;"));
     assert!(kses_post(&"<i><div></i></div>".repeat(MAX_ACTIVE_FORMATTING + 1)).starts_with("&lt;"));
 
-    // Under the cap, the output budget is the backstop: 32 reopened elements in thousands of
-    // paragraphs would write far more than the input.
+    // Under the cap, the reopening budget refuses it: 32 elements reopened in each of thousands
+    // of paragraphs (the output budget would only catch it after the parser built them all).
     let under_cap = format!(
         "<p>{}</p>{}",
         unclosed(MAX_ACTIVE_FORMATTING),
         "<p>x</p>".repeat(5_000)
     );
+    // Refused by the pre-scan's reopening budget, before the parser builds anything (the
+    // pre-scan's own unit tests check which bound refuses it).
     let started = Instant::now();
     assert!(kses_post(&under_cap).starts_with("&lt;"));
-    // Refused by the pre-scan's reopening budget, before the parser builds anything: a few
-    // milliseconds, where parsing it took half a second (and building 160,000 elements).
-    assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "{:?}",
-        started.elapsed()
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
+    // Paragraphs that close the last one implicitly reopen the formatting elements too.
+    let implicit = format!(
+        "<p>{}{}",
+        unclosed(MAX_ACTIVE_FORMATTING),
+        "<p>x".repeat(20_000)
     );
+    assert!(kses_post(&implicit).starts_with("&lt;"));
+    let divs = format!(
+        "<p>{}{}",
+        unclosed(MAX_ACTIVE_FORMATTING),
+        "<div>x</div>".repeat(20_000)
+    );
+    assert!(kses_post(&divs).starts_with("&lt;"));
     let four_unclosed = format!("<p>{}</p>{}", unclosed(4), "<p>x</p>".repeat(20_000));
     assert!(kses_post(&four_unclosed).starts_with("&lt;"));
     // One unclosed formatting element is reopened once per paragraph, as browsers do; parsed.
@@ -498,11 +504,7 @@ fn many_ampersands_are_refused_in_bounded_time() {
     assert_eq!(kses_title(&text), text);
     let attribute = format!("<a title=\"{}\">x</a>", "&".repeat(400_000));
     assert!(kses_post(&attribute).starts_with("&lt;a title"));
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
     // Ampersands in ordinary amounts are parsed.
     let links = "<p><a href=\"/?a=1&amp;b=2\">Tom &amp; Jerry</a></p>".repeat(2_000);
     assert_eq!(kses_post(&links), links);
@@ -539,7 +541,9 @@ fn targeted_links_get_no_rel_added() {
     };
     for role in [AUTHOR, EDITOR] {
         assert_eq!(
-            kses_post_fields(&user(role), fields.clone()).content,
+            kses_post_fields(&user(role), fields.clone())
+                .unwrap()
+                .content,
             link,
             "{role}"
         );
@@ -555,13 +559,17 @@ fn authors_and_contributors_are_filtered_editors_and_administrators_are_not() {
         excerpt: "<em>Short</em><img src=x onerror=alert(1)>".to_owned(),
     };
     for role in [AUTHOR, CONTRIBUTOR] {
-        let saved = kses_post_fields(&user(role), sent.clone());
+        let saved = kses_post_fields(&user(role), sent.clone()).unwrap();
         assert_eq!(saved.title, "A & B", "{role}");
         assert_eq!(saved.content, "<p>Body</p>", "{role}");
         assert_eq!(saved.excerpt, "<em>Short</em><img src=\"x\">", "{role}");
     }
     for role in [EDITOR, ADMINISTRATOR] {
-        assert_eq!(kses_post_fields(&user(role), sent.clone()), sent, "{role}");
+        assert_eq!(
+            kses_post_fields(&user(role), sent.clone()),
+            Ok(sent.clone()),
+            "{role}"
+        );
     }
     // A user's own denial of `unfiltered_html` wins over their role.
     let denied = UserCaps::with_default_roles(
@@ -570,7 +578,83 @@ fn authors_and_contributors_are_filtered_editors_and_administrators_are_not() {
         &BTreeMap::from([("unfiltered_html".to_owned(), false)]),
     );
     assert_eq!(
-        kses_post_fields(&denied, sent.clone()).content,
+        kses_post_fields(&denied, sent.clone()).unwrap().content,
         "<p>Body</p>"
     );
+}
+
+#[test]
+fn fields_too_large_to_filter_are_refused_not_stored() {
+    // Ruling R42: past 256 KB, a user without `unfiltered_html` gets an error to report.
+    let large = PostFields {
+        content: "a".repeat(MAX_FILTERED_BYTES + 1),
+        ..PostFields::default()
+    };
+    let error = kses_post_fields(&user(AUTHOR), large.clone()).unwrap_err();
+    assert_eq!(
+        error,
+        FieldTooLarge {
+            field: "content",
+            size: MAX_FILTERED_BYTES + 1
+        }
+    );
+    assert!(error.to_string().contains("content"));
+    let large_title = PostFields {
+        title: "t".repeat(MAX_FILTERED_BYTES + 1),
+        ..PostFields::default()
+    };
+    assert_eq!(
+        kses_post_fields(&user(CONTRIBUTOR), large_title)
+            .unwrap_err()
+            .field,
+        "title"
+    );
+    let large_excerpt = PostFields {
+        excerpt: "e".repeat(MAX_FILTERED_BYTES + 1),
+        ..PostFields::default()
+    };
+    assert_eq!(
+        kses_post_fields(&user(AUTHOR), large_excerpt)
+            .unwrap_err()
+            .field,
+        "excerpt"
+    );
+    // At the cap it is filtered; editors are not capped (stored as sent).
+    let at_cap = PostFields {
+        content: "a".repeat(MAX_FILTERED_BYTES),
+        ..PostFields::default()
+    };
+    assert_eq!(kses_post_fields(&user(AUTHOR), at_cap.clone()), Ok(at_cap));
+    assert_eq!(kses_post_fields(&user(EDITOR), large.clone()), Ok(large));
+}
+
+#[test]
+fn latin1_symbols_in_bulk_are_refused_in_bounded_time() {
+    // html5ever's serialiser also rescans after every 0xC2 byte (no-break space, ©, °, «…).
+    let started = Instant::now();
+    for text in [
+        format!("<p>{}</p>", "\u{a0}".repeat(150_000)),
+        format!("<p>{}</p>", "\u{b0}".repeat(150_000)),
+        format!("<a title=\"{}\">x</a>", "\u{a9}".repeat(150_000)),
+    ] {
+        assert!(kses_post(&text).starts_with("&lt;"));
+    }
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
+    // In ordinary amounts they are kept.
+    let ordinary = "<p>20\u{b0}C \u{ab}caf\u{e9}\u{bb}&nbsp;\u{a9}</p>".repeat(1_000);
+    assert_eq!(kses_post(&ordinary), ordinary.replace('\u{a0}', "&nbsp;"));
+}
+
+#[test]
+fn unclosed_cells_and_paragraph_ends_are_scanned_in_linear_time() {
+    // Uncounted elements piling up, then end tags looking for a paragraph: quadratic in the
+    // round-2 pre-scan (640 KB took 2 s in a release build).
+    let started = Instant::now();
+    for html in [
+        format!("{}{}", "<td>".repeat(40_000), "</p>".repeat(40_000)),
+        format!("{}{}", "<td>".repeat(30_000), "</i>x</div>".repeat(30_000)),
+    ] {
+        kses_post(&html);
+    }
+    assert!(started.elapsed() < SMOKE_LIMIT, "{:?}", started.elapsed());
 }

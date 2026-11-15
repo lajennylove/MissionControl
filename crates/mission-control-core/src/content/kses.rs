@@ -37,13 +37,27 @@
 //! the output is well-formed (tags closed, attributes quoted, entities written once: `&` as
 //! `&amp;`, `&eacute;` as `é`).
 //!
-//! Input nested deeper than [`MAX_NESTING`] elements (the parser's time grows with length times
-//! depth), or holding more than [`MAX_ACTIVE_FORMATTING`] formatting elements open at once (the
-//! parser reopens them in every block, so the output grows with their number times the blocks),
-//! is not parsed; it is stored as escaped text. So is input whose length times its number of `&`
-//! passes ten billion (html5ever 0.40's serialiser is quadratic in a value's `&`), and output
-//! longer than eight times the input, as a backstop. The input's size is bounded by the layer that receives
-//! it (the routes' request body limits), not by kses.
+//! ## Bounds and known refusals
+//!
+//! - **Size (Ruling R42).** [`kses_post_fields`] refuses a field longer than
+//!   [`MAX_FILTERED_BYTES`] (256 KB) for a user without `unfiltered_html`, with [`FieldTooLarge`];
+//!   the save reports it and stores nothing. Parsing is linear but not free (about 0.35 s and
+//!   340 MB for 480 KB), so this is the real bound on a save. WordPress has no such cap.
+//!   [`kses_post`], [`kses_data`] and [`kses_title`] themselves take any size; call them through
+//!   the helper, or check the size first.
+//! - **Shape.** Input nested deeper than [`MAX_NESTING`] elements (the parser's time grows with
+//!   length times depth), holding more than [`MAX_ACTIVE_FORMATTING`] formatting elements active
+//!   at once, or that would make the parser reopen more than about one formatting element per
+//!   byte (it reopens every active one in each new block), is not parsed: it is stored as
+//!   escaped text, so nothing runs and nothing typed is lost (a title is kept as typed). So is
+//!   input whose length times its number of `&` and `0xC2` bytes passes ten billion (html5ever
+//!   0.40's serialiser rescans a value after each of them).
+//! - **Output.** Output longer than eight times the input is refused the same way, as a backstop.
+//!   Ordinary content can meet it: one unclosed link with a long `href` followed by many
+//!   paragraphs is reopened, `href` and all, in every paragraph.
+//! - **Malformed but valid HTML** can be refused, because the pre-scan counts conservatively:
+//!   more than 32 formatting elements left unclosed or misnested (`<b><p></b>`), or more than
+//!   512 elements left unclosed.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -673,19 +687,21 @@ const OUTPUT_FACTOR: usize = 8;
 /// whose closing tags the sanitiser adds.
 const OUTPUT_ALLOWANCE: usize = 1024;
 
-/// The most work kses lets the serialiser do escaping `&`: the input's length times the number
-/// of `&` in it. html5ever 0.40's serialiser searches the rest of a text or attribute value for
-/// `<`, `>` (and `"`) once per `&` it escapes, so its time grows with a value's length times its
-/// `&`; a value is never longer than the input, and each of its `&` comes from an `&` of the
-/// input. Ten billion is a fraction of a second, and lets a 1 MB post hold 10,000 `&`.
+/// The most work kses lets the serialiser do: the input's length times the number of `&` and
+/// `0xC2` bytes in it. html5ever 0.40's serialiser searches the rest of a text or attribute
+/// value for `<`, `>` (and `"`) again after every `&` and every `0xC2` byte (the lead byte of
+/// U+0080 to U+00BF: the no-break space, `©`, `°`, `«`…), so its time grows with a value's
+/// length times those; a value is never longer than the input, and each of them in it comes
+/// from one in the input (an entity such as `&nbsp;` has its own `&`). Ten billion is a fraction
+/// of a second, and lets a 256 KB post hold 38,000 of them.
 const MAX_ESCAPE_WORK: u128 = 10_000_000_000;
 
-/// Whether kses may parse `html`: its escaping work is within [`MAX_ESCAPE_WORK`], and its
+/// Whether kses may parse `html`: its serialising work is within [`MAX_ESCAPE_WORK`], and its
 /// nesting and open formatting elements are within [`MAX_NESTING`] and
 /// [`MAX_ACTIVE_FORMATTING`] ([`nesting_within_cap`]).
 fn parse_is_bounded(html: &str) -> bool {
-    let ampersands = html.bytes().filter(|&b| b == b'&').count();
-    (html.len() as u128) * (ampersands as u128) <= MAX_ESCAPE_WORK && nesting_within_cap(html)
+    let restarts = html.bytes().filter(|&b| b == b'&' || b == 0xC2).count();
+    (html.len() as u128) * (restarts as u128) <= MAX_ESCAPE_WORK && nesting_within_cap(html)
 }
 
 /// The elements the pre-scan lets the parser reopen beyond one per byte of input, for short
@@ -744,12 +760,11 @@ fn output_budget(input: &str) -> usize {
 /// nesting cap bounds the cost of those scans. The parser also reopens every unclosed formatting
 /// element in each new block, so 512 unclosed `<b>` and 60,000 paragraphs wrote 516 MB from
 /// 486 KB; the formatting cap bounds how many are reopened at once, a reopening budget (one
-/// element per byte of input, plus [`REOPEN_ALLOWANCE`]: at each tag and run of text, each
-/// formatting element active but not open counts) bounds the total before anything is built,
-/// and an output budget ([`OUTPUT_FACTOR`]) is the backstop. (The serialiser's escaping work is bounded separately, in
-/// [`parse_is_bounded`].) **These are the only bounds kses enforces; the size of the input is bounded by
-/// the layer that receives it** (the request body limit of the REST and admin routes, Rocket's
-/// data limits), not here.
+/// element per byte of input, plus [`REOPEN_ALLOWANCE`]: at each tag and run of text, every
+/// active formatting element counts, since a block may have closed it, explicitly or not)
+/// bounds the total before anything is built, and an output budget ([`OUTPUT_FACTOR`]) is the
+/// backstop. (The serialiser's escaping work is bounded separately, in [`parse_is_bounded`],
+/// and the input's size by [`kses_post_fields`], Ruling R42.)
 ///
 /// The pass tokenizes as the HTML standard does (tags, quoted and unquoted attribute values,
 /// comments with all their endings, bogus comments, `DOCTYPE`, raw text elements, CDATA), and
@@ -781,8 +796,9 @@ fn nesting_within_cap(html: &str) -> bool {
     let bytes = html.as_bytes();
     let length = bytes.len();
     let mut tree = TreeModel::default();
-    // The elements the parser may reopen: at each tag and each run of text, every formatting
-    // element that is active but not open. One per byte of input at most.
+    // The elements the parser may reopen: at each tag and each run of text, every active
+    // formatting element (the parser reopens the ones a block closed, and closes them
+    // implicitly, as `<p>` and `<div>` close an open paragraph). One per byte of input at most.
     let reopen_budget = length.saturating_add(REOPEN_ALLOWANCE);
     let mut reopened = 0usize;
     // Once set, no end tag closes anything.
@@ -792,7 +808,7 @@ fn nesting_within_cap(html: &str) -> bool {
     let mut i = 0;
     while let Some(at) = bytes[i..].iter().position(|&b| b == b'<').map(|at| i + at) {
         // The text before this tag, and the tag.
-        reopened = reopened.saturating_add(2 * tree.closed_active());
+        reopened = reopened.saturating_add(2 * tree.formatting);
         if !tree.within_caps() || reopened > reopen_budget {
             return false;
         }
@@ -858,42 +874,47 @@ fn nesting_within_cap(html: &str) -> bool {
     tree.within_caps()
 }
 
-/// One element open in the model of [`nesting_within_cap`].
+/// A counted element open in the model of [`nesting_within_cap`], with the uncounted elements
+/// open in it after it.
 struct OpenElement {
     /// The tag name, in lower case.
     name: String,
-    /// Whether it counts toward the depth.
-    counted: bool,
     /// Whether it is a formatting element, counted as active.
     formatting: bool,
+    /// The [uncounted](UNCOUNTED_ELEMENTS) elements open after it, last opened last.
+    uncounted: Vec<&'static str>,
 }
 
-/// The conservative model of the parser's tree in [`nesting_within_cap`].
+/// The conservative model of the parser's tree in [`nesting_within_cap`]. Every operation looks
+/// at the last element open, or walks down over open formatting elements only (at most
+/// [`MAX_ACTIVE_FORMATTING`] and one more, since the pass stops past the cap), so the pass stays
+/// linear.
 #[derive(Default)]
 struct TreeModel {
-    /// The elements open, last opened last.
+    /// The uncounted elements open before any counted one.
+    root: Vec<&'static str>,
+    /// The counted elements open, last opened last; their number is the depth.
     open: Vec<OpenElement>,
-    /// How many of `open` count toward the depth.
-    depth: usize,
     /// How many formatting elements are active (open, or closed by another element's end tag,
     /// so reopened by the parser).
     formatting: usize,
     /// Elements counted in text that may be markup; they never close.
     unclosable: usize,
-    /// How many of `open` are formatting elements.
-    open_formatting: usize,
 }
 
 impl TreeModel {
     /// Whether the model is within [`MAX_NESTING`] and [`MAX_ACTIVE_FORMATTING`].
     fn within_caps(&self) -> bool {
-        self.depth + self.unclosable <= MAX_NESTING
+        self.open.len() + self.unclosable <= MAX_NESTING
             && self.formatting + self.unclosable <= MAX_ACTIVE_FORMATTING
     }
 
-    /// How many formatting elements are active but not open: the ones the parser reopens.
-    fn closed_active(&self) -> usize {
-        self.formatting.saturating_sub(self.open_formatting)
+    /// The uncounted elements open after the last counted one.
+    fn last_uncounted(&mut self) -> &mut Vec<&'static str> {
+        match self.open.last_mut() {
+            Some(element) => &mut element.uncounted,
+            None => &mut self.root,
+        }
     }
 
     /// A start tag `name`; `foreign` when the input may hold SVG or MathML.
@@ -902,45 +923,43 @@ impl TreeModel {
         if !foreign && (VOID_ELEMENTS.contains(&n) || matches!(n, "html" | "head" | "body")) {
             return;
         }
-        if !foreign && UNCOUNTED_ELEMENTS.contains(&n) {
-            if n == "p" && self.open.last().is_some_and(|top| top.name == "p") {
+        if !foreign && let Some(&uncounted) = UNCOUNTED_ELEMENTS.iter().find(|&&u| u == n) {
+            let open = self.last_uncounted();
+            if uncounted == "p" && open.last() == Some(&"p") {
                 // A paragraph closes the open paragraph.
-                self.truncate(self.open.len() - 1);
+                open.pop();
             }
-            self.open.push(OpenElement {
-                name,
-                counted: false,
-                formatting: false,
-            });
+            open.push(uncounted);
             return;
         }
-        if let Some(at) = self.last_counted() {
-            let top = self.open[at].name.as_str();
+        if let Some(top) = self.open.last() {
+            let top = top.name.as_str();
             if (n == "li" && top == "li")
                 || (matches!(n, "dd" | "dt") && matches!(top, "dd" | "dt"))
             {
-                self.truncate(at);
+                self.open.pop();
             }
         }
         let formatting = FORMATTING_ELEMENTS.contains(&n);
-        self.depth += 1;
         if formatting {
             self.formatting += 1;
-            self.open_formatting += 1;
         }
         self.open.push(OpenElement {
             name,
-            counted: true,
             formatting,
+            uncounted: Vec::new(),
         });
     }
 
     /// An end tag `name`.
     fn end(&mut self, name: &str) {
-        let Some(top) = self.open.last() else { return };
-        if top.formatting && top.name == name {
+        if let Some(top) = self.open.last()
+            && top.uncounted.is_empty()
+            && top.formatting
+            && top.name == name
+        {
             // The formatting element is the last one open: closed, and no longer active.
-            self.truncate(self.open.len() - 1);
+            self.open.pop();
             self.formatting -= 1;
             return;
         }
@@ -949,50 +968,54 @@ impl TreeModel {
             return;
         }
         if name == "p" {
-            // `</p>` closes its paragraph and the formatting elements open in it (they stay
-            // active), when nothing else is open in it.
-            if let Some(at) = self.open.iter().rposition(|element| element.name == "p")
-                && self.open[at + 1..].iter().all(|element| element.formatting)
-            {
-                self.truncate(at);
-            }
+            self.end_paragraph();
             return;
         }
-        if !top.counted && top.name == name {
-            self.truncate(self.open.len() - 1);
+        let open = self.last_uncounted();
+        if open.last() == Some(&name) {
+            open.pop();
             return;
         }
-        // A counted element closes with the uncounted ones open in it.
+        // A counted element closes with the uncounted ones open in it, and the lists with their
+        // open item (two items of one list are never open in a row: an item closes the last).
         let items: &[&str] = match name {
             "ul" | "ol" | "menu" => &["li"],
             "dl" => &["dd", "dt"],
             _ => &[],
         };
-        let below_items = self
-            .open
-            .iter()
-            .rposition(|element| element.counted && !items.contains(&element.name.as_str()));
-        if let Some(at) = below_items
-            && self.open[at].name == name
-        {
-            self.truncate(at);
+        let mut at = self.open.len();
+        if at > 0 && items.contains(&self.open[at - 1].name.as_str()) {
+            at -= 1;
+        }
+        if at > 0 && self.open[at - 1].name == name {
+            self.open.truncate(at - 1);
         }
     }
 
-    /// The index of the last element open that counts toward the depth.
-    fn last_counted(&self) -> Option<usize> {
-        self.open.iter().rposition(|element| element.counted)
-    }
-
-    /// Closes the elements open from index `at` on. Formatting elements among them stay active.
-    fn truncate(&mut self, at: usize) {
-        for element in self.open.drain(at..) {
-            if element.counted {
-                self.depth -= 1;
+    /// `</p>`: closes the last open paragraph and the formatting elements open in it (they stay
+    /// active), when nothing else is open in it. Walks down over formatting elements only.
+    fn end_paragraph(&mut self) {
+        for at in (0..self.open.len()).rev() {
+            let element = &mut self.open[at];
+            if let Some(&last) = element.uncounted.last() {
+                if last == "p" {
+                    element.uncounted.pop();
+                    self.open.truncate(at + 1);
+                }
+                return;
             }
-            if element.formatting {
-                self.open_formatting -= 1;
+            if element.name == "p" {
+                // Counted, in SVG or MathML.
+                self.open.truncate(at);
+                return;
             }
+            if !element.formatting {
+                return;
+            }
+        }
+        if self.root.last() == Some(&"p") {
+            self.root.pop();
+            self.open.clear();
         }
     }
 }
@@ -1174,6 +1197,9 @@ pub struct PostFields {
 /// [`kses_post`] and the title through [`kses_title`] (plain text, Ruling R39); otherwise
 /// (administrators and editors on a single site) they are returned as sent.
 ///
+/// For a user without `unfiltered_html`, a field longer than [`MAX_FILTERED_BYTES`] is refused
+/// with [`FieldTooLarge`] (Ruling R42): the save reports the error and stores nothing.
+///
 /// No `rel` is added to links with a `target`: WordPress 5.1 to 6.6 added `rel="noopener"` on
 /// save (`wp_targeted_link_rel`), but WordPress 6.7 deprecated it and no longer runs it.
 ///
@@ -1183,7 +1209,7 @@ pub struct PostFields {
 /// and attachment writers store what they are given.
 ///
 /// ```ignore
-/// let fields = kses_post_fields(&user, PostFields { title, content, excerpt });
+/// let fields = kses_post_fields(&user, PostFields { title, content, excerpt })?;
 /// let post = Post::create(&db, NewPost {
 ///     title: fields.title,
 ///     content: fields.content,
@@ -1192,16 +1218,62 @@ pub struct PostFields {
 /// })
 /// .await?;
 /// ```
-pub fn kses_post_fields(user: &UserCaps, fields: PostFields) -> PostFields {
+///
+/// # Errors
+///
+/// [`FieldTooLarge`] when `user` lacks `unfiltered_html` and a field is longer than
+/// [`MAX_FILTERED_BYTES`].
+pub fn kses_post_fields(user: &UserCaps, fields: PostFields) -> Result<PostFields, FieldTooLarge> {
     if has_cap(user, "unfiltered_html") {
-        return fields;
+        return Ok(fields);
     }
-    PostFields {
+    for (field, value) in [
+        ("title", &fields.title),
+        ("content", &fields.content),
+        ("excerpt", &fields.excerpt),
+    ] {
+        if value.len() > MAX_FILTERED_BYTES {
+            return Err(FieldTooLarge {
+                field,
+                size: value.len(),
+            });
+        }
+    }
+    Ok(PostFields {
         title: kses_title(&fields.title),
         content: kses_post(&fields.content),
         excerpt: kses_post(&fields.excerpt),
+    })
+}
+
+/// The largest title, content or excerpt, in bytes, that kses filters for a user without
+/// `unfiltered_html` (Ruling R42): 256 KB. Parsing is linear, but it still takes about 0.35 s and
+/// 340 MB for 480 KB of plain `<div>x</div>`, so this cap is what bounds a save's cost.
+/// WordPress has no such cap; it is a known limit of Mission Control.
+pub const MAX_FILTERED_BYTES: usize = 256 * 1024;
+
+/// A post field too long to filter for a user without `unfiltered_html`
+/// ([`MAX_FILTERED_BYTES`]); the save is refused and nothing is stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldTooLarge {
+    /// The field: `title`, `content` or `excerpt`.
+    pub field: &'static str,
+    /// Its length, in bytes.
+    pub size: usize,
+}
+
+impl std::fmt::Display for FieldTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} is {} bytes; at most {} bytes can be saved without the unfiltered_html \
+             capability",
+            self.field, self.size, MAX_FILTERED_BYTES
+        )
     }
 }
+
+impl std::error::Error for FieldTooLarge {}
 
 /// `html` with each page marker (`<!--more…-->`, `<!--noteaser-->`, `<!--nextpage-->`)
 /// replaced by a placeholder no input can guess, the placeholders' random token, and the
@@ -1492,4 +1564,97 @@ fn matching_closes(css: &[u8]) -> Vec<Option<usize>> {
 /// digit, or `_`.
 fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    //! Which bound refuses an input, independent of how fast the build is.
+
+    use super::*;
+
+    /// `count` distinct unclosed `<b>`.
+    fn unclosed(count: usize) -> String {
+        (0..count).map(|k| format!("<b id=a{k}>")).collect()
+    }
+
+    #[test]
+    fn the_reopening_budget_refuses_amplification_before_parsing() {
+        let caps = MAX_ACTIVE_FORMATTING;
+        for html in [
+            format!("<p>{}</p>{}", unclosed(caps), "<p>x</p>".repeat(5_000)),
+            // Implicit closes: a paragraph, a block or a heading closes the open paragraph.
+            format!("<p>{}{}", unclosed(caps), "<p>x".repeat(5_000)),
+            format!("<p>{}{}", unclosed(caps), "<div>x</div>".repeat(5_000)),
+            format!("<p>{}{}", unclosed(caps), "<h1>x</h1>".repeat(5_000)),
+            format!(
+                "<p>{}<div></div>{}",
+                unclosed(caps),
+                "<p>x</p>".repeat(5_000)
+            ),
+            format!("<p>{}</p>{}", unclosed(4), "<p>x</p>".repeat(20_000)),
+        ] {
+            assert!(!nesting_within_cap(&html), "{}", &html[..60]);
+        }
+        // Within the caps and the budget.
+        let one = format!("<p><b>x</p>{}", "<p>y</p>".repeat(20_000));
+        assert!(nesting_within_cap(&one));
+        let at_cap = format!("<p>{}</p><p>x</p>", unclosed(caps));
+        assert!(nesting_within_cap(&at_cap));
+        assert!(!nesting_within_cap(&format!(
+            "<p>{}</p>",
+            unclosed(caps + 1)
+        )));
+    }
+
+    #[test]
+    fn the_serialising_work_counts_ampersands_and_0xc2_bytes() {
+        for html in [
+            "&".repeat(150_000),
+            "\u{a0}".repeat(150_000),
+            "\u{b0}".repeat(150_000),
+            format!("<a title=\"{}\">x</a>", "\u{a9}".repeat(150_000)),
+        ] {
+            assert!(nesting_within_cap(&html), "the shape is fine");
+            assert!(!parse_is_bounded(&html), "the serialising work is not");
+        }
+        assert!(parse_is_bounded(&"caf\u{e9} \u{b0} &amp; ".repeat(1_000)));
+    }
+
+    #[test]
+    fn the_tree_model_closes_paragraphs_and_keeps_formatting_active() {
+        let mut tree = TreeModel::default();
+        for (start, name) in [(true, "p"), (true, "b"), (true, "i"), (false, "p")] {
+            if start {
+                tree.start(name.to_owned(), false);
+            } else {
+                tree.end(name);
+            }
+        }
+        // `</p>` closed the paragraph and both formatting elements, which stay active.
+        assert!(tree.open.is_empty() && tree.root.is_empty());
+        assert_eq!(tree.formatting, 2);
+
+        let mut tree = TreeModel::default();
+        tree.start("div".to_owned(), false);
+        tree.start("td".to_owned(), false);
+        tree.start("b".to_owned(), false);
+        tree.end("b");
+        assert_eq!(tree.formatting, 0, "closed while last open");
+        tree.end("div");
+        assert!(
+            tree.open.is_empty(),
+            "a counted element closes with its uncounted ones"
+        );
+
+        // Uncounted elements pile up without counting, and close only from the top.
+        let mut tree = TreeModel::default();
+        for _ in 0..1_000 {
+            tree.start("td".to_owned(), false);
+        }
+        tree.end("p");
+        assert_eq!(tree.root.len(), 1_000);
+        tree.end("td");
+        assert_eq!(tree.root.len(), 999);
+        assert!(tree.within_caps());
+    }
 }
