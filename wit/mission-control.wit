@@ -15,6 +15,9 @@
 /// | `content-write` | `write-content`  |
 /// | `types`         | `register-types` |
 ///
+/// One interface goes the other way: a plugin that ships database tables exports
+/// `migrations`, which needs the `migrations` permission (world `plugin-with-migrations`).
+///
 /// Values cross the boundary as JSON text where they have a shape of their own: a hook's
 /// payload, a filter's value and a meta value. Every string is bounded by the host; a call over
 /// a bound is refused, not cut.
@@ -228,6 +231,61 @@ interface handler {
     apply-filter: func(name: string, value-json: string, args-json: string) -> result<string, string>;
 }
 
+/// The plugin's own database tables (permission `migrations`), as Laravel migrations written
+/// with the schema builder: the site runs them, the plugin only describes them. A plugin that
+/// ships tables exports this interface (world `plugin-with-migrations`); a plugin that exports
+/// it without the `migrations` permission does not install or load.
+///
+/// The site runs the pending migrations, in name order, when the owner activates the plugin,
+/// before `handler.init` and `handler.activate`, so both find the tables. It records them in
+/// its table `plugin_migrations`, one batch per activation, and never runs one twice.
+/// Deactivating the plugin keeps its tables. Deleting it keeps them too, unless the owner asks
+/// to delete its data: then every migration it ran is reverted, newest first (its `down`).
+interface migrations {
+    /// The plugin's migrations as JSON text (at most 1 MiB): a list of objects, each with
+    /// `name` (`20261115000000_create_books`: 14 digits, `_`, then lowercase letters, digits
+    /// and `_`; at most 128 bytes), and `up` and `down`, each a list of statements:
+    ///
+    /// - `{"op": "create", "table": t, "if_not_exists": false, "columns": [...],
+    ///   "indexes": [...], "foreign_keys": [...], "primary": ["a", "b"]}`
+    /// - `{"op": "alter", "table": t, "changes": [...]}`, where each change is one of
+    ///   `{"add_column": column}`, `{"drop_column": name}`,
+    ///   `{"rename_column": {"from": a, "to": b}}`, `{"add_index": index}`,
+    ///   `{"drop_index": name}`, `{"add_foreign_key": key}`, `{"drop_foreign_key": name}`
+    /// - `{"op": "drop", "table": t, "if_exists": true}`
+    ///
+    /// A column is `{"name", "type", "nullable", "default", "length", "precision",
+    /// "use_current", "primary"}`; `type` is one of `id` (named `id`), `string` (`length`, 255
+    /// by default), `text`, `medium_text`, `long_text`, `integer`, `big_integer`, `boolean`,
+    /// `date_time`, `timestamp` (both with `precision` and `use_current`) and `binary`; a
+    /// column is `NOT NULL` unless `nullable`. An index is `{"columns", "unique", "name"}`. A
+    /// foreign key is `{"column", "references": {"table", "column"}, "on_delete", "on_update",
+    /// "name"}`, with the actions `cascade`, `restrict`, `set_null`, `set_default` and
+    /// `no_action`. Only `op`, `name`, `type`, `table`, `columns` and `column` are required.
+    ///
+    /// Every table, index and constraint name starts with the plugin's prefix, its slug with
+    /// `-` turned into `_`, then `__` (`acme-forms` gives `acme_forms__entries`); every name,
+    /// a column's too, is at most 63 bytes of lowercase letters, digits and `_`. A foreign key
+    /// references the plugin's own tables, or the `id` of the site's `posts`, `users` or
+    /// `terms` with `on_delete` `cascade` or `set_null` (so the site can always delete its
+    /// rows). A column in an index, unique, primary or foreign key is not `text`,
+    /// `medium_text`, `long_text` or `binary`, and a `string` there is at most 768 characters;
+    /// those four types take no `default`, and a text default has no backslash. A plugin has
+    /// at most 256 migrations and names at most 64 tables; a statement has at most 128
+    /// columns, 64 indexes, 64 foreign keys and 256 changes.
+    ///
+    /// The whole list is checked against these rules, and every statement rendered for the
+    /// site's database, before any of it runs: a list that breaks a rule refuses the
+    /// activation, and nothing runs. The database may still refuse a statement when it runs:
+    /// that migration fails and the activation is refused, the migrations before it stay
+    /// applied, and on MySQL and MariaDB the DDL it ran before the failure stays too (SQLite
+    /// and PostgreSQL roll the failed migration back whole).
+    ///
+    /// The tables and their history belong to the slug: a plugin installed later under the
+    /// slug of one deleted without its data finds them.
+    migrations: func() -> string;
+}
+
 /// A Mission Control plugin.
 world plugin {
     import logging;
@@ -237,4 +295,11 @@ world plugin {
     import types;
 
     export handler;
+}
+
+/// A Mission Control plugin that ships its own database tables (permission `migrations`).
+world plugin-with-migrations {
+    include plugin;
+
+    export migrations;
 }

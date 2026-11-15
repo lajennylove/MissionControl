@@ -105,6 +105,15 @@
 //! registered ([`Registry::register_exclusive`]). Deactivating or stopping the plugin removes
 //! them ([`Registry::remove_plugin`]), once per load.
 //!
+//! # Migrations
+//!
+//! A plugin that ships database tables exports the `migrations` interface (world
+//! `plugin-with-migrations`), which needs [`Permission::Migrations`]: a component that exports
+//! it without the permission does not load or install ([`HostError::UngrantedExport`]), as an
+//! import the manifest does not grant. The export is optional; [`Plugin::migrations`] calls it
+//! under the plugin's limits and returns its JSON, which [`Plugins`](super::Plugins) checks and
+//! runs (see [`parse_migrations`](super::parse_migrations), Task 12.6).
+//!
 //! # Limits
 //!
 //! Every store is made in one place (`PluginHost::new_store`) with the host's
@@ -169,7 +178,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use orbit_orm::Database;
 use semver::Version;
 use tokio::runtime::{Handle, RuntimeFlavor};
-use wasmtime::component::{Component, Linker, LinkerInstance};
+use wasmtime::component::{Component, Linker, LinkerInstance, TypedFunc};
 use wasmtime::{Config, Engine, ResourceLimiter, Store, StoreContextMut, Trap};
 
 use super::content::{self, ContentError};
@@ -201,6 +210,10 @@ pub const INTERFACES: [(&str, Option<Permission>); 5] = [
     ("content-write", Some(Permission::WriteContent)),
     ("types", Some(Permission::RegisterTypes)),
 ];
+
+/// The interface a plugin exports to ship database tables (world `plugin-with-migrations`),
+/// with the permission it needs: [`Permission::Migrations`]. See [`Plugin::migrations`].
+pub const MIGRATIONS_INTERFACE: (&str, Permission) = ("migrations", Permission::Migrations);
 
 /// The largest component accepted, in bytes (32 MiB).
 pub const MAX_COMPONENT_BYTES: usize = 32 * 1024 * 1024;
@@ -474,6 +487,14 @@ pub enum HostError {
         /// The import's name, such as `acme:vault/secrets@1.0.0`.
         import: String,
     },
+    /// The component exports an interface whose permission its manifest does not ask for: the
+    /// `migrations` interface without the `migrations` permission.
+    UngrantedExport {
+        /// The export's name, such as `mission-control:plugin/migrations@0.1.0`.
+        export: String,
+        /// The permission the interface needs.
+        permission: Permission,
+    },
     /// The component imports an interface its manifest does not grant.
     MissingPermission {
         /// The import's name, such as `mission-control:plugin/content-write@0.1.0`.
@@ -532,6 +553,11 @@ impl fmt::Display for HostError {
             Self::MissingPermission { import, permission } => write!(
                 f,
                 "the plugin imports `{import}`, which needs the `{permission}` permission, and \
+                 its manifest does not ask for it"
+            ),
+            Self::UngrantedExport { export, permission } => write!(
+                f,
+                "the plugin exports `{export}`, which needs the `{permission}` permission, and \
                  its manifest does not ask for it"
             ),
             Self::Instantiate(e) => write!(f, "the plugin could not be started: {e}"),
@@ -701,17 +727,19 @@ impl PluginHost {
         self
     }
 
-    /// Compiles `wasm` and checks its imports against `manifest`, as [`PluginHost::load`] does,
-    /// without instantiating or loading it: for an install, to refuse a module that would not
-    /// load before its files are written.
+    /// Compiles `wasm` and checks its imports and exports against `manifest`, as
+    /// [`PluginHost::load`] does, without instantiating or loading it: for an install, to refuse
+    /// a module that would not load before its files are written.
     ///
     /// # Errors
     ///
-    /// [`HostError::Compile`], [`HostError::UnknownImport`] and
-    /// [`HostError::MissingPermission`], as [`PluginHost::load`].
+    /// [`HostError::Compile`], [`HostError::UnknownImport`],
+    /// [`HostError::MissingPermission`] and [`HostError::UngrantedExport`], as
+    /// [`PluginHost::load`].
     pub fn check(&self, manifest: &Manifest, wasm: &[u8]) -> Result<(), HostError> {
         let component = self.compile(wasm)?;
-        self.check_imports(manifest, &component)
+        self.check_imports(manifest, &component)?;
+        self.migrations_export(manifest, &component).map(|_| ())
     }
 
     /// Compiles `wasm`, a binary component of at most [`MAX_COMPONENT_BYTES`].
@@ -753,7 +781,9 @@ impl PluginHost {
     /// [`HostError::Compile`] for bytes that are not a component (a core module, text) or are
     /// over [`MAX_COMPONENT_BYTES`]; [`HostError::UnknownImport`] and
     /// [`HostError::MissingPermission`] for an import the host does not provide or the manifest
-    /// does not grant; [`HostError::Instantiate`] when instantiation fails, or the component
+    /// does not grant; [`HostError::UngrantedExport`] when it exports the `migrations`
+    /// interface without the `migrations` permission; [`HostError::Instantiate`] when
+    /// instantiation fails, its `migrations` export has the wrong type, or the component
     /// has more instances, memories or tables than [`PluginLimits`] allows;
     /// [`HostError::OutOfMemory`] when its memory or tables start over the limits;
     /// [`HostError::OutOfFuel`] when its start functions use all the fuel;
@@ -768,6 +798,7 @@ impl PluginHost {
         }
         let component = self.compile(wasm)?;
         self.check_imports(&manifest, &component)?;
+        let migrations_export = self.migrations_export(&manifest, &component)?;
         let linker = self.linker(&manifest)?;
         let owner = Owner::PluginLoad {
             slug: manifest.slug.clone(),
@@ -785,12 +816,38 @@ impl PluginHost {
             limiter: Limiter::new(self.limits),
             log: LogBudget::default(),
         })?;
-        let bindings = match bindings::Plugin::instantiate(&mut store, &component, &linker) {
-            Ok(bindings) => bindings,
+        let instance = match linker.instantiate(&mut store, &component) {
+            Ok(instance) => instance,
             Err(e) => {
                 return Err(failure(&e, &mut store, self.limits.fuel_per_call)
                     .unwrap_or_else(|| HostError::Instantiate(format!("{e:#}"))));
             }
+        };
+        let bindings = bindings::Plugin::new(&mut store, &instance)
+            .map_err(|e| HostError::Instantiate(format!("{e:#}")))?;
+        // The optional `migrations` export, typed as the WIT has it.
+        let migrations = match &migrations_export {
+            Some(name) => {
+                let func = instance
+                    .get_export_index(&mut store, None, name)
+                    .and_then(|interface| {
+                        instance.get_export_index(&mut store, Some(&interface), "migrations")
+                    })
+                    .ok_or_else(|| {
+                        HostError::Instantiate(format!(
+                            "`{name}` does not export the function `migrations`"
+                        ))
+                    })?;
+                let typed = instance
+                    .get_typed_func::<(), (String,)>(&mut store, &func)
+                    .map_err(|e| {
+                        HostError::Instantiate(format!(
+                            "`migrations` in `{name}` is not `func() -> string`: {e:#}"
+                        ))
+                    })?;
+                Some(typed)
+            }
+            None => None,
         };
         let mut loaded = self.loaded();
         if Self::is_loaded(&loaded, &manifest.slug) {
@@ -803,7 +860,12 @@ impl PluginHost {
             hooks: Arc::clone(&self.hooks),
             registry: self.registry.clone(),
             on_failure: self.on_failure.clone(),
-            instance: Mutex::new(Instance { store, bindings }),
+            instance: Mutex::new(Instance {
+                store,
+                bindings,
+                migrations,
+            }),
+            exports_migrations: migrations_export.is_some(),
             fuel_per_call: self.limits.fuel_per_call,
             trapped: AtomicBool::new(false),
             failure: Mutex::new(None),
@@ -850,6 +912,31 @@ impl PluginHost {
             }
         }
         Ok(())
+    }
+
+    /// The name of the `migrations` interface the component exports, if it does (Task 12.6);
+    /// refused when `manifest` does not grant [`Permission::Migrations`]. Another export of
+    /// the plugin API's package that this host does not know is left alone, as the host never
+    /// calls it.
+    fn migrations_export(
+        &self,
+        manifest: &Manifest,
+        component: &Component,
+    ) -> Result<Option<String>, HostError> {
+        let (interface, permission) = MIGRATIONS_INTERFACE;
+        let ty = component.component_type();
+        let name = ty
+            .exports(&self.engine)
+            .map(|(name, _)| name)
+            .find(|name| served_interface(name) == Some(interface))
+            .map(str::to_owned);
+        match name {
+            Some(name) if !manifest.allows(permission) => Err(HostError::UngrantedExport {
+                export: shown(&name),
+                permission,
+            }),
+            name => Ok(name),
+        }
     }
 
     /// A linker with the interfaces `manifest` grants, and only those. Every import is defined
@@ -1024,19 +1111,23 @@ fn define_types(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime::Result
 /// by Cargo's rule (the same major version, and the same minor version while the major is 0),
 /// as wasmtime's linker matches versions.
 fn interface_permission(import: &str) -> Option<Option<Permission>> {
-    let rest = import.strip_prefix(PACKAGE)?.strip_prefix('/')?;
+    let interface = served_interface(import)?;
+    INTERFACES
+        .iter()
+        .find(|(name, _)| *name == interface)
+        .map(|(_, permission)| *permission)
+}
+
+/// For a name `mission-control:plugin/<interface>@<version>` with a version this host serves
+/// (see [`interface_permission`]), the interface; `None` for any other name.
+fn served_interface(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(PACKAGE)?.strip_prefix('/')?;
     let (interface, version) = rest.split_once('@')?;
     let version = Version::parse(version).ok()?;
     let compatible = version.major == HOST_API_VERSION.major
         && (version.major > 0 || version.minor == HOST_API_VERSION.minor)
         && version <= HOST_API_VERSION;
-    if !compatible {
-        return None;
-    }
-    INTERFACES
-        .iter()
-        .find(|(name, _)| *name == interface)
-        .map(|(_, permission)| *permission)
+    compatible.then_some(interface)
 }
 
 /// `text` as it may be shown in a message: control characters escaped, cut at
@@ -1225,6 +1316,8 @@ fn on_multi_thread_runtime() -> bool {
 struct Instance {
     store: Store<HostState>,
     bindings: bindings::Plugin,
+    /// Its `migrations` export, when it has one.
+    migrations: Option<TypedFunc<(), (String,)>>,
 }
 
 /// A loaded plugin: its manifest and its running instance.
@@ -1237,6 +1330,8 @@ pub struct Plugin {
     /// Told when the plugin fails and is stopped.
     on_failure: Option<FailureHandler>,
     instance: Mutex<Instance>,
+    /// Whether it exports the `migrations` interface.
+    exports_migrations: bool,
     /// The fuel each call starts with ([`PluginLimits::fuel_per_call`]).
     fuel_per_call: u64,
     trapped: AtomicBool,
@@ -1408,6 +1503,35 @@ impl Plugin {
         outcome
     }
 
+    /// Calls the plugin's `migrations` export (Task 12.6) and returns what it gives, the JSON
+    /// text of its migrations ([`parse_migrations`](super::parse_migrations) reads it), or
+    /// `None` when the plugin does not export the interface. It runs under the plugin's limits
+    /// as every call does, before or without [`Plugin::init`], with no effect on the plugin.
+    ///
+    /// # Errors
+    ///
+    /// As [`Plugin::init`] for a call that fails (a trap also stops the plugin as any trap
+    /// does): the plugin is deactivated.
+    pub fn migrations(&self) -> Result<Option<String>, HostError> {
+        self.check_usable()?;
+        if !self.exports_migrations {
+            return Ok(None);
+        }
+        let outcome = self.call(|instance| match instance.migrations {
+            Some(func) => func.call(&mut instance.store, ()).map(|(json,)| json),
+            None => Err(wasmtime::format_err!(
+                "the plugin has no `migrations` export"
+            )),
+        });
+        match outcome {
+            Ok(json) => Ok(Some(json)),
+            Err(e) => {
+                self.remove_hooks();
+                Err(call_error(e))
+            }
+        }
+    }
+
     /// Refuses a call into a plugin that was deactivated or stopped.
     fn check_usable(&self) -> Result<(), HostError> {
         if self.deactivated() {
@@ -1431,14 +1555,7 @@ impl Plugin {
         let error = match outcome {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(message)) => refused(shown(&message)),
-            Err(CallError::Failed(e)) => e,
-            Err(CallError::Deactivated) => HostError::Deactivated,
-            Err(CallError::Nested) => {
-                HostError::Trap("the plugin is already running a call on this thread".to_owned())
-            }
-            Err(CallError::TooDeep) => HostError::Trap(format!(
-                "{MAX_NESTED_PLUGIN_CALLS} plugin calls are already running on this thread"
-            )),
+            Err(e) => call_error(e),
         };
         self.remove_hooks();
         Err(error)
@@ -1678,6 +1795,20 @@ impl Plugin {
             "[{}] `{name}` fired again while the plugin handled a hook; the nested call is skipped",
             self.slug()
         );
+    }
+}
+
+/// The error a lifecycle call returns for a call that did not run or did not finish.
+fn call_error(error: CallError) -> HostError {
+    match error {
+        CallError::Failed(e) => e,
+        CallError::Deactivated => HostError::Deactivated,
+        CallError::Nested => {
+            HostError::Trap("the plugin is already running a call on this thread".to_owned())
+        }
+        CallError::TooDeep => HostError::Trap(format!(
+            "{MAX_NESTED_PLUGIN_CALLS} plugin calls are already running on this thread"
+        )),
     }
 }
 

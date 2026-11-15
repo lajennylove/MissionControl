@@ -61,13 +61,19 @@ pub const HOST_API_VERSION: Version = Version::new(0, 1, 0);
 pub const MAX_SLUG_LEN: usize = 32;
 
 /// Slugs a plugin cannot take, because its REST namespace (`<slug>/v1`) would sit beside one of
-/// WordPress's (`wp/v2`, `oembed/1.0`, `batch/v1`) or Mission Control's own. Every slug that
-/// starts with [`RESERVED_SLUG_PREFIX`] is reserved too.
-pub const RESERVED_SLUGS: [&str; 4] = ["wp", "oembed", "batch", "mission-control"];
+/// WordPress's (`wp/v2`, `oembed/1.0`, `batch/v1`) or Mission Control's own, or because its
+/// table prefix (`sqlite__`) would start with `sqlite_`, which SQLite keeps for its own tables.
+/// Every slug that starts with [`RESERVED_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`] is reserved
+/// too.
+pub const RESERVED_SLUGS: [&str; 5] = ["wp", "oembed", "batch", "mission-control", "sqlite"];
 
 /// The slug prefix kept for WordPress's own REST namespaces (`wp-site-health/v1`,
 /// `wp-block-editor/v1`, `wp-abilities/v1` and those to come).
 pub const RESERVED_SLUG_PREFIX: &str = "wp-";
+
+/// The slug prefix whose table prefixes (`sqlite_cache__`) would start with `sqlite_`, the
+/// names SQLite keeps for its own tables (Task 12.6).
+pub const SQLITE_SLUG_PREFIX: &str = "sqlite-";
 
 /// The longest one-line text (`name`, `author`, `license`), in characters.
 pub const MAX_TEXT_LEN: usize = 200;
@@ -96,7 +102,7 @@ pub struct Manifest {
     /// The plugin's slug (WordPress's plugin folder name): lowercase ASCII letters, digits and
     /// single `-`, starting with a letter and ending with a letter or digit, at most
     /// [`MAX_SLUG_LEN`] bytes, not one of [`RESERVED_SLUGS`] and not starting with
-    /// [`RESERVED_SLUG_PREFIX`]. It names the REST namespace
+    /// [`RESERVED_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`]. It names the REST namespace
     /// ([`Manifest::rest_namespace`]) and prefixes table names ([`Manifest::table_prefix`]).
     pub slug: String,
     /// The plugin's name (`Plugin Name`), trimmed. Required.
@@ -408,7 +414,8 @@ pub enum ManifestError {
         /// Which rule it breaks.
         reason: &'static str,
     },
-    /// The slug is one of [`RESERVED_SLUGS`] or starts with [`RESERVED_SLUG_PREFIX`].
+    /// The slug is one of [`RESERVED_SLUGS`] or starts with [`RESERVED_SLUG_PREFIX`] or
+    /// [`SQLITE_SLUG_PREFIX`].
     ReservedSlug {
         /// The slug.
         slug: String,
@@ -763,8 +770,14 @@ impl Manifest {
     /// (`acme__forms_x` and `acme_forms__x` differ), and no core table, which has no `__`, can
     /// be made. Task 12.6 keeps the whole name within MySQL's 64 and PostgreSQL's 63 bytes.
     pub fn table_prefix(&self) -> String {
-        format!("{}__", self.slug.replace('-', "_"))
+        table_prefix_for(&self.slug)
     }
+}
+
+/// The table prefix of the plugin with the (valid) slug `slug`, as
+/// [`Manifest::table_prefix`] gives it: the slug with `-` as `_`, then `__` (Ruling R101).
+pub fn table_prefix_for(slug: &str) -> String {
+    format!("{}__", slug.replace('-', "_"))
 }
 
 /// SPDX ids known to be GPL-compatible, from the Free Software Foundation's list. Some (such as
@@ -990,7 +1003,10 @@ pub(super) fn check_slug(slug: &str) -> Result<(), ManifestError> {
             "a slug does not end with `-` or have two `-` in a row",
         ));
     }
-    if RESERVED_SLUGS.contains(&slug) || slug.starts_with(RESERVED_SLUG_PREFIX) {
+    if RESERVED_SLUGS.contains(&slug)
+        || slug.starts_with(RESERVED_SLUG_PREFIX)
+        || slug.starts_with(SQLITE_SLUG_PREFIX)
+    {
         return Err(ManifestError::ReservedSlug {
             slug: slug.to_owned(),
         });

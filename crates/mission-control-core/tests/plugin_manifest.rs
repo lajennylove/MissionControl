@@ -338,6 +338,9 @@ fn reserved_slugs_are_refused() {
         "wp-block-editor",
         "wp-abilities",
         "wp-mail-smtp",
+        // Their table prefixes would start with `sqlite_`, which SQLite keeps.
+        "sqlite",
+        "sqlite-cache",
     ] {
         let text = without("slug", &format!("slug = \"{slug}\""));
         assert_eq!(
@@ -349,6 +352,8 @@ fn reserved_slugs_are_refused() {
     }
     let text = without("slug", "slug = \"wpforms\"");
     assert_eq!(parse(&text).unwrap().slug, "wpforms");
+    let text = without("slug", "slug = \"sqlitex\"");
+    assert_eq!(parse(&text).unwrap().table_prefix(), "sqlitex__");
 }
 
 // Name and other text.

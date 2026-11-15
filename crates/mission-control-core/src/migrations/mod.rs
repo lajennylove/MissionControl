@@ -32,6 +32,7 @@ mod m20261115120000_create_post_types_table;
 mod m20261115120100_create_taxonomies_table;
 mod m20261115120200_create_field_groups_table;
 mod m20261115120300_create_field_group_locations_table;
+mod m20261115121200_create_plugin_migrations_table;
 
 /// Every core migration, in order. `run` applies the pending ones as one batch, and `rollback`
 /// reverts the last batch.
@@ -59,5 +60,6 @@ pub fn migrator() -> Result<Migrator, Error> {
         m20261115120100_create_taxonomies_table::migration(),
         m20261115120200_create_field_groups_table::migration(),
         m20261115120300_create_field_group_locations_table::migration(),
+        m20261115121200_create_plugin_migrations_table::migration(),
     ])
 }

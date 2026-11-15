@@ -9,6 +9,7 @@
 //! let manifest = plugins.install(&zip)?;           // the admin's upload
 //! plugins.activate(&manifest.slug, owner).await?;  // the admin's "Activate" link
 //! plugins.deactivate(&manifest.slug, owner).await?;
+//! plugins.delete(&manifest.slug, remove_data).await?; // the admin's "Delete" link
 //! ```
 //!
 //! # Installing
@@ -66,6 +67,23 @@
 //! WordPress), removes its hooks ([`Hooks::remove_plugin`]) and the post types, taxonomies and
 //! field groups it registered ([`Registry::remove_plugin`]), drops its instance, and takes it
 //! off the option.
+//!
+//! # Migrations and deleting
+//!
+//! A plugin with the `migrations` permission may ship database tables (Task 12.6): its
+//! `migrations` export returns them as schema-builder statements, which
+//! [`parse_migrations`](super::parse_migrations) checks (every table its own, by its prefix)
+//! and renders. [`Plugins::activate`] runs the pending ones after loading the plugin and before
+//! its `init` and `activate`, so both find its tables, as WordPress plugins create their tables
+//! in their activation hook; a refused list or a failed migration refuses the activation. One
+//! activation is one batch in `plugin_migrations`. Deactivating keeps the tables, as WordPress
+//! does, and so does [`Plugins::boot`], which runs no migration.
+//!
+//! [`Plugins::delete`] removes an inactive plugin's folder, as WordPress's `delete_plugins`.
+//! When the owner asks to delete its data too, the plugin is loaded (not started) for its
+//! migrations, and every one it ran is reverted first, newest first (Laravel's
+//! `migrate:reset`); without that, its tables and their history stay, and a later install of
+//! the plugin finds them.
 //!
 //! # Starting
 //!
@@ -128,6 +146,10 @@ use super::host::{
     HostError, MAX_COMPONENT_BYTES, Plugin, PluginHost, PluginLimits, clean, with_current_user,
 };
 use super::manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest, ManifestError, check_slug};
+use super::migrations::{
+    MigrationError, applied_migrations, parse_migrations, plugin_tables, reset_migrations,
+    run_pending_migrations,
+};
 use crate::content::{get_option, set_option};
 use crate::hooks::Hooks;
 use crate::types::Registry;
@@ -360,6 +382,15 @@ pub enum LifecycleError {
         /// The limit.
         max: usize,
     },
+    /// The plugin's migrations were refused, or one failed or did not roll back.
+    Migrations(MigrationError),
+    /// The plugin is active, so it cannot be deleted: deactivate it first.
+    Active {
+        /// The slug.
+        slug: String,
+    },
+    /// The plugin's folder could not be removed.
+    Io(String),
     /// The database refused to read or write an option.
     Database(String),
 }
@@ -375,6 +406,12 @@ impl fmt::Display for LifecycleError {
                 f,
                 "{max} plugins are active, the most allowed. Deactivate one first."
             ),
+            Self::Migrations(e) => write!(f, "The plugin's database tables: {e}."),
+            Self::Active { slug } => write!(
+                f,
+                "The plugin `{slug}` is active. Deactivate it before deleting it."
+            ),
+            Self::Io(e) => write!(f, "The plugin's folder could not be removed: {e}."),
             Self::Database(e) => write!(f, "The plugin settings could not be saved: {e}."),
         }
     }
@@ -393,6 +430,17 @@ pub struct Notice {
     /// What failed, as text: control and invisible characters escaped, at most
     /// [`MAX_NOTICE_CHARS`] characters. Escape it as HTML where it is shown.
     pub message: String,
+}
+
+/// What [`Plugins::delete`] did with a plugin's data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Deleted {
+    /// The migrations reverted, in the order they were (newest first); empty without
+    /// `remove_data`.
+    pub reverted: Vec<String>,
+    /// The tables with the plugin's prefix still there once its migrations were reverted: what
+    /// its `down` statements did not drop. Empty without `remove_data`.
+    pub leftover_tables: Vec<String>,
 }
 
 /// A plugin failure waiting to be written.
@@ -785,9 +833,10 @@ impl Plugins {
     // ----- Activating and deactivating -----
 
     /// Activates the installed plugin `slug` with `user` acting (the site owner who activates
-    /// it), as WordPress's `activate_plugin`: checks its manifest, loads it, runs its `init`
+    /// it), as WordPress's `activate_plugin`: checks its manifest, loads it, runs its pending
+    /// migrations (see the module documentation, "Migrations and deleting"), runs its `init`
     /// (no user acting) and its `activate` (`user` acting), and adds it to
-    /// [`ACTIVE_PLUGINS_OPTION`] when both succeed. A plugin that is active already is left as
+    /// [`ACTIVE_PLUGINS_OPTION`] when all succeed. A plugin that is active already is left as
     /// it is.
     ///
     /// # Errors
@@ -797,8 +846,10 @@ impl Plugins {
     /// [`LifecycleError::TooManyActive`] when [`MAX_ACTIVE_PLUGINS`] are active;
     /// [`LifecycleError::Host`] when it does not load or its `init` or `activate` refuses, traps or
     /// passes a limit: it is left inactive, and for a trap or a limit the owner gets a
-    /// [`Notice`]; [`LifecycleError::Database`] when the option cannot be written (the plugin
-    /// is deactivated again).
+    /// [`Notice`]; [`LifecycleError::Migrations`] when its migrations are refused (nothing ran)
+    /// or one fails (the ones before it stay applied): it is left inactive;
+    /// [`LifecycleError::Database`] when the option cannot be written (the plugin is
+    /// deactivated again).
     pub async fn activate(&self, slug: &str, user: UserCaps) -> Result<(), LifecycleError> {
         let _writes = self.writes.lock().await;
         let outcome = self.start_locked(slug, Some(user)).await;
@@ -838,6 +889,14 @@ impl Plugins {
         }
         let plugin = blocking(|| self.host.load(manifest, &wasm))
             .map_err(|e| (LifecycleError::Host(e), false))?;
+        // The owner's activation runs the pending migrations first, so `init` and `activate`
+        // find the plugin's tables. A start runs none.
+        if activating.is_some()
+            && let Err(e) = self.migrate(&plugin).await
+        {
+            plugin.remove_hooks();
+            return Err((e, plugin.trapped()));
+        }
         // `init` runs with no user acting, as WordPress includes a plugin's main file.
         let started = blocking(|| plugin.init()).and_then(|()| match activating {
             Some(user) => blocking(|| with_current_user(user, || plugin.activate())),
@@ -901,6 +960,128 @@ impl Plugins {
             log::error!(target: LOG_TARGET, "a plugin failure could not be written: {e}");
         }
         Ok(was_loaded || listed)
+    }
+
+    /// Runs the pending migrations of `plugin`, loaded and not started: reads them from its
+    /// `migrations` export, checks them whole, then runs those it has not run as one batch.
+    async fn migrate(&self, plugin: &Plugin) -> Result<(), LifecycleError> {
+        let Some(json) = blocking(|| plugin.migrations()).map_err(LifecycleError::Host)? else {
+            return Ok(());
+        };
+        let migrations = parse_migrations(plugin.manifest(), &json, self.db.driver())
+            .map_err(LifecycleError::Migrations)?;
+        let ran = run_pending_migrations(&self.db, plugin.slug(), &migrations)
+            .await
+            .map_err(LifecycleError::Migrations)?;
+        if !ran.is_empty() {
+            log::info!(
+                target: LOG_TARGET,
+                "[{}] ran the plugin's migrations: {}",
+                plugin.slug(),
+                ran.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Deletes the installed plugin `slug`, as WordPress's `delete_plugins`: removes its
+    /// folder. With `remove_data` (the owner chose to delete its data), every migration the
+    /// plugin ran is reverted first, newest first, and its history removed; without it, its
+    /// tables and their history stay. Deactivation never reverts a migration.
+    ///
+    /// Removing the data reverts what the plugin's own `down` statements undo, and no more:
+    /// afterwards the tables that still carry the plugin's prefix (a `down` that forgot one)
+    /// are listed in [`Deleted::leftover_tables`] and logged as a warning, and the plugin is
+    /// deleted anyway, so the owner can be told and drop them.
+    ///
+    /// The history and the tables belong to the slug: a plugin deleted without its data and
+    /// installed again later, or another plugin installed under the same slug, finds them, and
+    /// runs only the migrations not recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`LifecycleError::NotInstalled`]; [`LifecycleError::Active`] while the plugin is active
+    /// (deactivate it first, as WordPress requires); with `remove_data`, the errors of loading
+    /// it ([`LifecycleError::Read`], [`LifecycleError::Manifest`], [`LifecycleError::Host`])
+    /// and of its migrations ([`LifecycleError::Migrations`]: a list that is refused, history
+    /// the plugin no longer ships, or a `down` that fails); [`LifecycleError::Database`] when
+    /// the options cannot be read; [`LifecycleError::Io`] when the folder cannot be removed.
+    /// The folder is removed only when the data, if asked, is.
+    pub async fn delete(&self, slug: &str, remove_data: bool) -> Result<Deleted, LifecycleError> {
+        let _writes = self.writes.lock().await;
+        valid_slug(slug)?;
+        let folder = self.dir.join(slug);
+        match fs::symlink_metadata(&folder) {
+            Ok(meta) if meta.is_dir() => {}
+            _ => {
+                return Err(LifecycleError::NotInstalled {
+                    slug: slug.to_owned(),
+                });
+            }
+        }
+        if self.is_active(slug) || self.active_slugs().await?.iter().any(|s| s == slug) {
+            return Err(LifecycleError::Active {
+                slug: slug.to_owned(),
+            });
+        }
+        let mut deleted = Deleted::default();
+        if remove_data {
+            let outcome = self.remove_data(slug).await;
+            // A trap in the `migrations` export queued a failure: write its notice now.
+            if let Err(e) = self.recover_locked().await {
+                log::error!(target: LOG_TARGET, "a plugin failure could not be written: {e}");
+            }
+            deleted.reverted = outcome?;
+            let prefix = super::manifest::table_prefix_for(slug);
+            deleted.leftover_tables = plugin_tables(&self.db, &prefix)
+                .await
+                .map_err(LifecycleError::Migrations)?;
+            if !deleted.leftover_tables.is_empty() {
+                log::warn!(
+                    target: LOG_TARGET,
+                    "[{slug}] the plugin's migrations were rolled back, and these tables of it \
+                     are left: {}",
+                    deleted.leftover_tables.join(", ")
+                );
+            }
+        }
+        {
+            // No install of the slug may run while its folder goes.
+            let _install = self.installs.lock().unwrap_or_else(|e| e.into_inner());
+            remove_folder(&self.dir, &folder).map_err(|e| LifecycleError::Io(e.to_string()))?;
+        }
+        log::info!(target: LOG_TARGET, "[{slug}] the plugin is deleted");
+        Ok(deleted)
+    }
+
+    /// Reverts every migration the plugin `slug` ran, if it ran any, loading it (not starting
+    /// it) for its migrations.
+    async fn remove_data(&self, slug: &str) -> Result<Vec<String>, LifecycleError> {
+        let applied = applied_migrations(&self.db, slug)
+            .await
+            .map_err(LifecycleError::Migrations)?;
+        if applied.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (manifest, wasm) = self.read_installed(slug)?;
+        let plugin = blocking(|| self.host.load(manifest, &wasm)).map_err(LifecycleError::Host)?;
+        let json = blocking(|| plugin.migrations());
+        // It is never started: it goes as soon as its migrations are read.
+        plugin.remove_hooks();
+        let json = json
+            .map_err(LifecycleError::Host)?
+            .unwrap_or_else(|| "[]".to_owned());
+        let migrations = parse_migrations(plugin.manifest(), &json, self.db.driver())
+            .map_err(LifecycleError::Migrations)?;
+        let reverted = reset_migrations(&self.db, slug, &migrations)
+            .await
+            .map_err(LifecycleError::Migrations)?;
+        log::info!(
+            target: LOG_TARGET,
+            "[{slug}] rolled back the plugin's migrations: {}",
+            reverted.join(", ")
+        );
+        Ok(reverted)
     }
 
     /// Reads the manifest and the module of the installed plugin `slug`, each a regular file
@@ -1372,6 +1553,24 @@ fn claim_and_move(temp: &Path, target: &Path) -> io::Result<()> {
     fs::rename(temp, target).inspect_err(|_| {
         let _ = fs::remove_dir(target);
     })
+}
+
+/// Removes the plugin folder `folder` in `dir`: renamed first to a temporary name (which
+/// [`Plugins::boot`] sweeps if the removal is cut short), so the plugin is gone at once and a
+/// half-removed folder never passes for a plugin.
+fn remove_folder(dir: &Path, folder: &Path) -> io::Result<()> {
+    let doomed = loop {
+        let candidate = dir.join(format!(
+            "{TEMP_PREFIX}{}.{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::symlink_metadata(&candidate).is_err() {
+            break candidate;
+        }
+    };
+    fs::rename(folder, &doomed)?;
+    fs::remove_dir_all(&doomed)
 }
 
 /// The start of the name of an install's temporary folder.
