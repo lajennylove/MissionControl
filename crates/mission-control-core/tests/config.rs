@@ -1,4 +1,4 @@
-use mission_control_core::config::{ConfigError, load_from};
+use mission_control_core::config::{ConfigError, Environment, TrustedProxies, load_from};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -148,6 +148,82 @@ fn empty_themes_dir_is_invalid() {
         ConfigError::Invalid {
             name: "MC_THEMES_DIR",
             value: String::new()
+        }
+    );
+}
+
+#[test]
+fn environment_defaults_to_production_as_wordpress() {
+    let path = env_file("envdefault", REQUIRED);
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.environment, Environment::Production);
+    assert_eq!(config.trusted_proxies, TrustedProxies::None);
+}
+
+#[test]
+fn environment_reads_wordpresss_four_types() {
+    for (text, expected) in [
+        ("local", Environment::Local),
+        ("development", Environment::Development),
+        ("Staging", Environment::Staging),
+        ("production", Environment::Production),
+    ] {
+        let config = load_from(
+            None,
+            lookup(&[
+                ("DATABASE_URL", "sqlite://mc.db"),
+                ("IGNITE_SECRET_KEY", "abc"),
+                ("MC_ENV", text),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(config.environment, expected, "{text}");
+        assert_eq!(config.environment.as_str(), text.to_ascii_lowercase());
+    }
+}
+
+#[test]
+fn unknown_environment_is_invalid() {
+    let path = env_file("envbad", &format!("{REQUIRED}MC_ENV=prod\n"));
+    let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+    assert_eq!(
+        error,
+        ConfigError::Invalid {
+            name: "MC_ENV",
+            value: "prod".to_owned()
+        }
+    );
+}
+
+#[test]
+fn trusted_proxies_are_a_list_of_addresses_or_a_star() {
+    let read = |value: &str| {
+        load_from(
+            None,
+            lookup(&[
+                ("DATABASE_URL", "sqlite://mc.db"),
+                ("IGNITE_SECRET_KEY", "abc"),
+                ("MC_TRUSTED_PROXIES", value),
+            ]),
+        )
+    };
+    assert_eq!(read("*").unwrap().trusted_proxies, TrustedProxies::All);
+    assert_eq!(read("  ").unwrap().trusted_proxies, TrustedProxies::None);
+    let list = read("127.0.0.1, ::1").unwrap().trusted_proxies;
+    assert_eq!(
+        list,
+        TrustedProxies::Addresses(vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()])
+    );
+    assert!(list.trusts(Some("127.0.0.1".parse().unwrap())));
+    assert!(!list.trusts(Some("10.0.0.1".parse().unwrap())));
+    assert!(!list.trusts(None));
+    assert!(TrustedProxies::All.trusts(None));
+    assert!(!TrustedProxies::None.trusts(Some("127.0.0.1".parse().unwrap())));
+    assert_eq!(
+        read("127.0.0.1, proxy").err().unwrap(),
+        ConfigError::Invalid {
+            name: "MC_TRUSTED_PROXIES",
+            value: "127.0.0.1, proxy".to_owned()
         }
     );
 }

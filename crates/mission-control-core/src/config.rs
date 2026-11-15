@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 /// The application configuration, the equivalent of `wp-config.php`.
@@ -18,6 +19,105 @@ pub struct Config {
     /// The folder that holds the installed themes, one folder per theme (`MC_THEMES_DIR`), as
     /// WordPress's `wp-content/themes`. Default `themes`, relative to the working directory.
     pub themes_dir: PathBuf,
+    /// The kind of environment the site runs in (`MC_ENV`), as WordPress's
+    /// `wp_get_environment_type`. Default `production`.
+    pub environment: Environment,
+    /// The proxies whose `X-Forwarded-Proto` header is believed (`MC_TRUSTED_PROXIES`), as
+    /// Laravel's `TrustProxies`. Default none.
+    pub trusted_proxies: TrustedProxies,
+}
+
+/// The kind of environment a site runs in, WordPress's environment types (`WP_ENVIRONMENT_TYPE`).
+///
+/// Only [`Environment::Local`] changes behaviour for now: application passwords work over plain
+/// HTTP there, as WordPress's `wp_is_application_passwords_supported` allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Environment {
+    /// A developer's own machine (`local`).
+    Local,
+    /// A shared development site (`development`).
+    Development,
+    /// A pre-release copy of the live site (`staging`).
+    Staging,
+    /// The live site (`production`), the default.
+    #[default]
+    Production,
+}
+
+impl Environment {
+    /// The name, as `MC_ENV` and WordPress's `wp_get_environment_type` spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Development => "development",
+            Self::Staging => "staging",
+            Self::Production => "production",
+        }
+    }
+
+    /// The environment named `name`, ignoring ASCII case; `None` for any other name.
+    pub fn parse(name: &str) -> Option<Self> {
+        [
+            Self::Local,
+            Self::Development,
+            Self::Staging,
+            Self::Production,
+        ]
+        .into_iter()
+        .find(|env| env.as_str().eq_ignore_ascii_case(name.trim()))
+    }
+}
+
+/// The reverse proxies trusted to say how a client reached the site, as Laravel's
+/// `TrustProxies` middleware lists them: a request is taken to have arrived over HTTPS when its
+/// `X-Forwarded-Proto` says so and it comes straight from one of them. Untrusted by default, so
+/// a client cannot claim HTTPS by sending the header itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TrustedProxies {
+    /// No proxy is trusted (`MC_TRUSTED_PROXIES` unset or empty).
+    #[default]
+    None,
+    /// Every peer is trusted (`*`): only when nothing reaches the app but through the proxy.
+    All,
+    /// The peers with these addresses (`127.0.0.1, ::1`).
+    Addresses(Vec<IpAddr>),
+}
+
+impl TrustedProxies {
+    /// Whether a request from the peer at `peer` is believed. An unknown peer is trusted only
+    /// when every peer is.
+    pub fn trusts(&self, peer: Option<IpAddr>) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Addresses(addresses) => {
+                peer.is_some_and(|peer| addresses.contains(&peer.to_canonical()))
+            }
+        }
+    }
+
+    /// The proxies in `value`: empty for none, `*` for all, or IP addresses separated by commas.
+    /// `None` when an entry is not an IP address.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Some(Self::None);
+        }
+        if value == "*" {
+            return Some(Self::All);
+        }
+        value
+            .split(',')
+            .map(|entry| {
+                entry
+                    .trim()
+                    .parse::<IpAddr>()
+                    .ok()
+                    .map(|ip| ip.to_canonical())
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Self::Addresses)
+    }
 }
 
 /// An error raised while reading the configuration.
@@ -42,6 +142,8 @@ impl fmt::Debug for Config {
             .field("debug", &self.debug)
             .field("upload_max_bytes", &self.upload_max_bytes)
             .field("themes_dir", &self.themes_dir)
+            .field("environment", &self.environment)
+            .field("trusted_proxies", &self.trusted_proxies)
             .finish()
     }
 }
@@ -116,6 +218,20 @@ pub fn load_from(
         }
         Some(value) => PathBuf::from(value),
     };
+    let environment = match get("MC_ENV") {
+        None => Environment::Production,
+        Some(value) => Environment::parse(&value).ok_or(ConfigError::Invalid {
+            name: "MC_ENV",
+            value,
+        })?,
+    };
+    let trusted_proxies = match get("MC_TRUSTED_PROXIES") {
+        None => TrustedProxies::None,
+        Some(value) => TrustedProxies::parse(&value).ok_or(ConfigError::Invalid {
+            name: "MC_TRUSTED_PROXIES",
+            value,
+        })?,
+    };
 
     Ok(Config {
         database_url,
@@ -123,5 +239,7 @@ pub fn load_from(
         debug,
         upload_max_bytes,
         themes_dir,
+        environment,
+        trusted_proxies,
     })
 }
