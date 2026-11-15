@@ -136,6 +136,19 @@ pub enum ConfigError {
         /// The offending value.
         value: String,
     },
+    /// The `.env` file has a line that cannot be parsed (an unclosed quote, a bad escape). The
+    /// line's text is not included: it may hold a secret.
+    EnvSyntax {
+        /// The `.env` file.
+        path: PathBuf,
+        /// The 1-based line number where the bad line starts, when it could be found.
+        line: Option<usize>,
+    },
+    /// The `.env` file exists but cannot be read.
+    EnvUnreadable {
+        /// The `.env` file.
+        path: PathBuf,
+    },
 }
 
 impl fmt::Debug for Config {
@@ -160,6 +173,26 @@ impl fmt::Display for ConfigError {
             ConfigError::Invalid { name, value } => {
                 write!(f, "{name} has an invalid value: {value:?}")
             }
+            ConfigError::EnvSyntax {
+                path,
+                line: Some(line),
+            } => write!(
+                f,
+                "{} has a line Mission Control cannot read (line {line}). Check it for an \
+                 unclosed quote or a stray backslash.",
+                path.display()
+            ),
+            ConfigError::EnvSyntax { path, line: None } => write!(
+                f,
+                "{} has a line Mission Control cannot read. Check it for an unclosed quote or \
+                 a stray backslash.",
+                path.display()
+            ),
+            ConfigError::EnvUnreadable { path } => write!(
+                f,
+                "{} cannot be read. Check that the user that runs Mission Control may read it.",
+                path.display()
+            ),
         }
     }
 }
@@ -182,10 +215,8 @@ pub fn load_from(
     env_file: Option<&Path>,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Config, ConfigError> {
-    let file: HashMap<String, String> = match env_file {
-        Some(path) => dotenvy::from_path_iter(path)
-            .map(|items| items.filter_map(Result::ok).collect())
-            .unwrap_or_default(),
+    let file = match env_file {
+        Some(path) => read_env_file(path)?,
         None => HashMap::new(),
     };
     let get = |name: &str| lookup(name).or_else(|| file.get(name).cloned());
@@ -258,4 +289,40 @@ pub fn load_from(
         environment,
         trusted_proxies,
     })
+}
+
+/// Reads the variables of a `.env` file. A missing file is empty; an unreadable or unparseable
+/// one is an error that names the file and the line, never the line's text.
+fn read_env_file(path: &Path) -> Result<HashMap<String, String>, ConfigError> {
+    let unreadable = || ConfigError::EnvUnreadable {
+        path: path.to_path_buf(),
+    };
+    let items = match dotenvy::from_path_iter(path) {
+        Ok(items) => items,
+        Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
+        Err(_) => return Err(unreadable()),
+    };
+    let mut vars = HashMap::new();
+    for item in items {
+        match item {
+            Ok((name, value)) => {
+                vars.insert(name, value);
+            }
+            Err(dotenvy::Error::LineParse(text, _)) => {
+                // The error holds the text of the bad line, which the file's own text locates.
+                let line = std::fs::read_to_string(path).ok().and_then(|all| {
+                    all.find(&text)
+                        .map(|at| all[..at].matches('\n').count() + 1)
+                });
+                return Err(ConfigError::EnvSyntax {
+                    path: path.to_path_buf(),
+                    line,
+                });
+            }
+            Err(_) => return Err(unreadable()),
+        }
+    }
+    Ok(vars)
 }

@@ -251,3 +251,30 @@ fn trusted_proxies_are_a_list_of_addresses_or_a_star() {
         }
     );
 }
+
+#[test]
+fn unparseable_env_line_is_reported_with_its_line_number_and_no_content() {
+    let path = env_file(
+        "syntax",
+        "DATABASE_URL=sqlite://a.db\n# comment\n\nIGNITE_SECRET_KEY='unclosed-top-secret\n",
+    );
+    let error = load_from(Some(&path), |_| None).unwrap_err();
+    assert_eq!(
+        error,
+        ConfigError::EnvSyntax {
+            path: path.clone(),
+            line: Some(4)
+        }
+    );
+    let text = format!("{error} {error:?}");
+    assert!(text.contains("line 4") && !text.contains("top-secret"));
+}
+
+#[test]
+fn missing_env_file_is_still_fine() {
+    let path = std::env::temp_dir().join(format!("mc-config-{}-nofile/.env", std::process::id()));
+    assert_eq!(
+        load_from(Some(&path), |_| None).unwrap_err(),
+        ConfigError::Missing("DATABASE_URL")
+    );
+}
