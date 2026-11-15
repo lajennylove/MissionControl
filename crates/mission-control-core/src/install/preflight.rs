@@ -20,6 +20,8 @@ pub enum IssueCode {
     LowDiskSpace,
     /// The install path exists but is a file, not a folder.
     NotADirectory,
+    /// The checks themselves could not run, so nothing is known to be ready.
+    ChecksFailed,
 }
 
 /// A problem the site owner can fix, with a plain-language explanation.

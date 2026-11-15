@@ -1380,6 +1380,7 @@ dependencies = [
  "base64",
  "chrono",
  "image",
+ "log",
  "mission-control",
  "mission-control-core",
  "mission-control-testing",

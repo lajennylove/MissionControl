@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 mission-control = { path = "../mission-control" }
 mission-control-core = { path = "../mission-control-core" }
+log = "0.4"
 rocket = "0.5.2"
 
 [dev-dependencies]

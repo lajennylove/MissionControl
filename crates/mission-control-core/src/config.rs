@@ -127,8 +127,17 @@ impl TrustedProxies {
 /// An error raised while reading the configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// A required variable is not set.
+    /// A required variable is not set, or is set to an empty or whitespace-only value.
     Missing(&'static str),
+    /// The `.env` file exists but neither it nor the environment sets these required variables.
+    /// The installer never writes over an existing `.env`, as WordPress never installs over an
+    /// existing `wp-config.php`, so the owner must complete the file or move it away.
+    Incomplete {
+        /// The `.env` file.
+        path: PathBuf,
+        /// The required variables that are missing, in the order they are read.
+        missing: Vec<&'static str>,
+    },
     /// A variable is set to a value that cannot be used.
     Invalid {
         /// The variable name.
@@ -170,6 +179,19 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::Missing(name) => write!(f, "{name} is not set"),
+            ConfigError::Incomplete { path, missing } => {
+                let (names, verb, them) = match missing.len() {
+                    1 => (missing[0].to_owned(), "is", "it"),
+                    _ => (missing.join(" and "), "are", "them"),
+                };
+                write!(
+                    f,
+                    "{names} {verb} not set (or {verb} blank) in {} or the environment. A blank \
+                     environment variable overrides the file. Set {them} in that file or in the \
+                     environment, or move the file away to run the installer.",
+                    path.display(),
+                )
+            }
             ConfigError::Invalid { name, value } => {
                 write!(f, "{name} has an invalid value: {value:?}")
             }
@@ -204,7 +226,40 @@ impl std::error::Error for ConfigError {}
 /// Variables set in the process environment override the ones in `.env`. A missing `.env`
 /// file is not an error.
 pub fn load() -> Result<Config, ConfigError> {
-    load_from(Some(Path::new(".env")), |name| std::env::var(name).ok())
+    load_from(Some(Path::new(".env")), process_environment()?)
+}
+
+/// The variables [`load_from`] reads.
+pub const VARIABLES: [&str; 8] = [
+    "DATABASE_URL",
+    "IGNITE_SECRET_KEY",
+    "MC_DEBUG",
+    "MC_UPLOAD_MAX_BYTES",
+    "MC_THEMES_DIR",
+    "MC_UPLOADS_DIR",
+    "MC_ENV",
+    "MC_TRUSTED_PROXIES",
+];
+
+/// What an invalid variable's value is shown as when the value is not valid UTF-8. The value
+/// itself is never shown: it may be a secret.
+pub const NOT_UTF8: &str = "(not valid UTF-8)";
+
+/// The process environment as a lookup for [`load_from`].
+///
+/// A variable in [`VARIABLES`] that is set to a value that is not valid UTF-8 is an
+/// [`ConfigError::Invalid`] error (its value shown as [`NOT_UTF8`]), not a variable that is
+/// not set.
+pub fn process_environment() -> Result<impl Fn(&str) -> Option<String>, ConfigError> {
+    for name in VARIABLES {
+        if std::env::var_os(name).is_some_and(|value| value.to_str().is_none()) {
+            return Err(ConfigError::Invalid {
+                name,
+                value: NOT_UTF8.to_owned(),
+            });
+        }
+    }
+    Ok(|name: &str| std::env::var(name).ok())
 }
 
 /// Loads the configuration from an optional `.env` file and an environment lookup.
@@ -220,7 +275,12 @@ pub fn load_from(
         None => HashMap::new(),
     };
     let get = |name: &str| lookup(name).or_else(|| file.get(name).cloned());
-    let required = |name: &'static str| get(name).ok_or(ConfigError::Missing(name));
+    // An empty or whitespace-only secret is as good as none.
+    let required = |name: &'static str| {
+        get(name)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ConfigError::Missing(name))
+    };
 
     let database_url = required("DATABASE_URL")?;
     let secret_key = required("IGNITE_SECRET_KEY")?;

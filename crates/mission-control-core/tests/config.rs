@@ -64,6 +64,52 @@ fn missing_secret_key() {
 }
 
 #[test]
+fn empty_or_blank_secrets_are_missing() {
+    let path = env_file("blank-url", "DATABASE_URL=\nIGNITE_SECRET_KEY=abc\n");
+    let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+    assert_eq!(error, ConfigError::Missing("DATABASE_URL"));
+
+    let path = env_file("blank-key", "DATABASE_URL=x\nIGNITE_SECRET_KEY=\"   \"\n");
+    let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+    assert_eq!(error, ConfigError::Missing("IGNITE_SECRET_KEY"));
+
+    // A blank value in the environment overrides the file's, and is missing too.
+    let path = env_file("blank-env", REQUIRED);
+    let error = load_from(Some(&path), lookup(&[("IGNITE_SECRET_KEY", " \t")]))
+        .err()
+        .unwrap();
+    assert_eq!(error, ConfigError::Missing("IGNITE_SECRET_KEY"));
+}
+
+#[test]
+fn incomplete_error_names_the_file_and_keys() {
+    let error = ConfigError::Incomplete {
+        path: PathBuf::from("/srv/site/.env"),
+        missing: vec!["DATABASE_URL", "IGNITE_SECRET_KEY"],
+    };
+    let message = error.to_string();
+    assert!(message.contains("/srv/site/.env"), "{message}");
+    assert!(
+        message.contains("DATABASE_URL and IGNITE_SECRET_KEY are not set (or are blank)"),
+        "{message}"
+    );
+}
+
+#[test]
+fn incomplete_error_for_one_key() {
+    let error = ConfigError::Incomplete {
+        path: PathBuf::from("/srv/site/.env"),
+        missing: vec!["IGNITE_SECRET_KEY"],
+    };
+    assert!(
+        error.to_string().starts_with(
+            "IGNITE_SECRET_KEY is not set (or is blank) in /srv/site/.env or the environment."
+        ),
+        "{error}"
+    );
+}
+
+#[test]
 fn works_without_an_env_file() {
     let config = load_from(
         None,
