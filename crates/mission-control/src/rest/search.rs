@@ -1,4 +1,4 @@
-//! The route of the search controller: `GET /wp-json/wp/v2/search`, over the core's
+//! The route of the search controller: `GET /mc-json/mc/v2/search`, over the core's
 //! [`SearchController`].
 //!
 //! The path is fixed, so the route ranks before the posts and terms routes, whose `rest_base`
@@ -76,7 +76,7 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes
 }
 
-#[rocket::get("/wp-json/wp/v2/search")]
+#[rocket::get("/mc-json/mc/v2/search")]
 async fn search(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     let controller = SearchController {

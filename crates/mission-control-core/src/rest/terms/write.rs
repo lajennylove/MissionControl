@@ -260,7 +260,7 @@ pub(super) async fn create(
     let site = Site::load(ctl.db).await?;
     let response = respond(ctl, &site, term.term_id, 201, Context::Edit).await?;
     let location = site.rest_url(&format!(
-        "wp/v2/{}/{}",
+        "mc/v2/{}/{}",
         ctl.taxonomy.rest_base, term.term_id
     ));
     Ok(response.with_header("Location", location))

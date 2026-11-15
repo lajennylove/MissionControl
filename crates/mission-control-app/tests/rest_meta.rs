@@ -321,7 +321,7 @@ async fn registered_keys_show_with_their_defaults_and_nothing_else_shows() {
         .unwrap();
 
     let (status, json) = site
-        .get(&format!("/wp-json/wp/v2/posts/{}", post.id), None)
+        .get(&format!("/mc-json/mc/v2/posts/{}", post.id), None)
         .await;
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(
@@ -345,21 +345,21 @@ async fn registered_keys_show_with_their_defaults_and_nothing_else_shows() {
     // The keys are registered for posts only: a page shows only the key of every post type.
     let page = site.post_of("page", "admin", PostStatus::Publish).await;
     let (_, json) = site
-        .get(&format!("/wp-json/wp/v2/pages/{}", page.id), None)
+        .get(&format!("/mc-json/mc/v2/pages/{}", page.id), None)
         .await;
     assert_eq!(json["meta"], json!({"everywhere": ""}));
 
     // `_fields` reaches into `meta`; the embed context leaves it out.
     let (_, json) = site
         .get(
-            &format!("/wp-json/wp/v2/posts/{}?_fields=meta.subtitle", post.id),
+            &format!("/mc-json/mc/v2/posts/{}?_fields=meta.subtitle", post.id),
             None,
         )
         .await;
     assert_eq!(json, json!({"meta": {"subtitle": "None yet"}}));
     let (_, json) = site
         .get(
-            &format!("/wp-json/wp/v2/posts/{}?context=embed", post.id),
+            &format!("/mc-json/mc/v2/posts/{}?context=embed", post.id),
             None,
         )
         .await;
@@ -371,7 +371,7 @@ async fn each_type_is_written_and_read_back_typed() {
     let site = site().await;
     let (status, json) = site
         .post(
-            "/wp-json/wp/v2/posts",
+            "/mc-json/mc/v2/posts",
             "admin",
             json!({
                 "title": "Typed",
@@ -425,13 +425,13 @@ async fn each_type_is_written_and_read_back_typed() {
     assert_eq!(get_post_meta(db, id, "unregistered").await.unwrap(), None);
     assert_eq!(get_post_meta(db, id, "hidden").await.unwrap(), None);
 
-    let (_, json) = site.get(&format!("/wp-json/wp/v2/posts/{id}"), None).await;
+    let (_, json) = site.get(&format!("/mc-json/mc/v2/posts/{id}"), None).await;
     assert_eq!(json["meta"], expected);
 
     // An update writes only the keys it names.
     let (status, json) = site
         .post(
-            &format!("/wp-json/wp/v2/posts/{id}"),
+            &format!("/mc-json/mc/v2/posts/{id}"),
             "admin",
             json!({"meta": {"rating": 3, "reviewers": ["Cy"]}}),
         )
@@ -446,7 +446,7 @@ async fn each_type_is_written_and_read_back_typed() {
 async fn a_value_of_the_wrong_type_is_refused_and_nothing_is_written() {
     let site = site().await;
     let post = site.post_of("post", "admin", PostStatus::Draft).await;
-    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}", post.id);
 
     let json = assert_error(
         site.post(
@@ -500,7 +500,7 @@ async fn a_value_of_the_wrong_type_is_refused_and_nothing_is_written() {
 async fn a_protected_key_is_refused_without_the_meta_capability() {
     let site = site().await;
     let post = site.post_of("post", "author", PostStatus::Draft).await;
-    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}", post.id);
 
     let json = assert_error(
         site.post(
@@ -555,7 +555,7 @@ async fn a_protected_key_is_refused_without_the_meta_capability() {
     let other = site.post_of("post", "editor", PostStatus::Draft).await;
     assert_error(
         site.post(
-            &format!("/wp-json/wp/v2/posts/{}", other.id),
+            &format!("/mc-json/mc/v2/posts/{}", other.id),
             "author",
             json!({"meta": {"subtitle": "x"}}),
         )
@@ -576,7 +576,7 @@ async fn null_deletes_a_key() {
     set_post_meta(db, post.id, "rating", &json!(4))
         .await
         .unwrap();
-    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}", post.id);
     let (status, json) = site
         .post(&uri, "admin", json!({"meta": {"reviewers": ["A", "B"]}}))
         .await;
@@ -608,7 +608,7 @@ async fn term_meta_is_shown_and_written_through_categories() {
     let site = site().await;
     let (status, json) = site
         .post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             "editor",
             json!({"name": "News", "meta": {"color": "red", "unknown": "x"}}),
         )
@@ -624,7 +624,7 @@ async fn term_meta_is_shown_and_written_through_categories() {
     // An update with nothing but meta still writes it.
     let (status, json) = site
         .post(
-            &format!("/wp-json/wp/v2/categories/{id}"),
+            &format!("/mc-json/mc/v2/categories/{id}"),
             "editor",
             json!({"meta": {"color": "blue"}}),
         )
@@ -632,13 +632,13 @@ async fn term_meta_is_shown_and_written_through_categories() {
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(json["meta"], json!({"color": "blue"}));
     let (_, json) = site
-        .get(&format!("/wp-json/wp/v2/categories/{id}"), None)
+        .get(&format!("/mc-json/mc/v2/categories/{id}"), None)
         .await;
     assert_eq!(json["meta"], json!({"color": "blue"}));
 
     assert_error(
         site.post(
-            &format!("/wp-json/wp/v2/categories/{id}"),
+            &format!("/mc-json/mc/v2/categories/{id}"),
             "editor",
             json!({"meta": {"color": ["not", "a", "string"]}}),
         )
@@ -649,7 +649,7 @@ async fn term_meta_is_shown_and_written_through_categories() {
 
     // The key is registered for categories only: a tag shows none.
     let (status, json) = site
-        .post("/wp-json/wp/v2/tags", "editor", json!({"name": "Rust"}))
+        .post("/mc-json/mc/v2/tags", "editor", json!({"name": "Rust"}))
         .await;
     assert_eq!(status, Status::Created, "{json}");
     assert_eq!(json["meta"], json!({}));
@@ -661,7 +661,7 @@ async fn media_meta_is_shown_and_written_through_media() {
     // A raw upload takes its fields from the query string, `meta[credit]` among them.
     let response = site
         .client
-        .post("/wp-json/wp/v2/media?meta%5Bcredit%5D=Jane")
+        .post("/mc-json/mc/v2/media?meta%5Bcredit%5D=Jane")
         .header(site.auth("author"))
         .header(Header::new("Content-Type", "image/jpeg"))
         .header(Header::new(
@@ -678,14 +678,14 @@ async fn media_meta_is_shown_and_written_through_media() {
 
     let (status, json) = site
         .post(
-            &format!("/wp-json/wp/v2/media/{id}"),
+            &format!("/mc-json/mc/v2/media/{id}"),
             "author",
             json!({"meta": {"credit": "Ann"}}),
         )
         .await;
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(json["meta"], json!({"credit": "Ann", "everywhere": ""}));
-    let (_, json) = site.get(&format!("/wp-json/wp/v2/media/{id}"), None).await;
+    let (_, json) = site.get(&format!("/mc-json/mc/v2/media/{id}"), None).await;
     assert_eq!(json["meta"], json!({"credit": "Ann", "everywhere": ""}));
     assert_eq!(
         get_post_meta(site.db(), id, "credit").await.unwrap(),
@@ -701,13 +701,13 @@ async fn user_meta_is_shown() {
         .await
         .unwrap();
     let (status, json) = site
-        .get(&format!("/wp-json/wp/v2/users/{admin}"), Some("admin"))
+        .get(&format!("/mc-json/mc/v2/users/{admin}"), Some("admin"))
         .await;
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(json["meta"], json!({"twitter": "@admin"}));
     let editor = site.users["editor"].id;
     let (_, json) = site
-        .get(&format!("/wp-json/wp/v2/users/{editor}"), Some("admin"))
+        .get(&format!("/mc-json/mc/v2/users/{editor}"), Some("admin"))
         .await;
     assert_eq!(json["meta"], json!({"twitter": ""}));
 }
@@ -737,7 +737,7 @@ async fn add_rows(db: &Database, post_id: i64, key: &str, prefix: &str, count: u
 async fn writes_over_the_bounds_are_refused_and_reads_are_bounded() {
     let site = site().await;
     let post = site.post_of("post", "admin", PostStatus::Publish).await;
-    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}", post.id);
 
     let many: Vec<String> = (0..=MAX_META_VALUES).map(|i| format!("r{i}")).collect();
     let json = assert_error(
@@ -831,7 +831,7 @@ async fn the_edit_check_comes_before_the_values_are_checked() {
     let other = site.post_of("post", "editor", PostStatus::Draft).await;
     assert_error(
         site.post(
-            &format!("/wp-json/wp/v2/posts/{}", other.id),
+            &format!("/mc-json/mc/v2/posts/{}", other.id),
             "author",
             json!({"meta": {"rating": "not a number"}}),
         )
@@ -844,7 +844,7 @@ async fn the_edit_check_comes_before_the_values_are_checked() {
         .unwrap();
     assert_error(
         site.post(
-            &format!("/wp-json/wp/v2/categories/{}", news.term_id),
+            &format!("/mc-json/mc/v2/categories/{}", news.term_id),
             "author",
             json!({"meta": {"color": ["not", "a", "string"]}}),
         )
@@ -858,7 +858,7 @@ async fn the_edit_check_comes_before_the_values_are_checked() {
 async fn auth_policies_decide_protected_keys() {
     let site = site().await;
     let post = site.post_of("post", "keeper", PostStatus::Draft).await;
-    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}", post.id);
 
     // The meta capability held by name allows any key, and deleting it.
     let (status, json) = site
@@ -877,7 +877,7 @@ async fn auth_policies_decide_protected_keys() {
 
     // `MetaAuth::Capability`: `manage_options`, which an editor lacks and an administrator holds.
     let draft = site.post_of("post", "editor", PostStatus::Draft).await;
-    let draft_uri = format!("/wp-json/wp/v2/posts/{}", draft.id);
+    let draft_uri = format!("/mc-json/mc/v2/posts/{}", draft.id);
     assert_error(
         site.post(&draft_uri, "editor", json!({"meta": {"_options": "x"}}))
             .await,
@@ -919,7 +919,7 @@ async fn deleting_an_invalid_stored_value_is_refused() {
     set_post_meta(site.db(), post.id, "rating", &json!("not a number"))
         .await
         .unwrap();
-    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}", post.id);
     // The stored value reads as `null`, as WordPress's `prepare_value` refuses it.
     let (_, json) = site
         .get(&format!("{uri}?context=edit"), Some("admin"))
@@ -949,7 +949,7 @@ async fn a_key_registered_for_every_post_type_is_everywhere() {
     for (base, post_type) in [("posts", "post"), ("pages", "page")] {
         let (status, json) = site
             .post(
-                &format!("/wp-json/wp/v2/{base}"),
+                &format!("/mc-json/mc/v2/{base}"),
                 "admin",
                 json!({"title": "T", "meta": {"everywhere": base}}),
             )
@@ -959,7 +959,7 @@ async fn a_key_registered_for_every_post_type_is_everywhere() {
     }
     let response = site
         .client
-        .post("/wp-json/wp/v2/media")
+        .post("/mc-json/mc/v2/media")
         .header(site.auth("admin"))
         .header(Header::new("Content-Type", "image/jpeg"))
         .header(Header::new(
@@ -993,7 +993,7 @@ async fn meta_is_shown_on_a_password_protected_post() {
         .await
         .unwrap();
     let (status, json) = site
-        .get(&format!("/wp-json/wp/v2/posts/{}", post.id), None)
+        .get(&format!("/mc-json/mc/v2/posts/{}", post.id), None)
         .await;
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(json["content"]["rendered"], json!(""));
@@ -1003,13 +1003,13 @@ async fn meta_is_shown_on_a_password_protected_post() {
 #[rocket::async_test]
 async fn discovery_lists_the_registered_keys() {
     let site = site().await;
-    let (status, json) = site.get("/wp-json/wp/v2", None).await;
+    let (status, json) = site.get("/mc-json/mc/v2", None).await;
     assert_eq!(status, Status::Ok, "{json}");
     let meta_of = |route: &str, endpoint: usize| {
         json["routes"][route]["endpoints"][endpoint]["args"]["meta"].clone()
     };
 
-    let posts = meta_of("/wp/v2/posts", 1);
+    let posts = meta_of("/mc/v2/posts", 1);
     assert_eq!(posts["type"], json!("object"));
     let properties = posts["properties"].as_object().expect("properties");
     assert_eq!(
@@ -1023,21 +1023,21 @@ async fn discovery_lists_the_registered_keys() {
     assert!(properties.contains_key("everywhere"));
     assert!(!properties.contains_key("hidden") && !properties.contains_key("credit"));
     assert_eq!(
-        meta_of("/wp/v2/posts/(?P<id>[\\d]+)", 1)["properties"],
+        meta_of("/mc/v2/posts/(?P<id>[\\d]+)", 1)["properties"],
         posts["properties"]
     );
 
-    let pages = meta_of("/wp/v2/pages", 1);
+    let pages = meta_of("/mc/v2/pages", 1);
     assert_eq!(keys_of(&pages["properties"]), ["everywhere".to_owned()]);
     assert_eq!(
-        keys_of(&meta_of("/wp/v2/media", 1)["properties"]),
+        keys_of(&meta_of("/mc/v2/media", 1)["properties"]),
         ["credit".to_owned(), "everywhere".to_owned()]
     );
     assert_eq!(
-        keys_of(&meta_of("/wp/v2/categories", 1)["properties"]),
+        keys_of(&meta_of("/mc/v2/categories", 1)["properties"]),
         ["color".to_owned()]
     );
-    assert_eq!(meta_of("/wp/v2/tags", 1)["properties"], json!([]));
+    assert_eq!(meta_of("/mc/v2/tags", 1)["properties"], json!([]));
 }
 
 fn keys_of(value: &Value) -> Vec<String> {

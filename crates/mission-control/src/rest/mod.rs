@@ -1,4 +1,4 @@
-//! The REST API's routes: discovery (`GET /wp-json/`, the namespace indexes and WordPress's
+//! The REST API's routes: discovery (`GET /mc-json/`, the namespace indexes and WordPress's
 //! `?rest_route=` form on the site root), the posts controller ([`posts`]), the terms
 //! controller ([`terms`]), the users controller ([`users`]), the media controller
 //! ([`media`]), the types, taxonomies, statuses and settings controllers ([`meta_routes`]) and
@@ -16,7 +16,7 @@ pub(crate) mod users;
 
 /// The rank of the routes with a fixed `rest_base` (`users`, `media`, `types`, `search`, ...):
 /// before the posts and
-/// terms routes, whose `/wp-json/wp/v2/<_>/<id>` paths they share at the default rank.
+/// terms routes, whose `/mc-json/mc/v2/<_>/<id>` paths they share at the default rank.
 const FIXED_BASE_RANK: isize = -20;
 
 use std::sync::Arc;
@@ -56,7 +56,7 @@ pub(crate) fn json(status: Status, body: &serde_json::Value) -> Json {
     (status, (content_type, body.to_string()))
 }
 
-/// The document at REST route `route` (`/`, `/wp/v2`): the index, a namespace index or
+/// The document at REST route `route` (`/`, `/mc/v2`): the index, a namespace index or
 /// `rest_no_route`.
 async fn answer(db: &Database, routes: &RestRoutes, meta_keys: &MetaKeys, route: &str) -> Json {
     let route = route.trim_matches('/');
@@ -82,10 +82,10 @@ async fn answer(db: &Database, routes: &RestRoutes, meta_keys: &MetaKeys, route:
     }
 }
 
-/// `/wp-json`, with or without a trailing slash, and any path under it that no other REST route
+/// `/mc-json`, with or without a trailing slash, and any path under it that no other REST route
 /// answers. The path is read from the request, not from a path guard, so a segment such as
 /// `.hidden` or `a:b` gets `rest_no_route` like any other unknown route.
-#[rocket::get("/wp-json/<_..>")]
+#[rocket::get("/mc-json/<_..>")]
 async fn wp_json(
     origin: &Origin<'_>,
     _auth: auth::RestAuth,
@@ -94,12 +94,12 @@ async fn wp_json(
     meta_keys: &State<Arc<MetaKeys>>,
 ) -> Json {
     let path = origin.path().as_str();
-    let route = path.strip_prefix("/wp-json").unwrap_or(path);
+    let route = path.strip_prefix("/mc-json").unwrap_or(path);
     answer(db, routes, meta_keys, route).await
 }
 
 /// The `rest_route` query of a request to the site root, as WordPress's `rest_api_loaded` reads
-/// it: a route with a leading slash (`/`, `/wp/v2`). An empty or relative value is no REST
+/// it: a route with a leading slash (`/`, `/mc/v2`). An empty or relative value is no REST
 /// request, and the request goes on to the public site.
 struct RestRouteQuery(String);
 
@@ -115,7 +115,7 @@ impl<'r> FromRequest<'r> for RestRouteQuery {
     }
 }
 
-/// WordPress's `/?rest_route=/wp/v2` form, which works where the server cannot rewrite paths.
+/// WordPress's `?rest_route=` form (`/?rest_route=/mc/v2`), which works where the server cannot rewrite paths.
 #[rocket::get("/")]
 async fn rest_route(
     route: RestRouteQuery,

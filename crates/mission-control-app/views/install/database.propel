@@ -28,7 +28,7 @@
 </div>
 @endif
 <p>Below you should enter your database connection details. If you are not sure about these, contact your host. SQLite needs no database server: Mission Control keeps the site in the file <code>database.sqlite</code> in its install folder.</p>
-<form method="post" action="/wp-admin/install.php?step=1" novalidate>
+<form method="post" action="/mc-admin/install.php?step=1" novalidate>
 <input type="hidden" name="_wpnonce" value="{{ $token }}">
 <table class="form-table" role="presentation">
 <tr>

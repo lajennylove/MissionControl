@@ -1,6 +1,6 @@
-//! The media controller (Task 10.4): `/wp-json/wp/v2/media`, as WordPress's
+//! The media controller (Task 10.4): `/mc-json/mc/v2/media`, as WordPress's
 //! `WP_REST_Attachments_Controller` answers it, and the uploads served at
-//! `/wp-content/uploads/`.
+//! `/mc-content/uploads/`.
 //!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
 //! Each site stores its uploads in its own temporary folder.
@@ -125,7 +125,7 @@ impl Site {
     ) -> LocalResponse<'_> {
         let mut request = self
             .client
-            .post(format!("/wp-json/wp/v2/media{query}"))
+            .post(format!("/mc-json/mc/v2/media{query}"))
             .header(Header::new("Content-Type", content_type.to_owned()))
             .header(Header::new(
                 "Content-Disposition",
@@ -166,7 +166,7 @@ impl Site {
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let mut request = self
             .client
-            .post("/wp-json/wp/v2/media")
+            .post("/mc-json/mc/v2/media")
             .header(Header::new(
                 "Content-Type",
                 format!("multipart/form-data; boundary={boundary}"),
@@ -384,7 +384,7 @@ async fn a_raw_upload_makes_an_attachment_with_its_sizes() {
         .expect("a Location header");
     let (_, item) = body(response).await;
     let id = item["id"].as_i64().unwrap();
-    assert_eq!(location, format!("{HOME}/wp-json/wp/v2/media/{id}"));
+    assert_eq!(location, format!("{HOME}/mc-json/mc/v2/media/{id}"));
     assert_eq!(keys(&item), set(&[VIEW_KEYS, EDIT_EXTRA_KEYS]));
 
     // WordPress's REST rule: the stored file's name without its extension.
@@ -410,7 +410,7 @@ async fn a_raw_upload_makes_an_attachment_with_its_sizes() {
     let source = item["source_url"].as_str().unwrap().to_owned();
     let file = item["media_details"]["file"].as_str().unwrap().to_owned();
     assert!(file.ends_with("/Harbour-View.jpg"), "{file}");
-    assert_eq!(source, format!("{HOME}/wp-content/uploads/{file}"));
+    assert_eq!(source, format!("{HOME}/mc-content/uploads/{file}"));
     assert_eq!(item["guid"]["raw"], json!(source));
     assert_eq!(item["media_details"]["width"], 400);
     assert_eq!(item["media_details"]["height"], 300);
@@ -426,7 +426,7 @@ async fn a_raw_upload_makes_an_attachment_with_its_sizes() {
         !item["_links"]
             .as_object()
             .unwrap()
-            .contains_key("wp:attachment")
+            .contains_key("mc:attachment")
     );
 
     // The file and its sizes are on disk and served, with the stored type and nosniff.
@@ -449,7 +449,7 @@ async fn a_raw_upload_makes_an_attachment_with_its_sizes() {
     assert_eq!(thumbnail.status(), Status::Ok);
 
     // A visitor reads it in the view context.
-    let (status, view) = body(site.get(&format!("/wp-json/wp/v2/media/{id}"), None).await).await;
+    let (status, view) = body(site.get(&format!("/mc-json/mc/v2/media/{id}"), None).await).await;
     assert_eq!(status, Status::Ok);
     assert_eq!(keys(&view), set(&[VIEW_KEYS]));
     assert!(view["title"].get("raw").is_none());
@@ -498,14 +498,14 @@ async fn a_multipart_upload_takes_its_fields() {
         "search=boats.jpg".to_owned(),
     ] {
         let response = site
-            .get(&format!("/wp-json/wp/v2/media?{query}"), Some("author"))
+            .get(&format!("/mc-json/mc/v2/media?{query}"), Some("author"))
             .await;
         let (status, list) = body(response).await;
         assert_eq!(status, Status::Ok, "{query}: {list}");
         assert_eq!(list[0]["id"], item["id"], "{query}");
     }
     let (_, none) = body(
-        site.get("/wp-json/wp/v2/media?media_type=video", Some("author"))
+        site.get("/mc-json/mc/v2/media?media_type=video", Some("author"))
             .await,
     )
     .await;
@@ -569,7 +569,7 @@ async fn refused_uploads_get_wordpresss_codes() {
     // A raw body needs its name and type.
     let response = site
         .client
-        .post("/wp-json/wp/v2/media")
+        .post("/mc-json/mc/v2/media")
         .header(Header::new("Content-Type", "image/jpeg"))
         .header(site.auth("author"))
         .body(jpeg(20, 20))
@@ -583,7 +583,7 @@ async fn refused_uploads_get_wordpresss_codes() {
     .await;
     let response = site
         .client
-        .post("/wp-json/wp/v2/media")
+        .post("/mc-json/mc/v2/media")
         .header(Header::new("Content-Type", "image/jpeg"))
         .header(Header::new("Content-Disposition", "attachment"))
         .header(site.auth("author"))
@@ -606,7 +606,7 @@ async fn refused_uploads_get_wordpresss_codes() {
     // A `Content-MD5` that does not match.
     let response = site
         .client
-        .post("/wp-json/wp/v2/media")
+        .post("/mc-json/mc/v2/media")
         .header(Header::new("Content-Type", "text/plain"))
         .header(Header::new(
             "Content-Disposition",
@@ -688,7 +688,7 @@ async fn details_update_through_kses() {
     let site = site().await;
     let item = uploaded(&site, "author", "photo.jpg").await;
     let id = item["id"].as_i64().unwrap();
-    let uri = format!("/wp-json/wp/v2/media/{id}");
+    let uri = format!("/mc-json/mc/v2/media/{id}");
     let (status, updated) = body(
         site.send_json(
             "POST",
@@ -776,7 +776,7 @@ async fn details_update_through_kses() {
     assert_error(
         site.send_json(
             "POST",
-            "/wp-json/wp/v2/media/999999999",
+            "/mc-json/mc/v2/media/999999999",
             Some("author"),
             json!({"title": "x"}),
         )
@@ -789,7 +789,7 @@ async fn details_update_through_kses() {
     assert_error(
         site.send_json(
             "POST",
-            "/wp-json/wp/v2/media/999999999",
+            "/mc-json/mc/v2/media/999999999",
             Some("author"),
             json!({"alt_text": 5}),
         )
@@ -814,7 +814,7 @@ async fn a_forced_delete_removes_the_files() {
             .unwrap()
     );
     assert!(site.stored(&file).is_some() && site.stored(&thumbnail).is_some());
-    let uri = format!("/wp-json/wp/v2/media/{id}");
+    let uri = format!("/mc-json/mc/v2/media/{id}");
 
     // No trash for attachments.
     assert_error(
@@ -873,20 +873,20 @@ async fn uploads_refuse_dot_files_and_paths_outside_the_folder() {
     }
     // A file the uploads folder holds by an allowed type is served as text, never sniffed.
     let response = site
-        .get("/wp-content/uploads/2026/11/notes.txt", None)
+        .get("/mc-content/uploads/2026/11/notes.txt", None)
         .await;
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(response.content_type(), Some(ContentType::Plain));
     for uri in [
-        "/wp-content/uploads/2026/11/.mc-tmp.1.2",
-        "/wp-content/uploads/2026/11/.htaccess",
-        "/wp-content/uploads/2026/11/script.php",
-        "/wp-content/uploads/2026/11/missing.jpg",
-        "/wp-content/uploads/../Cargo.toml",
-        "/wp-content/uploads/2026/%2e%2e/11/notes.txt",
-        "/wp-content/uploads/2026%2F11/notes.txt",
-        "/wp-content/uploads/2026/11/",
-        "/wp-content/uploads/",
+        "/mc-content/uploads/2026/11/.mc-tmp.1.2",
+        "/mc-content/uploads/2026/11/.htaccess",
+        "/mc-content/uploads/2026/11/script.php",
+        "/mc-content/uploads/2026/11/missing.jpg",
+        "/mc-content/uploads/../Cargo.toml",
+        "/mc-content/uploads/2026/%2e%2e/11/notes.txt",
+        "/mc-content/uploads/2026%2F11/notes.txt",
+        "/mc-content/uploads/2026/11/",
+        "/mc-content/uploads/",
     ] {
         let response = site.get(uri, None).await;
         assert_eq!(response.status(), Status::NotFound, "{uri}");
@@ -896,14 +896,14 @@ async fn uploads_refuse_dot_files_and_paths_outside_the_folder() {
 #[rocket::async_test]
 async fn media_is_registered_for_discovery() {
     let site = site().await;
-    let (_, index) = body(site.get("/wp-json/wp/v2", None).await).await;
+    let (_, index) = body(site.get("/mc-json/mc/v2", None).await).await;
     let routes = index["routes"].as_object().unwrap();
-    assert_eq!(routes["/wp/v2/media"]["methods"], json!(["GET", "POST"]));
+    assert_eq!(routes["/mc/v2/media"]["methods"], json!(["GET", "POST"]));
     assert_eq!(
-        routes["/wp/v2/media/(?P<id>[\\d]+)"]["methods"],
+        routes["/mc/v2/media/(?P<id>[\\d]+)"]["methods"],
         json!(["GET", "POST", "PUT", "PATCH", "DELETE"])
     );
-    assert_eq!(routes["/wp/v2/users/me"]["methods"], json!(["GET"]));
+    assert_eq!(routes["/mc/v2/users/me"]["methods"], json!(["GET"]));
 }
 
 #[rocket::async_test]
@@ -958,7 +958,7 @@ async fn an_attachment_of_a_draft_is_hidden_from_visitors() {
     let shown = uploaded(&site, "author", "shown.jpg").await;
 
     assert_error(
-        site.get(&format!("/wp-json/wp/v2/media/{}", hidden["id"]), None)
+        site.get(&format!("/mc-json/mc/v2/media/{}", hidden["id"]), None)
             .await,
         Status::Unauthorized,
         "rest_forbidden",
@@ -966,7 +966,7 @@ async fn an_attachment_of_a_draft_is_hidden_from_visitors() {
     .await;
     assert_error(
         site.get(
-            &format!("/wp-json/wp/v2/media/{}", hidden["id"]),
+            &format!("/mc-json/mc/v2/media/{}", hidden["id"]),
             Some("author2"),
         )
         .await,
@@ -974,13 +974,13 @@ async fn an_attachment_of_a_draft_is_hidden_from_visitors() {
         "rest_forbidden",
     )
     .await;
-    let (_, list) = body(site.get("/wp-json/wp/v2/media", None).await).await;
+    let (_, list) = body(site.get("/mc-json/mc/v2/media", None).await).await;
     let ids: Vec<&Value> = list.as_array().unwrap().iter().map(|i| &i["id"]).collect();
     assert_eq!(ids, [&shown["id"]]);
     // Its author still reads it.
     let response = site
         .get(
-            &format!("/wp-json/wp/v2/media/{}", hidden["id"]),
+            &format!("/mc-json/mc/v2/media/{}", hidden["id"]),
             Some("author"),
         )
         .await;
@@ -997,7 +997,7 @@ async fn a_file_part_needs_a_file_name() {
     );
     let response = site
         .client
-        .post("/wp-json/wp/v2/media")
+        .post("/mc-json/mc/v2/media")
         .header(Header::new(
             "Content-Type",
             format!("multipart/form-data; boundary={boundary}"),
@@ -1026,9 +1026,9 @@ async fn uploads_never_follow_a_link_out_of_the_folder() {
         .unwrap();
     assert!(made.success());
     for uri in [
-        "/wp-content/uploads/2026/11/link.txt",
-        "/wp-content/uploads/2026/out/secret.txt",
-        "/wp-content/uploads/2026/11/pipe.txt",
+        "/mc-content/uploads/2026/11/link.txt",
+        "/mc-content/uploads/2026/out/secret.txt",
+        "/mc-content/uploads/2026/11/pipe.txt",
     ] {
         let response =
             rocket::tokio::time::timeout(std::time::Duration::from_secs(10), site.get(uri, None))

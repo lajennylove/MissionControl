@@ -1,4 +1,4 @@
-//! The routes of the media controller: `/wp-json/wp/v2/media` and `/wp-json/wp/v2/media/{id}`,
+//! The routes of the media controller: `/mc-json/mc/v2/media` and `/mc-json/mc/v2/media/{id}`,
 //! over the core's [`MediaController`].
 //!
 //! The paths are fixed, so these routes rank before the posts and terms routes, whose
@@ -159,19 +159,19 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes
 }
 
-#[rocket::get("/wp-json/wp/v2/media")]
+#[rocket::get("/mc-json/mc/v2/media")]
 async fn list(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).list(query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/media/<id>")]
+#[rocket::get("/mc-json/mc/v2/media/<id>")]
 async fn get(id: Id, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).get(id.0, query_of(origin)).await)
 }
 
-#[rocket::post("/wp-json/wp/v2/media", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/media", data = "<data>")]
 async fn create(
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
@@ -305,7 +305,7 @@ async fn update(
     Reply(app.controller(&caps).update(id.0, &params).await)
 }
 
-#[rocket::post("/wp-json/wp/v2/media/<id>", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/media/<id>", data = "<data>")]
 async fn update_post(
     id: Id,
     origin: &Origin<'_>,
@@ -318,7 +318,7 @@ async fn update_post(
     update(id, origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::put("/wp-json/wp/v2/media/<id>", data = "<data>")]
+#[rocket::put("/mc-json/mc/v2/media/<id>", data = "<data>")]
 async fn update_put(
     id: Id,
     origin: &Origin<'_>,
@@ -331,7 +331,7 @@ async fn update_put(
     update(id, origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::patch("/wp-json/wp/v2/media/<id>", data = "<data>")]
+#[rocket::patch("/mc-json/mc/v2/media/<id>", data = "<data>")]
 async fn update_patch(
     id: Id,
     origin: &Origin<'_>,
@@ -344,7 +344,7 @@ async fn update_patch(
     update(id, origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::delete("/wp-json/wp/v2/media/<id>", data = "<data>")]
+#[rocket::delete("/mc-json/mc/v2/media/<id>", data = "<data>")]
 async fn delete(
     id: Id,
     origin: &Origin<'_>,

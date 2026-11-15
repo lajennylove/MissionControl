@@ -60,16 +60,21 @@ pub const HOST_API_VERSION: Version = Version::new(0, 1, 0);
 /// the rest of a table name has about 29 bytes.
 pub const MAX_SLUG_LEN: usize = 32;
 
-/// Slugs a plugin cannot take, because its REST namespace (`<slug>/v1`) would sit beside one of
-/// WordPress's (`wp/v2`, `oembed/1.0`, `batch/v1`) or Mission Control's own, or because its
-/// table prefix (`sqlite__`) would start with `sqlite_`, which SQLite keeps for its own tables.
-/// Every slug that starts with [`RESERVED_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`] is reserved
-/// too.
-pub const RESERVED_SLUGS: [&str; 5] = ["wp", "oembed", "batch", "mission-control", "sqlite"];
+/// Slugs a plugin cannot take, because its REST namespace (`<slug>/v1`) would sit beside
+/// Mission Control's own (`mc/v2`, `mission-control`) or one of WordPress's (`wp/v2`,
+/// `oembed/1.0`, `batch/v1`), or because its table prefix (`sqlite__`) would start with
+/// `sqlite_`, which SQLite keeps for its own tables. Every slug that starts with
+/// [`RESERVED_SLUG_PREFIX`], [`WORDPRESS_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`] is reserved too.
+pub const RESERVED_SLUGS: [&str; 6] = ["mc", "wp", "oembed", "batch", "mission-control", "sqlite"];
 
-/// The slug prefix kept for WordPress's own REST namespaces (`wp-site-health/v1`,
-/// `wp-block-editor/v1`, `wp-abilities/v1` and those to come).
-pub const RESERVED_SLUG_PREFIX: &str = "wp-";
+/// The slug prefix kept for Mission Control's own namespaces, its initials (`mc-`, as the core
+/// namespace is `mc/v2`; owner decision).
+pub const RESERVED_SLUG_PREFIX: &str = "mc-";
+
+/// The slug prefix of WordPress's own REST namespaces (`wp-site-health/v1`,
+/// `wp-block-editor/v1`, `wp-abilities/v1` and those to come), kept reserved too so a WordPress
+/// plugin's name cannot be taken by mistake.
+pub const WORDPRESS_SLUG_PREFIX: &str = "wp-";
 
 /// The slug prefix whose table prefixes (`sqlite_cache__`) would start with `sqlite_`, the
 /// names SQLite keeps for its own tables (Task 12.6).
@@ -102,7 +107,7 @@ pub struct Manifest {
     /// The plugin's slug (WordPress's plugin folder name): lowercase ASCII letters, digits and
     /// single `-`, starting with a letter and ending with a letter or digit, at most
     /// [`MAX_SLUG_LEN`] bytes, not one of [`RESERVED_SLUGS`] and not starting with
-    /// [`RESERVED_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`]. It names the REST namespace
+    /// [`RESERVED_SLUG_PREFIX`], [`WORDPRESS_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`]. It names the REST namespace
     /// ([`Manifest::rest_namespace`]) and prefixes table names ([`Manifest::table_prefix`]).
     pub slug: String,
     /// The plugin's name (`Plugin Name`), trimmed. Required.
@@ -165,7 +170,7 @@ pub enum Permission {
     RegisterTypes,
     /// `admin-pages`: add admin pages and settings screens.
     AdminPages,
-    /// `rest-routes`: register REST routes under `/wp-json/<slug>/v1`.
+    /// `rest-routes`: register REST routes under `/mc-json/<slug>/v1`.
     RestRoutes,
     /// `shortcodes`: register shortcodes.
     Shortcodes,
@@ -414,8 +419,8 @@ pub enum ManifestError {
         /// Which rule it breaks.
         reason: &'static str,
     },
-    /// The slug is one of [`RESERVED_SLUGS`] or starts with [`RESERVED_SLUG_PREFIX`] or
-    /// [`SQLITE_SLUG_PREFIX`].
+    /// The slug is one of [`RESERVED_SLUGS`] or starts with [`RESERVED_SLUG_PREFIX`],
+    /// [`WORDPRESS_SLUG_PREFIX`] or [`SQLITE_SLUG_PREFIX`].
     ReservedSlug {
         /// The slug.
         slug: String,
@@ -757,7 +762,7 @@ impl Manifest {
         })
     }
 
-    /// The plugin's REST namespace, `<slug>/v1`, served under `/wp-json/`.
+    /// The plugin's REST namespace, `<slug>/v1`, served under `/mc-json/`.
     pub fn rest_namespace(&self) -> String {
         format!("{}/v1", self.slug)
     }
@@ -1005,6 +1010,7 @@ pub(super) fn check_slug(slug: &str) -> Result<(), ManifestError> {
     }
     if RESERVED_SLUGS.contains(&slug)
         || slug.starts_with(RESERVED_SLUG_PREFIX)
+        || slug.starts_with(WORDPRESS_SLUG_PREFIX)
         || slug.starts_with(SQLITE_SLUG_PREFIX)
     {
         return Err(ManifestError::ReservedSlug {

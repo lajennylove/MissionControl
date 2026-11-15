@@ -20,7 +20,7 @@ pub struct Config {
     /// WordPress's `wp-content/themes`. Default `themes`, relative to the working directory.
     pub themes_dir: PathBuf,
     /// The folder uploads are stored in, in `YYYY/MM` folders (`MC_UPLOADS_DIR`), as WordPress's
-    /// `wp-content/uploads`, and served at `/wp-content/uploads/`. Default `uploads`, relative to
+    /// `wp-content/uploads`, and served at `/mc-content/uploads/`. Default `uploads`, relative to
     /// the working directory.
     pub uploads_dir: PathBuf,
     /// The folder that holds the installed plugins, one folder per plugin named by its slug

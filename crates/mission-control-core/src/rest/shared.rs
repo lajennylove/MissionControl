@@ -387,7 +387,7 @@ pub(crate) fn position_case(column: &str, n: usize) -> String {
 
 /// The `curies` link every response with `wp:` relations carries.
 pub(crate) fn curies() -> Value {
-    json!([{"name": "wp", "href": "https://api.w.org/{rel}", "templated": true}])
+    json!([{"name": "mc", "href": "https://api.w.org/{rel}", "templated": true}])
 }
 
 #[cfg(test)]
@@ -426,12 +426,12 @@ mod tests {
     #[test]
     fn pagination_links_replace_or_add_the_page() {
         assert_eq!(
-            with_page("http://x/wp-json/wp/v2/posts", "per_page=2&page=3", 2),
-            "http://x/wp-json/wp/v2/posts?per_page=2&page=2"
+            with_page("http://x/mc-json/mc/v2/posts", "per_page=2&page=3", 2),
+            "http://x/mc-json/mc/v2/posts?per_page=2&page=2"
         );
         assert_eq!(
-            with_page("http://x/wp-json/wp/v2/posts", "search=a+b", 2),
-            "http://x/wp-json/wp/v2/posts?search=a+b&page=2"
+            with_page("http://x/mc-json/mc/v2/posts", "search=a+b", 2),
+            "http://x/mc-json/mc/v2/posts?search=a+b&page=2"
         );
         assert_eq!(
             page_links("http://x/c", "page=2", 2, 3),

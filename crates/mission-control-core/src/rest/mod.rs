@@ -2,7 +2,7 @@
 //! shape.
 //!
 //! [`RestRoutes`] lists every route the API serves. Each route group (posts, terms, users, a
-//! plugin's namespace) registers its routes on it, and [`discovery`] builds `GET /wp-json/` and
+//! plugin's namespace) registers its routes on it, and [`discovery`] builds `GET /mc-json/` and
 //! each namespace index from it, so discovery never changes when a route is added. [`auth`]
 //! decides who a request runs as, and [`RestError`] is WordPress's error body. [`posts`],
 //! [`terms`], [`users`] and [`media`] are WordPress's posts, terms, users and attachments
@@ -22,7 +22,7 @@
 //!     "/acme/v1/things",
 //!     vec![Endpoint::new(["GET"], json!({"context": {"default": "view", "required": false}}))],
 //! ));
-//! assert_eq!(routes.namespaces(), ["acme/v1", "wp/v2"]);
+//! assert_eq!(routes.namespaces(), ["acme/v1", "mc/v2"]);
 //! ```
 
 pub mod auth;
@@ -50,7 +50,7 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use serde_json::{Map, Value, json};
 
 /// The namespace of WordPress's own routes. It is always listed, as `oembed/1.0` is not.
-pub const CORE_NAMESPACE: &str = "wp/v2";
+pub const CORE_NAMESPACE: &str = "mc/v2";
 
 /// An error a REST request ends with, as WordPress's `WP_Error` once `WP_REST_Server` turns it
 /// into a response: `{"code": ..., "message": ..., "data": {"status": ...}}` with that status.
@@ -119,7 +119,7 @@ impl fmt::Display for RestError {
 impl std::error::Error for RestError {}
 
 /// A REST answer that is not an error, as WordPress's `WP_REST_Response`: a status, a JSON body
-/// and headers such as `X-WP-Total` or `Location`. A header may repeat (`Link`).
+/// and headers such as `X-MC-Total` or `Location`. A header may repeat (`Link`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RestResponse {
     /// The HTTP status, such as 200 or 201.
@@ -175,12 +175,12 @@ impl Endpoint {
     }
 }
 
-/// A route: a path under `/wp-json` and the endpoints that answer it.
+/// A route: a path under `/mc-json` and the endpoints that answer it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteSpec {
-    /// The path as WordPress writes it, such as `/wp/v2/posts` or `/wp/v2/posts/(?P<id>[\d]+)`.
+    /// The path as WordPress writes it, such as `/mc/v2/posts` or `/mc/v2/posts/(?P<id>[\d]+)`.
     pub path: String,
-    /// The namespace: the first two path segments, such as `wp/v2`. Empty for the index (`/`).
+    /// The namespace: the first two path segments, such as `mc/v2`. Empty for the index (`/`).
     pub namespace: String,
     /// The endpoints, in the order they are listed.
     pub endpoints: Vec<Endpoint>,
@@ -222,7 +222,7 @@ impl RouteSpec {
     }
 }
 
-/// The namespace of `path`: its first two segments (`/wp/v2/posts` is `wp/v2`).
+/// The namespace of `path`: its first two segments (`/mc/v2/posts` is `mc/v2`).
 fn namespace_of(path: &str) -> String {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).take(2).collect();
     if segments.len() < 2 && path.trim_matches('/').is_empty() {
@@ -233,8 +233,8 @@ fn namespace_of(path: &str) -> String {
 
 /// The registry of REST routes, shared by the app and the code that extends it.
 ///
-/// A new namespace gets its own index route (`/wp/v2`) the first time one of its routes is
-/// registered, as WordPress adds it. The registry starts with the index (`/`) and the `wp/v2`
+/// A new namespace gets its own index route (`/mc/v2`) the first time one of its routes is
+/// registered, as WordPress adds it. The registry starts with the index (`/`) and the `mc/v2`
 /// namespace.
 #[derive(Debug)]
 pub struct RestRoutes {
@@ -248,7 +248,7 @@ impl Default for RestRoutes {
 }
 
 impl RestRoutes {
-    /// A registry holding the index route and the `wp/v2` namespace index.
+    /// A registry holding the index route and the `mc/v2` namespace index.
     pub fn new() -> Self {
         let registry = Self {
             routes: RwLock::new(BTreeMap::new()),
@@ -342,8 +342,8 @@ mod tests {
     #[test]
     fn namespaces_come_from_the_first_two_segments() {
         assert_eq!(namespace_of("/"), "");
-        assert_eq!(namespace_of("/wp/v2"), "wp/v2");
-        assert_eq!(namespace_of("/wp/v2/posts/(?P<id>[\\d]+)"), "wp/v2");
+        assert_eq!(namespace_of("/mc/v2"), "mc/v2");
+        assert_eq!(namespace_of("/mc/v2/posts/(?P<id>[\\d]+)"), "mc/v2");
         assert_eq!(namespace_of("/oembed/1.0/embed"), "oembed/1.0");
     }
 
@@ -355,14 +355,14 @@ mod tests {
             vec![Endpoint::new(["GET", "POST"], Value::Null)],
         ));
         let paths: Vec<String> = routes.routes().into_iter().map(|r| r.path).collect();
-        assert_eq!(paths, ["/", "/acme/v1", "/acme/v1/things", "/wp/v2"]);
+        assert_eq!(paths, ["/", "/acme/v1", "/acme/v1/things", "/mc/v2"]);
         assert_eq!(routes.routes_in("acme/v1").len(), 2);
     }
 
     #[test]
     fn methods_are_the_union_of_the_endpoints() {
         let route = RouteSpec::new(
-            "/wp/v2/posts",
+            "/mc/v2/posts",
             vec![
                 Endpoint::new(["GET"], Value::Null),
                 Endpoint::new(["POST", "GET"], Value::Null),

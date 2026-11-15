@@ -1,4 +1,4 @@
-//! The search controller: `/wp/v2/search`, as WordPress's `WP_REST_Search_Controller` serves it
+//! The search controller: `/mc/v2/search`, as WordPress's `WP_REST_Search_Controller` serves it
 //! with its three handlers (`WP_REST_Post_Search_Handler`, `WP_REST_Term_Search_Handler` and
 //! `WP_REST_Post_Format_Search_Handler`). [`SearchController`] answers one request, with no
 //! Rocket types: the `mission-control` crate mounts it.
@@ -15,7 +15,7 @@
 //!   post, so its hidden words cannot be probed. Terms are those whose name or slug holds
 //!   `search`, by name.
 //! - `include` and `exclude` limit the ids; `page` and `per_page` (1 to 100) page the results,
-//!   with `X-WP-Total`, `X-WP-TotalPages` and `Link` headers, and a page past the end is
+//!   with `X-MC-Total`, `X-MC-TotalPages` and `Link` headers, and a page past the end is
 //!   `rest_search_invalid_page_number` (400).
 //! - A result has `id`, `title`, `url`, `type`, `subtype` and `_links` (`self`, embeddable;
 //!   `about`, the type or taxonomy; `collection`). `context` is `view` or `embed`, which show the
@@ -90,7 +90,7 @@ fn all_subtypes(post_types: &PostTypes, taxonomies: &Taxonomies) -> Vec<String> 
     subtypes
 }
 
-/// Registers `/wp/v2/search` on `routes`, so discovery lists it, with the subtypes of
+/// Registers `/mc/v2/search` on `routes`, so discovery lists it, with the subtypes of
 /// `post_types` and `taxonomies`. Register it again after registering a post type or taxonomy.
 pub fn register_routes(routes: &RestRoutes, post_types: &PostTypes, taxonomies: &Taxonomies) {
     let ids = |description: &str| json!({"description": description, "type": "array", "items": {"type": "integer"}, "default": [], "required": false});
@@ -117,7 +117,7 @@ pub fn register_routes(routes: &RestRoutes, post_types: &PostTypes, taxonomies: 
         "include": ids("Limit result set to specific IDs."),
     });
     routes.register(RouteSpec::new(
-        "/wp/v2/search",
+        "/mc/v2/search",
         vec![Endpoint::new(["GET"], args)],
     ));
 }
@@ -257,14 +257,14 @@ struct Found {
     title: String,
     url: String,
     subtype: String,
-    /// The route of the post or term, such as `wp/v2/posts/7`.
+    /// The route of the post or term, such as `mc/v2/posts/7`.
     route: String,
-    /// The route of its type or taxonomy, such as `wp/v2/types/post`.
+    /// The route of its type or taxonomy, such as `mc/v2/types/post`.
     about: String,
 }
 
 impl SearchController<'_> {
-    /// `GET /wp/v2/search`. `query` is the request's query string.
+    /// `GET /mc/v2/search`. `query` is the request's query string.
     ///
     /// # Errors
     ///
@@ -292,9 +292,9 @@ impl SearchController<'_> {
             items.push(Value::Object(self.item(&site, &params, result).await?));
         }
         let mut response = RestResponse::ok(Value::Array(items))
-            .with_header("X-WP-Total", total.to_string())
-            .with_header("X-WP-TotalPages", max_pages.to_string());
-        let base = site.rest_url("wp/v2/search");
+            .with_header("X-MC-Total", total.to_string())
+            .with_header("X-MC-TotalPages", max_pages.to_string());
+        let base = site.rest_url("mc/v2/search");
         for link in page_links(&base, query, params.page, max_pages) {
             response = response.with_header("Link", link);
         }
@@ -330,7 +330,7 @@ impl SearchController<'_> {
                 json!({
                     "self": [{"embeddable": true, "href": site.rest_url(&found.route)}],
                     "about": [{"href": site.rest_url(&found.about)}],
-                    "collection": [{"href": site.rest_url("wp/v2/search")}],
+                    "collection": [{"href": site.rest_url("mc/v2/search")}],
                 }),
             );
         }
@@ -470,8 +470,8 @@ impl SearchController<'_> {
                     title: rendered_title(post),
                     url: format!("{}{path}", site.home),
                     subtype: post.post_type.clone(),
-                    route: format!("wp/v2/{rest_base}/{}", post.id),
-                    about: format!("wp/v2/types/{}", post.post_type),
+                    route: format!("mc/v2/{rest_base}/{}", post.id),
+                    about: format!("mc/v2/types/{}", post.post_type),
                 }
             })
             .collect();
@@ -567,8 +567,8 @@ impl SearchController<'_> {
                     title: term.name.clone(),
                     url,
                     subtype: term.taxonomy.clone(),
-                    route: format!("wp/v2/{rest_base}/{}", term.term_id),
-                    about: format!("wp/v2/taxonomies/{}", term.taxonomy),
+                    route: format!("mc/v2/{rest_base}/{}", term.term_id),
+                    about: format!("mc/v2/taxonomies/{}", term.taxonomy),
                 }
             })
             .collect();
@@ -595,7 +595,7 @@ mod tests {
         let route = routes
             .routes()
             .into_iter()
-            .find(|r| r.path == "/wp/v2/search")
+            .find(|r| r.path == "/mc/v2/search")
             .expect("the search route");
         let mut args: Vec<&str> = route.endpoints[0].args.keys().map(String::as_str).collect();
         args.sort_unstable();

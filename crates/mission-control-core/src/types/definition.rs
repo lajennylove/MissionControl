@@ -1412,7 +1412,7 @@ pub struct PostTypeDef {
     /// Whether the REST API serves the type. WordPress's default: false.
     #[serde(default, deserialize_with = "lenient::bool")]
     pub show_in_rest: bool,
-    /// The type's route under `wp/v2`; defaults to the slug.
+    /// The type's route under `mc/v2`; defaults to the slug.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1582,7 +1582,7 @@ impl PostTypeDef {
             .unwrap_or(ShowInMenu::Show(self.effective_show_ui()))
     }
 
-    /// The type's route under `wp/v2`: `rest_base`, or the slug.
+    /// The type's route under `mc/v2`: `rest_base`, or the slug.
     pub fn effective_rest_base(&self) -> &str {
         self.rest_base.as_deref().unwrap_or(&self.slug)
     }
@@ -1880,7 +1880,7 @@ pub struct TaxonomyDef {
     /// Whether the REST API serves the taxonomy. WordPress's default: false.
     #[serde(default, deserialize_with = "lenient::bool")]
     pub show_in_rest: bool,
-    /// The taxonomy's route under `wp/v2`; defaults to the slug.
+    /// The taxonomy's route under `mc/v2`; defaults to the slug.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1991,7 +1991,7 @@ impl TaxonomyDef {
         self.show_ui.unwrap_or(self.public)
     }
 
-    /// The taxonomy's route under `wp/v2`: `rest_base`, or the slug.
+    /// The taxonomy's route under `mc/v2`: `rest_base`, or the slug.
     pub fn effective_rest_base(&self) -> &str {
         self.rest_base.as_deref().unwrap_or(&self.slug)
     }

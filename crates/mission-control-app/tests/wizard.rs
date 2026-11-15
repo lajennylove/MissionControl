@@ -108,7 +108,7 @@ async fn choose_sqlite(client: &Client, token: &str) {
     );
     assert_eq!(
         response.headers().get_one("Location"),
-        Some("/wp-admin/install.php?step=2")
+        Some("/mc-admin/install.php?step=2")
     );
 }
 
@@ -163,7 +163,7 @@ async fn steps_render_in_order() {
         "{page}"
     );
     assert!(
-        page.contains("action=\"/wp-admin/install.php?step=1\""),
+        page.contains("action=\"/mc-admin/install.php?step=1\""),
         "{page}"
     );
     let sqlite = at(&page, "<option value=\"sqlite\" selected>");
@@ -200,7 +200,7 @@ async fn steps_render_in_order() {
     assert_eq!(response.status(), Status::Ok);
     let page = body(response).await;
     assert!(page.contains("<li class=\"current\">2. Site and administrator</li>"));
-    assert!(page.contains("action=\"/wp-admin/install.php?step=2\""));
+    assert!(page.contains("action=\"/mc-admin/install.php?step=2\""));
     let order = [
         ">Site Title</label>",
         ">Username</label>",

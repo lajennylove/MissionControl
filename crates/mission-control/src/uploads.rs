@@ -1,4 +1,4 @@
-//! The uploads, served at `/wp-content/uploads/YYYY/MM/name.ext` as WordPress serves
+//! The uploads, served at `/mc-content/uploads/YYYY/MM/name.ext` as WordPress serves
 //! `wp-content/uploads`, from the app's [`Storage`].
 //!
 //! Uploads are files people send, so they are served as data and never run (design note G4):
@@ -36,7 +36,7 @@ pub(crate) struct UploadFile {
     mime_type: &'static str,
 }
 
-/// The storage path a request under `/wp-content/uploads/` names, when every segment is a
+/// The storage path a request under `/mc-content/uploads/` names, when every segment is a
 /// plain name: not empty, not starting with `.`, with no `/`, `\` or NUL. The segments are
 /// percent-decoded already.
 fn storage_path<'a>(segments: impl Iterator<Item = &'a str>) -> Option<String> {
@@ -59,7 +59,7 @@ impl<'r> FromRequest<'r> for UploadFile {
             log::error!("The uploads route ran before the app was ready");
             return Outcome::Error((Status::InternalServerError, ()));
         };
-        // The route's own `/wp-content/uploads`, then the file's path.
+        // The route's own `/mc-content/uploads`, then the file's path.
         let Some(path) = storage_path(request.uri().path().segments().skip(2)) else {
             return Outcome::Forward(Status::NotFound);
         };
@@ -123,7 +123,7 @@ pub(crate) fn routes() -> Vec<Route> {
 }
 
 /// A stored upload.
-#[rocket::get("/wp-content/uploads/<_..>")]
+#[rocket::get("/mc-content/uploads/<_..>")]
 fn upload(file: UploadFile) -> UploadFile {
     file
 }

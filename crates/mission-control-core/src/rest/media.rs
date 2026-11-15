@@ -1,4 +1,4 @@
-//! The media controller: `/wp/v2/media`, as WordPress's `WP_REST_Attachments_Controller` serves
+//! The media controller: `/mc/v2/media`, as WordPress's `WP_REST_Attachments_Controller` serves
 //! it.
 //!
 //! Attachments are posts, so lists and single items run through the posts controller
@@ -20,18 +20,18 @@
 //! - Lists take the posts' parameters with `parent`, `parent_exclude`, `media_type` and
 //!   `mime_type`; `status` is `inherit` by default (`inherit`, `private` or `trash`). A search
 //!   also matches the file's name.
-//! - `POST /wp/v2/media` uploads a file: the raw body with `Content-Disposition: attachment;
+//! - `POST /mc/v2/media` uploads a file: the raw body with `Content-Disposition: attachment;
 //!   filename=...` and a `Content-Type` (`upload_from_data`), or a `multipart/form-data` body
 //!   with a `file` part (`upload_from_file`); a `Content-MD5` header is checked when sent. It
 //!   needs `upload_files`, and `edit_post` on the `post` it is attached to. The file is checked
 //!   ([`validate`]), stored with its sub-sizes, and titled as WordPress's REST API titles it:
 //!   `title`, or the stored file's name without its extension
 //!   ([`AttachmentTitle::StoredName`]).
-//! - `POST`, `PUT` or `PATCH /wp/v2/media/{id}` sets `title`, `caption`, `description`,
+//! - `POST`, `PUT` or `PATCH /mc/v2/media/{id}` sets `title`, `caption`, `description`,
 //!   `alt_text` and `post`; it needs `edit_post`. The title, caption and description pass
 //!   through kses ([`KsesLimiter`]) for the acting user, as `wp_insert_post` filters them; the
 //!   alt text through `sanitize_text_field`, its schema's sanitize callback.
-//! - `DELETE /wp/v2/media/{id}` needs `force=true`: attachments have no trash unless WordPress's
+//! - `DELETE /mc/v2/media/{id}` needs `force=true`: attachments have no trash unless WordPress's
 //!   `MEDIA_TRASH` is on, which Mission Control does not offer, so without it the answer is 501
 //!   `rest_trash_not_supported`. A delete removes the row and the files ([`delete_attachment`]).
 //!
@@ -46,7 +46,7 @@
 //! - An unknown `post` on an update is refused (`rest_post_invalid_id`, 400); WordPress stores
 //!   it.
 //!
-//! Left out, for now: the `/wp/v2/media/{id}/edit` and `post-process` routes, `generate_sub_sizes`,
+//! Left out, for now: the `/mc/v2/media/{id}/edit` and `post-process` routes, `generate_sub_sizes`,
 //! reading a title and caption from the image's EXIF or IPTC data, the other writable post fields
 //! (`slug`, `author`, `status`, `date`, `comment_status`, `meta`, ...), `featured_media` for audio
 //! and video, `media_details` beyond an image's sizes (WordPress 6.0 stores every file's
@@ -75,13 +75,13 @@ use crate::media::{
 use crate::text::{escape_html, sanitize_text_field};
 use crate::users::UserCaps;
 
-/// Where uploads are served: WordPress's `wp-content/uploads`, under the site's address. A file
-/// stored at `2026/11/photo.jpg` is at `{home}/wp-content/uploads/2026/11/photo.jpg`.
+/// Where uploads are served: `/mc-content/uploads` (WordPress's `wp-content/uploads`), under
+/// the site's address. A file stored at `2026/11/photo.jpg` is at `{home}/mc-content/uploads/2026/11/photo.jpg`.
 ///
 /// WordPress puts uploads under `siteurl`, where its own files live. Mission Control has no
 /// separate place for its files: the app that serves `home` serves the uploads, so `home` is
 /// their address.
-pub const UPLOADS_PATH: &str = "/wp-content/uploads";
+pub const UPLOADS_PATH: &str = "/mc-content/uploads";
 
 /// The attachment post type the controller serves.
 static ATTACHMENT: LazyLock<PostType> = LazyLock::new(PostType::attachment);
@@ -352,7 +352,7 @@ impl MediaController<'_> {
         MetaUpdate::read(self.meta, MetaObject::Post, &ATTACHMENT.name, params)
     }
 
-    /// `GET /wp/v2/media`: page `page` of the attachments the query asks for.
+    /// `GET /mc/v2/media`: page `page` of the attachments the query asks for.
     ///
     /// # Errors
     ///
@@ -361,7 +361,7 @@ impl MediaController<'_> {
         self.posts().list(query).await
     }
 
-    /// `GET /wp/v2/media/{id}`.
+    /// `GET /mc/v2/media/{id}`.
     ///
     /// # Errors
     ///
@@ -391,7 +391,7 @@ impl MediaController<'_> {
         }
     }
 
-    /// `POST /wp/v2/media`: stores `upload` and creates its attachment from `params` (the
+    /// `POST /mc/v2/media`: stores `upload` and creates its attachment from `params` (the
     /// query string, and a multipart body's other fields over it). `content_md5` is the
     /// `Content-MD5` header, checked against the file when sent.
     ///
@@ -508,7 +508,7 @@ impl MediaController<'_> {
             .apply(self.db)
             .await?;
         let response = posts.edit_response(attachment.id, 201).await?;
-        let location = site.rest_url(&format!("wp/v2/media/{}", attachment.id));
+        let location = site.rest_url(&format!("mc/v2/media/{}", attachment.id));
         Ok(response.with_header("Location", location))
     }
 
@@ -573,7 +573,7 @@ impl MediaController<'_> {
         }
     }
 
-    /// `POST`, `PUT` or `PATCH /wp/v2/media/{id}`: sets the attachment's title, caption,
+    /// `POST`, `PUT` or `PATCH /mc/v2/media/{id}`: sets the attachment's title, caption,
     /// description, alt text and post from `params`.
     ///
     /// # Errors
@@ -657,7 +657,7 @@ impl MediaController<'_> {
         posts.edit_response(id, 200).await
     }
 
-    /// `DELETE /wp/v2/media/{id}`: deletes the attachment and its files, which needs `force`.
+    /// `DELETE /mc/v2/media/{id}`: deletes the attachment and its files, which needs `force`.
     ///
     /// # Errors
     ///
@@ -712,7 +712,7 @@ fn attachment_error(error: &AttachmentError) -> RestError {
     }
 }
 
-/// The uploads' base address, `wp_upload_dir`'s `baseurl`: `{home}/wp-content/uploads` (see
+/// The uploads' base address, `wp_upload_dir`'s `baseurl`: `{home}/mc-content/uploads` (see
 /// [`UPLOADS_PATH`]).
 fn uploads_url(site: &Site) -> String {
     format!("{}{UPLOADS_PATH}", site.home)

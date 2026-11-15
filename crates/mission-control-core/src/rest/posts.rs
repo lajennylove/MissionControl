@@ -1,4 +1,4 @@
-//! The posts controller: `/wp/v2/posts`, `/wp/v2/pages` and each post type shown in the REST
+//! The posts controller: `/mc/v2/posts`, `/mc/v2/pages` and each post type shown in the REST
 //! API, as WordPress's `WP_REST_Posts_Controller` serves them.
 //!
 //! A [`PostType`] describes what the controller reads from a post type's registration: its
@@ -15,8 +15,8 @@
 //!   named (dotted paths for nested ones); `_embed` embeds the author and the terms.
 //! - Lists take `page`, `per_page` (1 to 100), `search`, `orderby`, `order`, `status`, `include`,
 //!   `exclude`, `slug`, `author`, `offset`, `parent` (hierarchical types), `menu_order`, and the
-//!   taxonomies (`categories`, `tags` and their `_exclude`), and answer with `X-WP-Total`,
-//!   `X-WP-TotalPages` and `Link` (`prev`, `next`) headers. A status other than `publish` needs
+//!   taxonomies (`categories`, `tags` and their `_exclude`), and answer with `X-MC-Total`,
+//!   `X-MC-TotalPages` and `Link` (`prev`, `next`) headers. A status other than `publish` needs
 //!   the type's `edit_posts` (or `read_private_posts` for `private`).
 //! - Writes check capabilities with [`can`] and the site's special pages:
 //!   creating needs `edit_posts` (with `publish_posts` to publish, `edit_others_posts` to write
@@ -44,7 +44,7 @@
 //! checked but not stored; no `replies` link), post formats (`format` reads `standard`; writes
 //! are checked, not stored), the `Allow`
 //! header, `before`/`after` and the other date filters, `search_columns`, `tax_relation`,
-//! embedding featured media (`wp:featuredmedia` is linked, not embedded), autosaves and revisions
+//! embedding featured media (`mc:featuredmedia` is linked, not embedded), autosaves and revisions
 //! routes, and the `?rest_route=` form for these routes.
 //!
 //! The media controller ([`super::media`]) runs attachments through this controller's reads
@@ -144,7 +144,7 @@ impl Supports {
 pub struct PostType {
     /// The type's name, stored in `posts.post_type`.
     pub name: String,
-    /// The route under `wp/v2`, such as `posts`.
+    /// The route under `mc/v2`, such as `posts`.
     pub rest_base: String,
     /// Whether posts have parents, as pages do.
     pub hierarchical: bool,
@@ -247,7 +247,7 @@ impl PostType {
         self.name == "post"
     }
 
-    /// The type's collection route, `/wp/v2/{rest_base}`.
+    /// The type's collection route, `/mc/v2/{rest_base}`.
     pub fn route(&self) -> String {
         format!("/{}/{}", super::CORE_NAMESPACE, self.rest_base)
     }
@@ -429,7 +429,7 @@ pub struct PostsController<'a> {
 }
 
 impl PostsController<'_> {
-    /// `GET /wp/v2/{base}`: page `page` of the posts the query asks for. `query` is the request's
+    /// `GET /mc/v2/{base}`: page `page` of the posts the query asks for. `query` is the request's
     /// query string.
     ///
     /// # Errors
@@ -440,7 +440,7 @@ impl PostsController<'_> {
         query::list(self, query).await
     }
 
-    /// `GET /wp/v2/{base}/{id}`.
+    /// `GET /mc/v2/{base}/{id}`.
     ///
     /// # Errors
     ///
@@ -450,7 +450,7 @@ impl PostsController<'_> {
         query::get(self, id, query).await
     }
 
-    /// `POST /wp/v2/{base}`: creates a post from `params` (the body, over the query string).
+    /// `POST /mc/v2/{base}`: creates a post from `params` (the body, over the query string).
     ///
     /// # Errors
     ///
@@ -460,7 +460,7 @@ impl PostsController<'_> {
         write::create(self, params).await
     }
 
-    /// `POST`, `PUT` or `PATCH /wp/v2/{base}/{id}`: updates the post from `params`. With
+    /// `POST`, `PUT` or `PATCH /mc/v2/{base}/{id}`: updates the post from `params`. With
     /// `if_unmodified_since` (the header's value), the update is made only if the post has not
     /// changed since then; a value that is not an HTTP date is ignored (RFC 9110, section
     /// 13.1.4), and the update is made without the check.
@@ -477,7 +477,7 @@ impl PostsController<'_> {
         write::update(self, id, params, if_unmodified_since).await
     }
 
-    /// `DELETE /wp/v2/{base}/{id}`: trashes the post, or deletes it with `force`.
+    /// `DELETE /mc/v2/{base}/{id}`: trashes the post, or deletes it with `force`.
     ///
     /// # Errors
     ///
@@ -630,8 +630,8 @@ mod tests {
         let routes = RestRoutes::new();
         types.register_routes(&routes);
         let paths: Vec<String> = routes.routes().into_iter().map(|r| r.path).collect();
-        assert!(paths.contains(&"/wp/v2/posts".to_owned()));
-        assert!(paths.contains(&"/wp/v2/pages/(?P<id>[\\d]+)".to_owned()));
+        assert!(paths.contains(&"/mc/v2/posts".to_owned()));
+        assert!(paths.contains(&"/mc/v2/pages/(?P<id>[\\d]+)".to_owned()));
         assert!(!paths.iter().any(|p| p.contains("books")));
 
         // Read first: the read guard must be gone before `register` takes the write lock.
@@ -646,7 +646,7 @@ mod tests {
             ..book
         });
         types.register_routes(&routes);
-        assert!(routes.routes().iter().any(|r| r.path == "/wp/v2/books"));
+        assert!(routes.routes().iter().any(|r| r.path == "/mc/v2/books"));
     }
 
     #[test]

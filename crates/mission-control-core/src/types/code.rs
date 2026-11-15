@@ -272,7 +272,7 @@ impl PostType {
         self
     }
 
-    /// Sets the type's route under `wp/v2`; by default the slug.
+    /// Sets the type's route under `mc/v2`; by default the slug.
     pub fn rest_base(mut self, base: &str) -> Self {
         self.def.rest_base = Some(base.to_owned());
         self
@@ -492,7 +492,7 @@ impl Taxonomy {
         self
     }
 
-    /// Sets the taxonomy's route under `wp/v2`; by default the slug.
+    /// Sets the taxonomy's route under `mc/v2`; by default the slug.
     pub fn rest_base(mut self, base: &str) -> Self {
         self.def.rest_base = Some(base.to_owned());
         self

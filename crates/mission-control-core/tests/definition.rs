@@ -358,7 +358,7 @@ fn post_type_converts_to_the_rest_descriptor_and_caps() {
     assert!(post_type.supports.page_attributes);
     assert!(!post_type.supports.author && !post_type.supports.comments);
     assert_eq!(post_type.taxonomies, [genre, RestTaxonomy::CATEGORIES]);
-    assert_eq!(post_type.route(), "/wp/v2/books");
+    assert_eq!(post_type.route(), "/mc/v2/books");
 
     let caps = def.caps();
     assert_eq!(caps.edit_posts, "edit_bookies");

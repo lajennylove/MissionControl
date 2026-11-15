@@ -330,6 +330,7 @@ fn invalid_slugs_are_refused() {
 #[test]
 fn reserved_slugs_are_refused() {
     for slug in [
+        "mc",
         "wp",
         "oembed",
         "batch",
@@ -338,6 +339,9 @@ fn reserved_slugs_are_refused() {
         "wp-block-editor",
         "wp-abilities",
         "wp-mail-smtp",
+        // Mission Control's own prefix (its initials, owner decision).
+        "mc-forms",
+        "mc-seo",
         // Their table prefixes would start with `sqlite_`, which SQLite keeps.
         "sqlite",
         "sqlite-cache",
@@ -352,6 +356,8 @@ fn reserved_slugs_are_refused() {
     }
     let text = without("slug", "slug = \"wpforms\"");
     assert_eq!(parse(&text).unwrap().slug, "wpforms");
+    let text = without("slug", "slug = \"mcforms\"");
+    assert_eq!(parse(&text).unwrap().slug, "mcforms");
     let text = without("slug", "slug = \"sqlitex\"");
     assert_eq!(parse(&text).unwrap().table_prefix(), "sqlitex__");
 }

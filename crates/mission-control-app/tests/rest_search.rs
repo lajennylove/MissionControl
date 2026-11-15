@@ -1,4 +1,4 @@
-//! The search route (Task 10.8): `/wp-json/wp/v2/search`, as WordPress's
+//! The search route (Task 10.8): `/mc-json/mc/v2/search`, as WordPress's
 //! `WP_REST_Search_Controller` answers it.
 //!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
@@ -222,10 +222,10 @@ async fn site() -> Site {
 /// A response's status, total headers and body.
 async fn answer(response: LocalResponse<'_>) -> (Status, Option<String>, Option<String>, Value) {
     let status = response.status();
-    let total = response.headers().get_one("X-WP-Total").map(str::to_owned);
+    let total = response.headers().get_one("X-MC-Total").map(str::to_owned);
     let pages = response
         .headers()
-        .get_one("X-WP-TotalPages")
+        .get_one("X-MC-TotalPages")
         .map(str::to_owned);
     let text = response.into_string().await.unwrap_or_default();
     let json = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{status}: {e}: {text}"));
@@ -258,7 +258,7 @@ async fn posts_are_found_with_wordpresss_keys() {
     let site = site().await;
     let content = site.content().await;
     let (status, total, pages, json) =
-        answer(site.get("/wp-json/wp/v2/search?search=rocket", None).await).await;
+        answer(site.get("/mc-json/mc/v2/search?search=rocket", None).await).await;
     assert_eq!(status, Status::Ok, "{json}");
     let found = json.as_array().unwrap();
     // The draft and the private post are not published; a visitor's search never matches the
@@ -275,22 +275,22 @@ async fn posts_are_found_with_wordpresss_keys() {
     assert_eq!(launch["url"], format!("{HOME}/rocket-launch/"));
     assert_eq!(
         launch["_links"]["self"][0],
-        json!({"embeddable": true, "href": format!("{HOME}/wp-json/wp/v2/posts/{}", content.launch.id)})
+        json!({"embeddable": true, "href": format!("{HOME}/mc-json/mc/v2/posts/{}", content.launch.id)})
     );
     assert_eq!(
         launch["_links"]["about"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/types/post")
+        format!("{HOME}/mc-json/mc/v2/types/post")
     );
     assert_eq!(
         launch["_links"]["collection"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/search")
+        format!("{HOME}/mc-json/mc/v2/search")
     );
     let page = found.iter().find(|r| r["id"] == content.page.id).unwrap();
     assert_eq!(page["subtype"], "page");
 
     // Signed in, the protected post matches, with its title marked.
     let signed_in = results(
-        site.get("/wp-json/wp/v2/search?search=rocket", Some("admin"))
+        site.get("/mc-json/mc/v2/search?search=rocket", Some("admin"))
             .await,
     )
     .await;
@@ -305,7 +305,7 @@ async fn posts_are_found_with_wordpresss_keys() {
     assert_eq!(fuel["title"], "Protected: Rocket fuel");
 
     // With no search, a visitor sees every published post, the protected one too.
-    let all = results(site.get("/wp-json/wp/v2/search", None).await).await;
+    let all = results(site.get("/mc-json/mc/v2/search", None).await).await;
     assert_eq!(all.len(), 4);
 }
 
@@ -314,13 +314,13 @@ async fn subtypes_include_and_exclude_narrow_the_search() {
     let site = site().await;
     let content = site.content().await;
     let pages = results(
-        site.get("/wp-json/wp/v2/search?search=rocket&subtype=page", None)
+        site.get("/mc-json/mc/v2/search?search=rocket&subtype=page", None)
             .await,
     )
     .await;
     assert_eq!(ids(&pages), [content.page.id].into());
     let any = results(
-        site.get("/wp-json/wp/v2/search?search=rocket&subtype[]=any", None)
+        site.get("/mc-json/mc/v2/search?search=rocket&subtype[]=any", None)
             .await,
     )
     .await;
@@ -328,7 +328,7 @@ async fn subtypes_include_and_exclude_narrow_the_search() {
     let excluded = results(
         site.get(
             &format!(
-                "/wp-json/wp/v2/search?search=rocket&exclude={}",
+                "/mc-json/mc/v2/search?search=rocket&exclude={}",
                 content.page.id
             ),
             None,
@@ -339,7 +339,7 @@ async fn subtypes_include_and_exclude_narrow_the_search() {
     assert_eq!(ids(&excluded), [content.launch.id].into());
     let included = results(
         site.get(
-            &format!("/wp-json/wp/v2/search?include={}", content.page.id),
+            &format!("/mc-json/mc/v2/search?include={}", content.page.id),
             None,
         )
         .await,
@@ -347,7 +347,7 @@ async fn subtypes_include_and_exclude_narrow_the_search() {
     .await;
     assert_eq!(ids(&included), [content.page.id].into());
     let fields = results(
-        site.get("/wp-json/wp/v2/search?search=launch&_fields=id,title", None)
+        site.get("/mc-json/mc/v2/search?search=launch&_fields=id,title", None)
             .await,
     )
     .await;
@@ -362,7 +362,7 @@ async fn terms_are_found_by_name_or_slug() {
     let site = site().await;
     let content = site.content().await;
     let (status, total, _, json) = answer(
-        site.get("/wp-json/wp/v2/search?type=term&search=rocket", None)
+        site.get("/mc-json/mc/v2/search?type=term&search=rocket", None)
             .await,
     )
     .await;
@@ -384,16 +384,16 @@ async fn terms_are_found_by_name_or_slug() {
     assert_eq!(
         category["_links"]["self"][0]["href"],
         format!(
-            "{HOME}/wp-json/wp/v2/categories/{}",
+            "{HOME}/mc-json/mc/v2/categories/{}",
             content.rocketry.term_id
         )
     );
     assert_eq!(
         category["_links"]["about"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/taxonomies/category")
+        format!("{HOME}/mc-json/mc/v2/taxonomies/category")
     );
     let tags = results(
-        site.get("/wp-json/wp/v2/search?type=term&subtype=post_tag", None)
+        site.get("/mc-json/mc/v2/search?type=term&subtype=post_tag", None)
             .await,
     )
     .await;
@@ -401,7 +401,7 @@ async fn terms_are_found_by_name_or_slug() {
     assert!(tags.iter().all(|t| t["subtype"] == "post_tag"));
 
     let formats = results(
-        site.get("/wp-json/wp/v2/search?type=post-format", None)
+        site.get("/mc-json/mc/v2/search?type=post-format", None)
             .await,
     )
     .await;
@@ -414,7 +414,7 @@ async fn search_pages_through_the_results() {
     let content = site.content().await;
     let response = site
         .get(
-            "/wp-json/wp/v2/search?search=rocket&per_page=1&page=2",
+            "/mc-json/mc/v2/search?search=rocket&per_page=1&page=2",
             None,
         )
         .await;
@@ -424,7 +424,7 @@ async fn search_pages_through_the_results() {
     assert_eq!((total.as_deref(), pages.as_deref()), (Some("2"), Some("2")));
     // The two results, one on each page.
     let first = results(
-        site.get("/wp-json/wp/v2/search?search=rocket&per_page=1", None)
+        site.get("/mc-json/mc/v2/search?search=rocket&per_page=1", None)
             .await,
     )
     .await;
@@ -440,7 +440,7 @@ async fn search_pages_through_the_results() {
     );
     let (status, _, _, error) = answer(
         site.get(
-            "/wp-json/wp/v2/search?search=rocket&per_page=1&page=3",
+            "/mc-json/mc/v2/search?search=rocket&per_page=1&page=3",
             None,
         )
         .await,
@@ -456,10 +456,10 @@ async fn search_pages_through_the_results() {
 async fn bad_parameters_are_refused() {
     let site = site().await;
     for uri in [
-        "/wp-json/wp/v2/search?type=user",
-        "/wp-json/wp/v2/search?subtype=book",
-        "/wp-json/wp/v2/search?context=edit",
-        "/wp-json/wp/v2/search?per_page=101",
+        "/mc-json/mc/v2/search?type=user",
+        "/mc-json/mc/v2/search?subtype=book",
+        "/mc-json/mc/v2/search?context=edit",
+        "/mc-json/mc/v2/search?per_page=101",
     ] {
         let (status, _, _, error) = answer(site.get(uri, None).await).await;
         assert_eq!(
@@ -475,7 +475,7 @@ async fn embed_brings_the_post_or_term() {
     let site = site().await;
     let content = site.content().await;
     let found = results(
-        site.get("/wp-json/wp/v2/search?search=launch&_embed", None)
+        site.get("/mc-json/mc/v2/search?search=launch&_embed", None)
             .await,
     )
     .await;
@@ -484,7 +484,7 @@ async fn embed_brings_the_post_or_term() {
     assert_eq!(embedded["slug"], "rocket-launch");
     let found = results(
         site.get(
-            "/wp-json/wp/v2/search?type=term&search=rocketry&_embed=self",
+            "/mc-json/mc/v2/search?type=term&search=rocketry&_embed=self",
             None,
         )
         .await,
@@ -503,7 +503,7 @@ async fn a_visitor_never_finds_an_unpublished_post_by_id() {
         .post("post", PostStatus::Draft, "Hidden draft", None)
         .await;
     let found = results(
-        site.get(&format!("/wp-json/wp/v2/search?include={}", draft.id), None)
+        site.get(&format!("/mc-json/mc/v2/search?include={}", draft.id), None)
             .await,
     )
     .await;
@@ -516,7 +516,7 @@ async fn no_search_and_no_post_subtype_lists_posts_only() {
     let content = site.content().await;
     // `category` is no post type: with no search, `WP_Query` lists `post` only.
     let found = results(
-        site.get("/wp-json/wp/v2/search?subtype=category", None)
+        site.get("/mc-json/mc/v2/search?subtype=category", None)
             .await,
     )
     .await;
@@ -525,7 +525,7 @@ async fn no_search_and_no_post_subtype_lists_posts_only() {
     assert!(!ids(&found).contains(&content.page.id));
     // With a search, every searchable type.
     let found = results(
-        site.get("/wp-json/wp/v2/search?subtype=category&search=rocket", None)
+        site.get("/mc-json/mc/v2/search?subtype=category&search=rocket", None)
             .await,
     )
     .await;
@@ -533,7 +533,7 @@ async fn no_search_and_no_post_subtype_lists_posts_only() {
     // `search` is sanitized: tags and surrounding space go.
     let found = results(
         site.get(
-            "/wp-json/wp/v2/search?search=%20%3Cb%3Elaunch%3C%2Fb%3E%20",
+            "/mc-json/mc/v2/search?search=%20%3Cb%3Elaunch%3C%2Fb%3E%20",
             None,
         )
         .await,

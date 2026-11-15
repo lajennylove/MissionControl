@@ -1,4 +1,4 @@
-//! The users controller (Task 10.4): `/wp-json/wp/v2/users`, `/users/{id}` and `/users/me`, as
+//! The users controller (Task 10.4): `/mc-json/mc/v2/users`, `/users/{id}` and `/users/me`, as
 //! WordPress's `WP_REST_Users_Controller` answers them.
 //!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
@@ -282,13 +282,13 @@ fn gravatar_hash(email: &str) -> String {
 async fn me_is_the_signed_in_user_and_a_visitor_is_not_logged_in() {
     let site = site().await;
     assert_error(
-        site.get("/wp-json/wp/v2/users/me", None).await,
+        site.get("/mc-json/mc/v2/users/me", None).await,
         Status::Unauthorized,
         "rest_not_logged_in",
     )
     .await;
 
-    let (status, me) = body(site.get("/wp-json/wp/v2/users/me", Some("editor")).await).await;
+    let (status, me) = body(site.get("/mc-json/mc/v2/users/me", Some("editor")).await).await;
     assert_eq!(status, Status::Ok);
     assert_eq!(me["id"], json!(site.id("editor")));
     assert_eq!(keys(&me), set(&[VIEW_KEYS]));
@@ -296,7 +296,7 @@ async fn me_is_the_signed_in_user_and_a_visitor_is_not_logged_in() {
 
     // A user may see their own edit context without `list_users`.
     let (status, me) = body(
-        site.get("/wp-json/wp/v2/users/me?context=edit", Some("author"))
+        site.get("/mc-json/mc/v2/users/me?context=edit", Some("author"))
             .await,
     )
     .await;
@@ -325,7 +325,7 @@ async fn a_user_has_wordpresss_view_fields() {
         .await
         .unwrap();
 
-    let (status, user) = body(site.get(&format!("/wp-json/wp/v2/users/{id}"), None).await).await;
+    let (status, user) = body(site.get(&format!("/mc-json/mc/v2/users/{id}"), None).await).await;
     assert_eq!(status, Status::Ok, "{user}");
     assert_eq!(keys(&user), set(&[VIEW_KEYS]));
     assert_eq!(user["slug"], "ann-author");
@@ -343,17 +343,17 @@ async fn a_user_has_wordpresss_view_fields() {
     }
     assert_eq!(
         user["_links"]["self"][0]["href"],
-        json!(format!("{HOME}/wp-json/wp/v2/users/{id}"))
+        json!(format!("{HOME}/mc-json/mc/v2/users/{id}"))
     );
     assert_eq!(
         user["_links"]["collection"][0]["href"],
-        json!(format!("{HOME}/wp-json/wp/v2/users"))
+        json!(format!("{HOME}/mc-json/mc/v2/users"))
     );
 
     // The edit context needs `list_users`: an administrator has it, an author does not.
     let (status, edit) = body(
         site.get(
-            &format!("/wp-json/wp/v2/users/{id}?context=edit"),
+            &format!("/mc-json/mc/v2/users/{id}?context=edit"),
             Some("admin"),
         )
         .await,
@@ -365,7 +365,7 @@ async fn a_user_has_wordpresss_view_fields() {
     assert_eq!(edit["last_name"], "");
     assert_error(
         site.get(
-            &format!("/wp-json/wp/v2/users/{id}?context=edit"),
+            &format!("/mc-json/mc/v2/users/{id}?context=edit"),
             Some("author2"),
         )
         .await,
@@ -376,13 +376,13 @@ async fn a_user_has_wordpresss_view_fields() {
 
     // The embed context drops `meta`; `_fields` keeps what it names.
     let (_, embed) = body(
-        site.get(&format!("/wp-json/wp/v2/users/{id}?context=embed"), None)
+        site.get(&format!("/mc-json/mc/v2/users/{id}?context=embed"), None)
             .await,
     )
     .await;
     assert!(!keys(&embed).contains("meta"));
     let (_, few) = body(
-        site.get(&format!("/wp-json/wp/v2/users/{id}?_fields=id,slug"), None)
+        site.get(&format!("/mc-json/mc/v2/users/{id}?_fields=id,slug"), None)
             .await,
     )
     .await;
@@ -392,7 +392,7 @@ async fn a_user_has_wordpresss_view_fields() {
     let other = site.id("author2");
     let (_, edit) = body(
         site.get(
-            &format!("/wp-json/wp/v2/users/{other}?context=edit"),
+            &format!("/mc-json/mc/v2/users/{other}?context=edit"),
             Some("admin"),
         )
         .await,
@@ -405,7 +405,7 @@ async fn a_user_has_wordpresss_view_fields() {
     assert_eq!(edit["capabilities"]["moderate_comments"], json!(true));
 
     assert_error(
-        site.get("/wp-json/wp/v2/users/999999999", Some("admin"))
+        site.get("/mc-json/mc/v2/users/999999999", Some("admin"))
             .await,
         Status::NotFound,
         "rest_user_invalid_id",
@@ -419,13 +419,13 @@ async fn visitors_see_only_users_with_published_posts() {
     site.post_by("author", PostStatus::Publish, "Public").await;
     site.post_by("author2", PostStatus::Draft, "Not yet").await;
 
-    let (status, list) = body(site.get("/wp-json/wp/v2/users", None).await).await;
+    let (status, list) = body(site.get("/mc-json/mc/v2/users", None).await).await;
     assert_eq!(status, Status::Ok);
     assert_eq!(ids(&list), [site.id("author")]);
 
     assert_error(
         site.get(
-            &format!("/wp-json/wp/v2/users/{}", site.id("author2")),
+            &format!("/mc-json/mc/v2/users/{}", site.id("author2")),
             None,
         )
         .await,
@@ -437,7 +437,7 @@ async fn visitors_see_only_users_with_published_posts() {
     // editors have neither `list_users` nor `edit_users`.
     assert_error(
         site.get(
-            &format!("/wp-json/wp/v2/users/{}", site.id("author2")),
+            &format!("/mc-json/mc/v2/users/{}", site.id("author2")),
             Some("editor"),
         )
         .await,
@@ -446,32 +446,32 @@ async fn visitors_see_only_users_with_published_posts() {
     )
     .await;
     let response = site
-        .get(&format!("/wp-json/wp/v2/users/{}", site.id("author")), None)
+        .get(&format!("/mc-json/mc/v2/users/{}", site.id("author")), None)
         .await;
     assert_eq!(response.status(), Status::Ok);
 
     // What visitors may not ask for.
     assert_error(
-        site.get("/wp-json/wp/v2/users?context=edit", None).await,
+        site.get("/mc-json/mc/v2/users?context=edit", None).await,
         Status::Unauthorized,
         "rest_forbidden_context",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/users?roles=editor", Some("author"))
+        site.get("/mc-json/mc/v2/users?roles=editor", Some("author"))
             .await,
         Status::Forbidden,
         "rest_user_cannot_view",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/users?orderby=email", None).await,
+        site.get("/mc-json/mc/v2/users?orderby=email", None).await,
         Status::Unauthorized,
         "rest_forbidden_orderby",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/users?who=authors", None).await,
+        site.get("/mc-json/mc/v2/users?who=authors", None).await,
         Status::Unauthorized,
         "rest_forbidden_who",
     )
@@ -480,12 +480,12 @@ async fn visitors_see_only_users_with_published_posts() {
     let email = site.users["author"].email.clone();
     let local = email.split('@').next().unwrap().to_owned();
     let (_, found) = body(
-        site.get(&format!("/wp-json/wp/v2/users?search={local}"), None)
+        site.get(&format!("/mc-json/mc/v2/users?search={local}"), None)
             .await,
     )
     .await;
     assert_eq!(found, json!([]));
-    let (_, found) = body(site.get("/wp-json/wp/v2/users?search=ann", None).await).await;
+    let (_, found) = body(site.get("/mc-json/mc/v2/users?search=ann", None).await).await;
     assert_eq!(ids(&found), [site.id("author")]);
 }
 
@@ -496,12 +496,12 @@ async fn administrators_list_filter_and_page_every_user() {
 
     let response = site
         .get(
-            &format!("/wp-json/wp/v2/users?{include}&per_page=2&context=edit"),
+            &format!("/mc-json/mc/v2/users?{include}&per_page=2&context=edit"),
             Some("admin"),
         )
         .await;
-    assert_eq!(response.headers().get_one("X-WP-Total"), Some("5"));
-    assert_eq!(response.headers().get_one("X-WP-TotalPages"), Some("3"));
+    assert_eq!(response.headers().get_one("X-MC-Total"), Some("5"));
+    assert_eq!(response.headers().get_one("X-MC-TotalPages"), Some("3"));
     let links: Vec<&str> = response.headers().get("Link").collect();
     assert_eq!(links.len(), 1, "{links:?}");
     assert!(links[0].ends_with("rel=\"next\""), "{links:?}");
@@ -513,7 +513,7 @@ async fn administrators_list_filter_and_page_every_user() {
     // A page past the end is an empty list.
     let (status, empty) = body(
         site.get(
-            &format!("/wp-json/wp/v2/users?{include}&page=9"),
+            &format!("/mc-json/mc/v2/users?{include}&page=9"),
             Some("admin"),
         )
         .await,
@@ -523,7 +523,7 @@ async fn administrators_list_filter_and_page_every_user() {
 
     let (_, authors) = body(
         site.get(
-            &format!("/wp-json/wp/v2/users?{include}&roles=author&orderby=id&order=desc"),
+            &format!("/mc-json/mc/v2/users?{include}&roles=author&orderby=id&order=desc"),
             Some("admin"),
         )
         .await,
@@ -535,7 +535,7 @@ async fn administrators_list_filter_and_page_every_user() {
 
     let (_, moderators) = body(
         site.get(
-            &format!("/wp-json/wp/v2/users?{include}&capabilities=moderate_comments"),
+            &format!("/mc-json/mc/v2/users?{include}&capabilities=moderate_comments"),
             Some("admin"),
         )
         .await,
@@ -552,7 +552,7 @@ async fn administrators_list_filter_and_page_every_user() {
     let (_, by_slug) = body(
         site.get(
             &format!(
-                "/wp-json/wp/v2/users?{include}&slug=cy-contributor,ed-editor&orderby=include_slugs"
+                "/mc-json/mc/v2/users?{include}&slug=cy-contributor,ed-editor&orderby=include_slugs"
             ),
             Some("admin"),
         )
@@ -564,7 +564,7 @@ async fn administrators_list_filter_and_page_every_user() {
     // `who=authors`: everyone above user level 0, which a contributor may ask for.
     let (status, writers) = body(
         site.get(
-            &format!("/wp-json/wp/v2/users?{include}&who=authors"),
+            &format!("/mc-json/mc/v2/users?{include}&who=authors"),
             Some("contributor"),
         )
         .await,
@@ -583,7 +583,7 @@ async fn an_embedded_post_author_is_the_users_embed() {
         .await;
     let (status, item) = body(
         site.get(
-            &format!("/wp-json/wp/v2/posts/{}?_embed=author", post.id),
+            &format!("/mc-json/mc/v2/posts/{}?_embed=author", post.id),
             None,
         )
         .await,
@@ -613,7 +613,7 @@ async fn an_embedded_author_without_published_posts_needs_list_users() {
     let site = site().await;
     // The second author has only a draft; an editor may read it, but not list users.
     let draft = site.post_by("author2", PostStatus::Draft, "Draft").await;
-    let uri = format!("/wp-json/wp/v2/posts/{}?_embed=author", draft.id);
+    let uri = format!("/mc-json/mc/v2/posts/{}?_embed=author", draft.id);
     let (status, item) = body(site.get(&uri, Some("editor")).await).await;
     assert_eq!(status, Status::Ok, "{item}");
     assert_eq!(

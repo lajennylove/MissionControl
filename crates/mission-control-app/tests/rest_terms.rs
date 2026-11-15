@@ -1,4 +1,4 @@
-//! The terms controller (Task 10.3): `/wp-json/wp/v2/categories` and `/tags`, as WordPress's
+//! The terms controller (Task 10.3): `/mc-json/mc/v2/categories` and `/tags`, as WordPress's
 //! `WP_REST_Terms_Controller` answers them.
 //!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
@@ -318,7 +318,7 @@ async fn a_category_and_a_tag_have_wordpresss_keys() {
 
     let (status, json) = body(
         site.get(
-            &format!("/wp-json/wp/v2/categories/{}", local.term_id),
+            &format!("/mc-json/mc/v2/categories/{}", local.term_id),
             None,
         )
         .await,
@@ -342,33 +342,33 @@ async fn a_category_and_a_tag_have_wordpresss_keys() {
             "collection",
             "about",
             "up",
-            "wp:post_type",
+            "mc:post_type",
             "curies"
         ])
     );
     assert_eq!(
         links["self"][0]["href"],
-        json!(format!("{HOME}/wp-json/wp/v2/categories/{}", local.term_id))
+        json!(format!("{HOME}/mc-json/mc/v2/categories/{}", local.term_id))
     );
     assert_eq!(links["self"][0]["targetHints"]["allow"], json!(["GET"]));
     assert_eq!(
         links["up"][0],
-        json!({"embeddable": true, "href": format!("{HOME}/wp-json/wp/v2/categories/{}", news.term_id)})
+        json!({"embeddable": true, "href": format!("{HOME}/mc-json/mc/v2/categories/{}", news.term_id)})
     );
     assert_eq!(
         links["about"][0]["href"],
-        json!(format!("{HOME}/wp-json/wp/v2/taxonomies/category"))
+        json!(format!("{HOME}/mc-json/mc/v2/taxonomies/category"))
     );
     assert_eq!(
-        links["wp:post_type"][0]["href"],
+        links["mc:post_type"][0]["href"],
         json!(format!(
-            "{HOME}/wp-json/wp/v2/posts?categories={}",
+            "{HOME}/mc-json/mc/v2/posts?categories={}",
             local.term_id
         ))
     );
 
     let (status, json) = body(
-        site.get(&format!("/wp-json/wp/v2/tags/{}", rust.term_id), None)
+        site.get(&format!("/mc-json/mc/v2/tags/{}", rust.term_id), None)
             .await,
     )
     .await;
@@ -377,14 +377,14 @@ async fn a_category_and_a_tag_have_wordpresss_keys() {
     assert_eq!(json["taxonomy"], json!("post_tag"));
     assert_eq!(json["link"], json!(format!("{HOME}/tag/rust/")));
     assert_eq!(
-        json["_links"]["wp:post_type"][0]["href"],
-        json!(format!("{HOME}/wp-json/wp/v2/posts?tags={}", rust.term_id))
+        json["_links"]["mc:post_type"][0]["href"],
+        json!(format!("{HOME}/mc-json/mc/v2/posts?tags={}", rust.term_id))
     );
 
     // The embed context keeps WordPress's embed fields; the edit context adds nothing.
     let (_, json) = body(
         site.get(
-            &format!("/wp-json/wp/v2/tags/{}?context=embed", rust.term_id),
+            &format!("/mc-json/mc/v2/tags/{}?context=embed", rust.term_id),
             None,
         )
         .await,
@@ -396,7 +396,7 @@ async fn a_category_and_a_tag_have_wordpresss_keys() {
     );
     let (status, json) = body(
         site.get(
-            &format!("/wp-json/wp/v2/tags/{}?context=edit", rust.term_id),
+            &format!("/mc-json/mc/v2/tags/{}?context=edit", rust.term_id),
             Some("editor"),
         )
         .await,
@@ -415,7 +415,7 @@ async fn the_edit_context_and_missing_terms_are_refused() {
     let (site, _) = site().await;
     let rust = site.tag("Rust").await;
     let news = site.category("News", None).await;
-    let uri = format!("/wp-json/wp/v2/tags/{}?context=edit", rust.term_id);
+    let uri = format!("/mc-json/mc/v2/tags/{}?context=edit", rust.term_id);
     assert_error(
         site.get(&uri, None).await,
         Status::Unauthorized,
@@ -429,7 +429,7 @@ async fn the_edit_context_and_missing_terms_are_refused() {
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/categories?context=edit", Some("author"))
+        site.get("/mc-json/mc/v2/categories?context=edit", Some("author"))
             .await,
         Status::Forbidden,
         "rest_forbidden_context",
@@ -437,21 +437,21 @@ async fn the_edit_context_and_missing_terms_are_refused() {
     .await;
     // A category is not a tag, and an id nobody has is no term.
     assert_error(
-        site.get(&format!("/wp-json/wp/v2/tags/{}", news.term_id), None)
+        site.get(&format!("/mc-json/mc/v2/tags/{}", news.term_id), None)
             .await,
         Status::NotFound,
         "rest_term_invalid",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/categories/999999", None).await,
+        site.get("/mc-json/mc/v2/categories/999999", None).await,
         Status::NotFound,
         "rest_term_invalid",
     )
     .await;
     // A base nobody serves is still no route.
     assert_error(
-        site.get("/wp-json/wp/v2/genres", None).await,
+        site.get("/mc-json/mc/v2/genres", None).await,
         Status::NotFound,
         "rest_no_route",
     )
@@ -464,9 +464,9 @@ async fn lists_are_ordered_by_name_with_pagination_headers() {
     for name in ["banana", "Apple", "cherry"] {
         site.tag(name).await;
     }
-    let response = site.get("/wp-json/wp/v2/tags", None).await;
-    assert_eq!(header(&response, "X-WP-Total"), Some("3"));
-    assert_eq!(header(&response, "X-WP-TotalPages"), Some("1"));
+    let response = site.get("/mc-json/mc/v2/tags", None).await;
+    assert_eq!(header(&response, "X-MC-Total"), Some("3"));
+    assert_eq!(header(&response, "X-MC-TotalPages"), Some("1"));
     let (status, json) = body(response).await;
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(names(&json), ["Apple", "banana", "cherry"]);
@@ -475,48 +475,48 @@ async fn lists_are_ordered_by_name_with_pagination_headers() {
     }
 
     let response = site
-        .get("/wp-json/wp/v2/tags?per_page=2&page=2&order=desc", None)
+        .get("/mc-json/mc/v2/tags?per_page=2&page=2&order=desc", None)
         .await;
-    assert_eq!(header(&response, "X-WP-Total"), Some("3"));
-    assert_eq!(header(&response, "X-WP-TotalPages"), Some("2"));
+    assert_eq!(header(&response, "X-MC-Total"), Some("3"));
+    assert_eq!(header(&response, "X-MC-TotalPages"), Some("2"));
     let links: Vec<&str> = response.headers().get("Link").collect();
     assert_eq!(
         links,
         [format!(
-            "<{HOME}/wp-json/wp/v2/tags?per_page=2&page=1&order=desc>; rel=\"prev\""
+            "<{HOME}/mc-json/mc/v2/tags?per_page=2&page=1&order=desc>; rel=\"prev\""
         )]
     );
     let (_, json) = body(response).await;
     assert_eq!(names(&json), ["Apple"]);
 
     // A page past the end is an empty list, not an error, for terms.
-    let (status, json) = body(site.get("/wp-json/wp/v2/tags?page=9", None).await).await;
+    let (status, json) = body(site.get("/mc-json/mc/v2/tags?page=9", None).await).await;
     assert_eq!((status, json), (Status::Ok, json!([])));
 
     // `search`, `slug`, `include` with its order, `exclude` and `offset` (flat taxonomies).
-    let (_, json) = body(site.get("/wp-json/wp/v2/tags?search=AN", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2/tags?search=AN", None).await).await;
     assert_eq!(names(&json), ["banana"]);
     let (_, json) = body(
-        site.get("/wp-json/wp/v2/tags?slug=cherry,apple", None)
+        site.get("/mc-json/mc/v2/tags?slug=cherry,apple", None)
             .await,
     )
     .await;
     assert_eq!(names(&json), ["Apple", "cherry"]);
     let (_, json) = body(
         site.get(
-            "/wp-json/wp/v2/tags?slug[]=cherry&slug[]=apple&orderby=include_slugs",
+            "/mc-json/mc/v2/tags?slug[]=cherry&slug[]=apple&orderby=include_slugs",
             None,
         )
         .await,
     )
     .await;
     assert_eq!(names(&json), ["cherry", "Apple"]);
-    let (_, json) = body(site.get("/wp-json/wp/v2/tags?offset=1", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2/tags?offset=1", None).await).await;
     assert_eq!(names(&json), ["banana", "cherry"]);
     let (_, json) = body(
         site.get(
             &format!(
-                "/wp-json/wp/v2/categories?exclude={}",
+                "/mc-json/mc/v2/categories?exclude={}",
                 uncategorized.term_id
             ),
             None,
@@ -527,13 +527,13 @@ async fn lists_are_ordered_by_name_with_pagination_headers() {
     assert_eq!(json, json!([]));
 
     assert_error(
-        site.get("/wp-json/wp/v2/tags?per_page=101", None).await,
+        site.get("/mc-json/mc/v2/tags?per_page=101", None).await,
         Status::BadRequest,
         "rest_invalid_param",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/tags?orderby=date", None).await,
+        site.get("/mc-json/mc/v2/tags?orderby=date", None).await,
         Status::BadRequest,
         "rest_invalid_param",
     )
@@ -564,18 +564,18 @@ async fn hide_empty_and_post_filter_the_list() {
     // A draft is not counted, so Sport and Go are empty. News is empty but keeps its place: a
     // category under it has posts, as `get_terms` keeps it.
     let response = site
-        .get("/wp-json/wp/v2/categories?hide_empty=true", None)
+        .get("/mc-json/mc/v2/categories?hide_empty=true", None)
         .await;
-    assert_eq!(header(&response, "X-WP-Total"), Some("2"));
+    assert_eq!(header(&response, "X-MC-Total"), Some("2"));
     let (_, json) = body(response).await;
     assert_eq!(names(&json), ["Local", "News"]);
-    let (_, json) = body(site.get("/wp-json/wp/v2/tags?hide_empty=1", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2/tags?hide_empty=1", None).await).await;
     assert_eq!(names(&json), ["Rust"]);
-    let (_, json) = body(site.get("/wp-json/wp/v2/categories?parent=0", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2/categories?parent=0", None).await).await;
     assert_eq!(names(&json), ["News", "Sport", "Uncategorized"]);
     let (_, json) = body(
         site.get(
-            &format!("/wp-json/wp/v2/categories?parent={}", news.term_id),
+            &format!("/mc-json/mc/v2/categories?parent={}", news.term_id),
             None,
         )
         .await,
@@ -583,18 +583,18 @@ async fn hide_empty_and_post_filter_the_list() {
     .await;
     assert_eq!(names(&json), ["Local"]);
     // `parent` is a parameter of hierarchical taxonomies only: tags ignore it.
-    let (_, json) = body(site.get("/wp-json/wp/v2/tags?parent=5", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2/tags?parent=5", None).await).await;
     assert_eq!(names(&json), ["Go", "Rust"]);
 
     let response = site
-        .get(&format!("/wp-json/wp/v2/tags?post={}", published.id), None)
+        .get(&format!("/mc-json/mc/v2/tags?post={}", published.id), None)
         .await;
-    assert_eq!(header(&response, "X-WP-Total"), Some("1"));
+    assert_eq!(header(&response, "X-MC-Total"), Some("1"));
     let (_, json) = body(response).await;
     assert_eq!(names(&json), ["Rust"]);
     let (_, json) = body(
         site.get(
-            &format!("/wp-json/wp/v2/categories?post={}", published.id),
+            &format!("/mc-json/mc/v2/categories?post={}", published.id),
             None,
         )
         .await,
@@ -603,7 +603,7 @@ async fn hide_empty_and_post_filter_the_list() {
     assert_eq!(names(&json), ["Local"]);
 
     // A draft's terms are for those who may read it.
-    let uri = format!("/wp-json/wp/v2/tags?post={}", draft.id);
+    let uri = format!("/mc-json/mc/v2/tags?post={}", draft.id);
     assert_error(
         site.get(&uri, None).await,
         Status::Unauthorized,
@@ -615,7 +615,7 @@ async fn hide_empty_and_post_filter_the_list() {
     assert_eq!(names(&json), ["Go"]);
     // A post that does not exist is WordPress's 400, before any permission check.
     let json = assert_error(
-        site.get("/wp-json/wp/v2/tags?post=999999", None).await,
+        site.get("/mc-json/mc/v2/tags?post=999999", None).await,
         Status::BadRequest,
         "rest_post_invalid_id",
     )
@@ -629,7 +629,7 @@ async fn categories_and_tags_are_created() {
     let (site, _) = site().await;
     let response = site
         .post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("editor"),
             json!({"name": "News", "description": "What happened"}),
         )
@@ -646,13 +646,13 @@ async fn categories_and_tags_are_created() {
     let id = news["id"].as_i64().unwrap();
     assert_eq!(
         location,
-        Some(format!("{HOME}/wp-json/wp/v2/categories/{id}"))
+        Some(format!("{HOME}/mc-json/mc/v2/categories/{id}"))
     );
 
     // A child category, with its own slug.
     let (status, local) = body(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("editor"),
             json!({"name": "Local", "slug": "Local News", "parent": id}),
         )
@@ -670,7 +670,7 @@ async fn categories_and_tags_are_created() {
     // A tag, as a form: an author may add tags.
     let response = site
         .client
-        .post("/wp-json/wp/v2/tags")
+        .post("/mc-json/mc/v2/tags")
         .header(site.auth("author"))
         .header(ContentType::Form)
         .body("name=Rust+lang")
@@ -685,7 +685,7 @@ async fn categories_and_tags_are_created() {
     );
 
     // Both are listed, and stored.
-    let (_, json) = body(site.get("/wp-json/wp/v2/categories", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2/categories", None).await).await;
     assert!(names(&json).contains(&"Local".to_owned()), "{json}");
     assert!(
         Term::find_by_slug(site.db(), &Taxonomy::POST_TAG, "rust-lang")
@@ -697,7 +697,7 @@ async fn categories_and_tags_are_created() {
     // A parent for a tag, or one that does not exist, is refused.
     assert_error(
         site.post(
-            "/wp-json/wp/v2/tags",
+            "/mc-json/mc/v2/tags",
             Some("editor"),
             json!({"name": "Go", "parent": id}),
         )
@@ -708,7 +708,7 @@ async fn categories_and_tags_are_created() {
     .await;
     assert_error(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("editor"),
             json!({"name": "Orphan", "parent": 999999}),
         )
@@ -718,21 +718,21 @@ async fn categories_and_tags_are_created() {
     )
     .await;
     assert_error(
-        site.post("/wp-json/wp/v2/tags", Some("editor"), json!({"slug": "go"}))
+        site.post("/mc-json/mc/v2/tags", Some("editor"), json!({"slug": "go"}))
             .await,
         Status::BadRequest,
         "rest_missing_callback_param",
     )
     .await;
     assert_error(
-        site.post("/wp-json/wp/v2/tags", Some("editor"), json!({"name": "  "}))
+        site.post("/mc-json/mc/v2/tags", Some("editor"), json!({"name": "  "}))
             .await,
         Status::BadRequest,
         "empty_term_name",
     )
     .await;
     assert_error(
-        site.post("/wp-json/wp/v2/tags", Some("editor"), json!({"name": 12}))
+        site.post("/mc-json/mc/v2/tags", Some("editor"), json!({"name": 12}))
             .await,
         Status::BadRequest,
         "rest_invalid_param",
@@ -747,7 +747,7 @@ async fn a_duplicate_is_term_exists_with_its_id() {
     let rust = site.tag("Rust").await;
     let json = assert_error(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("admin"),
             json!({"name": "news"}),
         )
@@ -763,7 +763,7 @@ async fn a_duplicate_is_term_exists_with_its_id() {
     );
     let json = assert_error(
         site.post(
-            "/wp-json/wp/v2/tags",
+            "/mc-json/mc/v2/tags",
             Some("admin"),
             json!({"name": "Rust"}),
         )
@@ -776,7 +776,7 @@ async fn a_duplicate_is_term_exists_with_its_id() {
     // The same name under another parent is a new category.
     let (status, json) = body(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("admin"),
             json!({"name": "News", "parent": news.term_id}),
         )
@@ -793,7 +793,7 @@ async fn writes_need_the_taxonomys_capabilities() {
     // An author may not create categories; an editor may.
     assert_error(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("author"),
             json!({"name": "News"}),
         )
@@ -803,7 +803,7 @@ async fn writes_need_the_taxonomys_capabilities() {
     )
     .await;
     assert_error(
-        site.post("/wp-json/wp/v2/categories", None, json!({"name": "News"}))
+        site.post("/mc-json/mc/v2/categories", None, json!({"name": "News"}))
             .await,
         Status::Unauthorized,
         "rest_cannot_create",
@@ -811,7 +811,7 @@ async fn writes_need_the_taxonomys_capabilities() {
     .await;
     let response = site
         .post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("editor"),
             json!({"name": "News"}),
         )
@@ -820,7 +820,7 @@ async fn writes_need_the_taxonomys_capabilities() {
     // A contributor may tag posts, so may add tags, as WordPress's `assign_terms`.
     let response = site
         .post(
-            "/wp-json/wp/v2/tags",
+            "/mc-json/mc/v2/tags",
             Some("contributor"),
             json!({"name": "Rust"}),
         )
@@ -831,7 +831,7 @@ async fn writes_need_the_taxonomys_capabilities() {
         .await
         .unwrap()
         .unwrap();
-    let uri = format!("/wp-json/wp/v2/tags/{}", rust.term_id);
+    let uri = format!("/mc-json/mc/v2/tags/{}", rust.term_id);
     assert_error(
         site.post(&uri, Some("author"), json!({"name": "Rust!"}))
             .await,
@@ -853,7 +853,7 @@ async fn updates_change_the_term() {
     let (site, _) = site().await;
     let news = site.category("News", None).await;
     let sport = site.category("Sport", None).await;
-    let uri = format!("/wp-json/wp/v2/categories/{}", sport.term_id);
+    let uri = format!("/mc-json/mc/v2/categories/{}", sport.term_id);
     for method in ["POST", "PUT", "PATCH"] {
         let (status, json) = body(
             site.send(
@@ -906,7 +906,7 @@ async fn updates_change_the_term() {
     .await;
     assert_error(
         site.post(
-            "/wp-json/wp/v2/categories/999999",
+            "/mc-json/mc/v2/categories/999999",
             Some("editor"),
             json!({"name": "x"}),
         )
@@ -924,7 +924,7 @@ async fn names_and_descriptions_are_sanitized_for_everyone() {
     // line of text, the description keeps only `$allowedtags`.
     let (status, json) = body(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("admin"),
             json!({
                 "name": " <b>Big</b>\n news<script>alert(1)</script> ",
@@ -940,7 +940,7 @@ async fn names_and_descriptions_are_sanitized_for_everyone() {
     assert_eq!(json["description"], json!("<strong>Ok</strong>para"));
     assert_error(
         site.post(
-            "/wp-json/wp/v2/categories",
+            "/mc-json/mc/v2/categories",
             Some("admin"),
             json!({"name": "<em></em>"}),
         )
@@ -958,7 +958,7 @@ async fn deletes_need_force_and_spare_the_default_category() {
     let post = site
         .post_with(PostStatus::Publish, &[(&Taxonomy::CATEGORY, &news)])
         .await;
-    let uri = format!("/wp-json/wp/v2/categories/{}", news.term_id);
+    let uri = format!("/mc-json/mc/v2/categories/{}", news.term_id);
     assert_error(
         site.send("DELETE", &uri, Some("editor"), None).await,
         Status::NotImplemented,
@@ -986,7 +986,7 @@ async fn deletes_need_force_and_spare_the_default_category() {
 
     // Nobody may delete the default category, an administrator included.
     let default_uri = format!(
-        "/wp-json/wp/v2/categories/{}?force=true",
+        "/mc-json/mc/v2/categories/{}?force=true",
         uncategorized.term_id
     );
     assert_error(
@@ -998,7 +998,7 @@ async fn deletes_need_force_and_spare_the_default_category() {
     let (_, json) = body(
         site.get(
             &format!(
-                "/wp-json/wp/v2/categories/{}?context=edit",
+                "/mc-json/mc/v2/categories/{}?context=edit",
                 uncategorized.term_id
             ),
             Some("admin"),
@@ -1019,7 +1019,7 @@ async fn deletes_need_force_and_spare_the_default_category() {
     assert_error(
         site.send(
             "DELETE",
-            &format!("/wp-json/wp/v2/tags/{}?force=true", pinned.term_id),
+            &format!("/mc-json/mc/v2/tags/{}?force=true", pinned.term_id),
             Some("admin"),
             None,
         )
@@ -1034,7 +1034,7 @@ async fn deletes_need_force_and_spare_the_default_category() {
     let (status, _) = body(
         site.send(
             "DELETE",
-            &format!("/wp-json/wp/v2/tags/{}", rust.term_id),
+            &format!("/mc-json/mc/v2/tags/{}", rust.term_id),
             Some("editor"),
             Some(json!({"force": true})),
         )
@@ -1049,7 +1049,7 @@ async fn fields_and_embed_shape_the_response() {
     let (site, _) = site().await;
     let news = site.category("News", None).await;
     let local = site.category("Local", Some(&news)).await;
-    let uri = format!("/wp-json/wp/v2/categories/{}", local.term_id);
+    let uri = format!("/mc-json/mc/v2/categories/{}", local.term_id);
     let (_, json) = body(site.get(&format!("{uri}?_fields=id,name"), None).await).await;
     assert_eq!(json, json!({"id": local.term_id, "name": "Local"}));
     let (_, json) = body(site.get(&format!("{uri}?_embed"), None).await).await;
@@ -1062,7 +1062,7 @@ async fn fields_and_embed_shape_the_response() {
     // No parent, nothing embedded.
     let (_, json) = body(
         site.get(
-            &format!("/wp-json/wp/v2/categories/{}?_embed", news.term_id),
+            &format!("/mc-json/mc/v2/categories/{}?_embed", news.term_id),
             None,
         )
         .await,
@@ -1074,18 +1074,18 @@ async fn fields_and_embed_shape_the_response() {
 #[rocket::async_test]
 async fn discovery_lists_the_taxonomies_served() {
     let (site, _) = site().await;
-    let (_, json) = body(site.get("/wp-json/wp/v2", None).await).await;
+    let (_, json) = body(site.get("/mc-json/mc/v2", None).await).await;
     let routes = json["routes"].as_object().expect("routes");
     for path in [
-        "/wp/v2/categories",
-        "/wp/v2/categories/(?P<id>[\\d]+)",
-        "/wp/v2/tags",
-        "/wp/v2/tags/(?P<id>[\\d]+)",
+        "/mc/v2/categories",
+        "/mc/v2/categories/(?P<id>[\\d]+)",
+        "/mc/v2/tags",
+        "/mc/v2/tags/(?P<id>[\\d]+)",
     ] {
         assert!(routes.contains_key(path), "{path}");
     }
     assert_eq!(
-        routes["/wp/v2/tags"]["endpoints"][1]["args"]["name"]["required"],
+        routes["/mc/v2/tags"]["endpoints"][1]["args"]["name"]["required"],
         json!(true)
     );
 
@@ -1106,7 +1106,7 @@ async fn discovery_lists_the_taxonomies_served() {
     });
     taxonomies.register_routes(registry);
     assert_error(
-        site.get("/wp-json/wp/v2/tags", None).await,
+        site.get("/mc-json/mc/v2/tags", None).await,
         Status::NotFound,
         "rest_no_route",
     )
@@ -1120,7 +1120,7 @@ async fn a_description_over_64_kb_round_trips_on_every_database() {
     let description = "a".repeat(70_000);
     let (status, json) = body(
         site.post(
-            "/wp-json/wp/v2/tags",
+            "/mc-json/mc/v2/tags",
             Some("admin"),
             json!({"name": "Big", "description": description}),
         )
@@ -1130,7 +1130,7 @@ async fn a_description_over_64_kb_round_trips_on_every_database() {
     assert_eq!(status, Status::Created, "{json}");
     assert_eq!(json["description"], json!(description));
     let id = json["id"].as_i64().unwrap();
-    let (status, json) = body(site.get(&format!("/wp-json/wp/v2/tags/{id}"), None).await).await;
+    let (status, json) = body(site.get(&format!("/mc-json/mc/v2/tags/{id}"), None).await).await;
     assert_eq!(status, Status::Ok);
     assert_eq!(json["description"], json!(description));
 }

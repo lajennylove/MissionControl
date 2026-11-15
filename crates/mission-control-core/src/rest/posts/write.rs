@@ -603,7 +603,7 @@ pub(super) async fn create(
         .apply(ctl.db)
         .await?;
     let response = respond(ctl, &site, post.id, 201).await?;
-    let location = site.rest_url(&format!("wp/v2/{}/{}", ctl.post_type.rest_base, post.id));
+    let location = site.rest_url(&format!("mc/v2/{}/{}", ctl.post_type.rest_base, post.id));
     Ok(response.with_header("Location", location))
 }
 

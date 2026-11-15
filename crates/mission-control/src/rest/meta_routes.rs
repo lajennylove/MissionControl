@@ -1,5 +1,5 @@
 //! The routes of the types, taxonomies, statuses and settings controllers:
-//! `/wp-json/wp/v2/types`, `/types/{type}`, `/taxonomies`, `/taxonomies/{taxonomy}`, `/statuses`,
+//! `/mc-json/mc/v2/types`, `/types/{type}`, `/taxonomies`, `/taxonomies/{taxonomy}`, `/statuses`,
 //! `/statuses/{status}` and `/settings`, over the core's [`MetaRoutesController`] and
 //! [`SettingsController`].
 //!
@@ -129,13 +129,13 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes
 }
 
-#[rocket::get("/wp-json/wp/v2/types")]
+#[rocket::get("/mc-json/mc/v2/types")]
 async fn types(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).types(query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/types/<name>")]
+#[rocket::get("/mc-json/mc/v2/types/<name>")]
 async fn post_type(name: Name<'_>, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
@@ -145,13 +145,13 @@ async fn post_type(name: Name<'_>, origin: &Origin<'_>, auth: RestAuth, app: App
     )
 }
 
-#[rocket::get("/wp-json/wp/v2/taxonomies")]
+#[rocket::get("/mc-json/mc/v2/taxonomies")]
 async fn taxonomies(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).taxonomies(query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/taxonomies/<name>")]
+#[rocket::get("/mc-json/mc/v2/taxonomies/<name>")]
 async fn taxonomy(name: Name<'_>, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
@@ -161,19 +161,19 @@ async fn taxonomy(name: Name<'_>, origin: &Origin<'_>, auth: RestAuth, app: App<
     )
 }
 
-#[rocket::get("/wp-json/wp/v2/statuses")]
+#[rocket::get("/mc-json/mc/v2/statuses")]
 async fn statuses(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).statuses(query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/statuses/<name>")]
+#[rocket::get("/mc-json/mc/v2/statuses/<name>")]
 async fn status(name: Name<'_>, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).status(name.0, query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/settings")]
+#[rocket::get("/mc-json/mc/v2/settings")]
 async fn settings_get(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.settings(&caps).get(query_of(origin)).await)
@@ -196,7 +196,7 @@ async fn settings_update(
     Reply(app.settings(&caps).update(&params).await)
 }
 
-#[rocket::post("/wp-json/wp/v2/settings", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/settings", data = "<data>")]
 async fn settings_post(
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
@@ -208,7 +208,7 @@ async fn settings_post(
     settings_update(origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::put("/wp-json/wp/v2/settings", data = "<data>")]
+#[rocket::put("/mc-json/mc/v2/settings", data = "<data>")]
 async fn settings_put(
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,
@@ -220,7 +220,7 @@ async fn settings_put(
     settings_update(origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::patch("/wp-json/wp/v2/settings", data = "<data>")]
+#[rocket::patch("/mc-json/mc/v2/settings", data = "<data>")]
 async fn settings_patch(
     origin: &Origin<'_>,
     content_type: Option<&ContentType>,

@@ -126,7 +126,7 @@ impl fmt::Debug for CurrentUser {
 pub struct RequestCredentials<'a> {
     /// The `Authorization` header, if any.
     pub authorization: Option<&'a str>,
-    /// Whether the request is for the REST API (`/wp-json/...` or `?rest_route=`).
+    /// Whether the request is for the REST API (`/mc-json/...` or `?rest_route=`).
     pub is_rest_request: bool,
     /// Whether the request reached the site over HTTPS, WordPress's `is_ssl`.
     pub is_ssl: bool,

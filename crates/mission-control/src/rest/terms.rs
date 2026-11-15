@@ -1,5 +1,5 @@
-//! The routes of the terms controller: `/wp-json/wp/v2/{rest_base}` and
-//! `/wp-json/wp/v2/{rest_base}/{id}` for each taxonomy the [`Taxonomies`] registry shows in the
+//! The routes of the terms controller: `/mc-json/mc/v2/{rest_base}` and
+//! `/mc-json/mc/v2/{rest_base}/{id}` for each taxonomy the [`Taxonomies`] registry shows in the
 //! REST API, over the core's [`TermsController`].
 //!
 //! The paths are the posts routes' paths, so these routes rank after them: a `rest_base` that is
@@ -114,7 +114,7 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes
 }
 
-#[rocket::get("/wp-json/wp/v2/<_>")]
+#[rocket::get("/mc-json/mc/v2/<_>")]
 async fn list(served: Served, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
@@ -124,7 +124,7 @@ async fn list(served: Served, origin: &Origin<'_>, auth: RestAuth, app: App<'_>)
     )
 }
 
-#[rocket::get("/wp-json/wp/v2/<_>/<id>")]
+#[rocket::get("/mc-json/mc/v2/<_>/<id>")]
 async fn get(served: Served, id: Id, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
@@ -134,7 +134,7 @@ async fn get(served: Served, id: Id, origin: &Origin<'_>, auth: RestAuth, app: A
     )
 }
 
-#[rocket::post("/wp-json/wp/v2/<_>", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/<_>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn create(
     served: Served,
@@ -173,7 +173,7 @@ async fn update(
     Reply(app.controller(&served.0, &caps).update(id.0, &params).await)
 }
 
-#[rocket::post("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn update_post(
     served: Served,
@@ -188,7 +188,7 @@ async fn update_post(
     update(served, id, origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::put("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::put("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn update_put(
     served: Served,
@@ -203,7 +203,7 @@ async fn update_put(
     update(served, id, origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::patch("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::patch("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn update_patch(
     served: Served,
@@ -218,7 +218,7 @@ async fn update_patch(
     update(served, id, origin, content_type, limits, auth, app, data).await
 }
 
-#[rocket::delete("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::delete("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn delete(
     served: Served,

@@ -344,9 +344,9 @@ pub(super) async fn list(
     };
     let items = prepare::items(ctl, &site, &readable, &options).await?;
     let mut response = RestResponse::ok(Value::Array(items))
-        .with_header("X-WP-Total", total.to_string())
-        .with_header("X-WP-TotalPages", max_pages.to_string());
-    let base = site.rest_url(&format!("wp/v2/{}", ctl.post_type.rest_base));
+        .with_header("X-MC-Total", total.to_string())
+        .with_header("X-MC-TotalPages", max_pages.to_string());
+    let base = site.rest_url(&format!("mc/v2/{}", ctl.post_type.rest_base));
     for link in page_links(&base, query, list.page, max_pages) {
         response = response.with_header("Link", link);
     }

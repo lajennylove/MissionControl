@@ -10,7 +10,7 @@
 #   systemctl daemon-reload && systemctl enable --now mission-control
 #
 # The install folder holds .env, database.sqlite, uploads/ and themes/. With no .env the
-# service starts in setup mode; open /wp-admin/install.php. The wizard writes .env, and the
+# service starts in setup mode; open /mc-admin/install.php. The wizard writes .env, and the
 # binary exits with status 0 so systemd starts it again in normal mode.
 #
 # Keep DATABASE_URL and IGNITE_SECRET_KEY out of this file: they live in .env (mode 0600).

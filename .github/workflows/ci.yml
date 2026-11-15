@@ -120,7 +120,7 @@ jobs:
         run: |
           docker run -d --name mc --restart unless-stopped -p 8000:8000 mission-control:ci
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:8000/wp-admin/install.php -o /dev/null && exit 0
+            curl -fsS http://127.0.0.1:8000/mc-admin/install.php -o /dev/null && exit 0
             sleep 1
           done
           docker logs mc

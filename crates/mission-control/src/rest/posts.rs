@@ -1,5 +1,5 @@
-//! The routes of the posts controller: `/wp-json/wp/v2/{rest_base}` and
-//! `/wp-json/wp/v2/{rest_base}/{id}` for each post type the [`PostTypes`] registry shows in the
+//! The routes of the posts controller: `/mc-json/mc/v2/{rest_base}` and
+//! `/mc-json/mc/v2/{rest_base}/{id}` for each post type the [`PostTypes`] registry shows in the
 //! REST API, over the core's [`PostsController`].
 //!
 //! A `rest_base` that is not a served post type, or an id that is not digits, forwards: to the
@@ -137,7 +137,7 @@ pub(crate) fn routes() -> Vec<Route> {
     ]
 }
 
-#[rocket::get("/wp-json/wp/v2/<_>")]
+#[rocket::get("/mc-json/mc/v2/<_>")]
 async fn list(served: Served, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
@@ -147,7 +147,7 @@ async fn list(served: Served, origin: &Origin<'_>, auth: RestAuth, app: App<'_>)
     )
 }
 
-#[rocket::get("/wp-json/wp/v2/<_>/<id>")]
+#[rocket::get("/mc-json/mc/v2/<_>/<id>")]
 async fn get(served: Served, id: Id, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(
@@ -157,7 +157,7 @@ async fn get(served: Served, id: Id, origin: &Origin<'_>, auth: RestAuth, app: A
     )
 }
 
-#[rocket::post("/wp-json/wp/v2/<_>", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/<_>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn create(
     served: Served,
@@ -198,7 +198,7 @@ async fn update(
     Reply(controller.update(id.0, &params, since.0.as_deref()).await)
 }
 
-#[rocket::post("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::post("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn update_post(
     served: Served,
@@ -225,7 +225,7 @@ async fn update_post(
     .await
 }
 
-#[rocket::put("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::put("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn update_put(
     served: Served,
@@ -252,7 +252,7 @@ async fn update_put(
     .await
 }
 
-#[rocket::patch("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::patch("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn update_patch(
     served: Served,
@@ -279,7 +279,7 @@ async fn update_patch(
     .await
 }
 
-#[rocket::delete("/wp-json/wp/v2/<_>/<id>", data = "<data>")]
+#[rocket::delete("/mc-json/mc/v2/<_>/<id>", data = "<data>")]
 #[allow(clippy::too_many_arguments)]
 async fn delete(
     served: Served,
@@ -318,22 +318,22 @@ fn no_route() -> Reply {
     }))
 }
 
-#[rocket::post("/wp-json/<_..>")]
+#[rocket::post("/mc-json/<_..>")]
 fn no_route_post(_auth: RestAuth) -> Reply {
     no_route()
 }
 
-#[rocket::put("/wp-json/<_..>")]
+#[rocket::put("/mc-json/<_..>")]
 fn no_route_put(_auth: RestAuth) -> Reply {
     no_route()
 }
 
-#[rocket::patch("/wp-json/<_..>")]
+#[rocket::patch("/mc-json/<_..>")]
 fn no_route_patch(_auth: RestAuth) -> Reply {
     no_route()
 }
 
-#[rocket::delete("/wp-json/<_..>")]
+#[rocket::delete("/mc-json/<_..>")]
 fn no_route_delete(_auth: RestAuth) -> Reply {
     no_route()
 }

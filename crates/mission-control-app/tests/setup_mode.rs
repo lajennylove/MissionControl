@@ -221,12 +221,12 @@ async fn setup_mode_serves_only_the_installer() {
     for path in [
         "/",
         "/hello-world/",
-        "/wp-json/",
-        "/wp-json/wp/v2/posts",
+        "/mc-json/",
+        "/mc-json/mc/v2/posts",
         "/?rest_route=/",
-        "/wp-login.php",
-        "/wp-admin/",
-        "/wp-content/uploads/2026/01/a.jpg",
+        "/mc-login.php",
+        "/mc-admin/",
+        "/mc-content/uploads/2026/01/a.jpg",
     ] {
         let response = client.get(path).dispatch().await;
         assert_eq!(response.status(), Status::Found, "GET {path}");
@@ -237,9 +237,9 @@ async fn setup_mode_serves_only_the_installer() {
         );
     }
     for response in [
-        client.post("/wp-json/wp/v2/posts").dispatch().await,
-        client.put("/wp-json/wp/v2/posts/1").dispatch().await,
-        client.delete("/wp-json/wp/v2/posts/1").dispatch().await,
+        client.post("/mc-json/mc/v2/posts").dispatch().await,
+        client.put("/mc-json/mc/v2/posts/1").dispatch().await,
+        client.delete("/mc-json/mc/v2/posts/1").dispatch().await,
     ] {
         assert_eq!(response.status(), Status::Found);
         assert_eq!(response.headers().get_one("Location"), Some(INSTALL_PATH));

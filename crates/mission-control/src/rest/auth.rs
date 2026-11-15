@@ -15,7 +15,7 @@
 //! error's status; any other error keeps Rocket's own answer.
 //!
 //! ```ignore
-//! #[rocket::get("/wp-json/acme/v1/secret")]
+//! #[rocket::get("/mc-json/acme/v1/secret")]
 //! fn secret(user: RestUser) -> String {
 //!     format!("hello, user {}", user.id())
 //! }
@@ -230,10 +230,10 @@ async fn authenticate_request(request: &Request<'_>) -> Result<Option<CurrentUse
 }
 
 /// Whether the request is for the REST API: a path whose first segment, percent-decoded, is
-/// `wp-json`, or the site root with a `rest_route` query starting with `/`.
+/// `mc-json`, or the site root with a `rest_route` query starting with `/`.
 fn is_rest_request(request: &Request<'_>) -> bool {
     match request.uri().path().segments().next() {
-        Some(first) => first == "wp-json",
+        Some(first) => first == "mc-json",
         None => matches!(
             request.query_value::<&str>("rest_route"),
             Some(Ok(route)) if route.starts_with('/')

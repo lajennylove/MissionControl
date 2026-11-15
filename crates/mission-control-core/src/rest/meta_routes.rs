@@ -1,5 +1,5 @@
-//! The routes that describe the site's content model: `/wp/v2/types`, `/wp/v2/taxonomies` and
-//! `/wp/v2/statuses`, as WordPress's `WP_REST_Post_Types_Controller`,
+//! The routes that describe the site's content model: `/mc/v2/types`, `/mc/v2/taxonomies` and
+//! `/mc/v2/statuses`, as WordPress's `WP_REST_Post_Types_Controller`,
 //! `WP_REST_Taxonomies_Controller` and `WP_REST_Post_Statuses_Controller` serve them.
 //! [`MetaRoutesController`] answers one request, with no Rocket types: the `mission-control`
 //! crate mounts it.
@@ -9,7 +9,7 @@
 //! - `types` lists the post types shown in the REST API ([`PostTypes`], with `attachment` after
 //!   the built-in `post` and `page`), keyed by name. A type's JSON has `description`,
 //!   `hierarchical`, `has_archive`, `name`, `slug`, `icon`, `taxonomies`, `rest_base`,
-//!   `rest_namespace`, `template`, `template_lock` and `_links` (`collection`, `wp:items`); the
+//!   `rest_namespace`, `template`, `template_lock` and `_links` (`collection`, `mc:items`); the
 //!   edit context adds `capabilities`, `labels`, `supports`, `viewable` and `visibility`, and needs
 //!   the type's `edit_posts` (the list keeps only the types the user may edit, and refuses with
 //!   `rest_cannot_view` when there is none). `embed` keeps `name`, `slug`, `icon`, `rest_base`
@@ -202,7 +202,7 @@ pub fn register_routes(routes: &RestRoutes) {
         )
     };
     routes.register(RouteSpec::new(
-        "/wp/v2/types",
+        "/mc/v2/types",
         vec![Endpoint::new(["GET"], json!({"context": context_arg()}))],
     ));
     routes.register(item(
@@ -211,7 +211,7 @@ pub fn register_routes(routes: &RestRoutes) {
         "An alphanumeric identifier for the post type.",
     ));
     routes.register(RouteSpec::new(
-        "/wp/v2/taxonomies",
+        "/mc/v2/taxonomies",
         vec![Endpoint::new(
             ["GET"],
             json!({
@@ -230,7 +230,7 @@ pub fn register_routes(routes: &RestRoutes) {
         "An alphanumeric identifier for the taxonomy.",
     ));
     routes.register(RouteSpec::new(
-        "/wp/v2/statuses",
+        "/mc/v2/statuses",
         vec![Endpoint::new(["GET"], json!({"context": context_arg()}))],
     ));
     routes.register(item(
@@ -290,7 +290,7 @@ impl Request {
 }
 
 impl MetaRoutesController<'_> {
-    /// `GET /wp/v2/types`: the post types shown in the REST API, keyed by name.
+    /// `GET /mc/v2/types`: the post types shown in the REST API, keyed by name.
     ///
     /// # Errors
     ///
@@ -324,7 +324,7 @@ impl MetaRoutesController<'_> {
         Ok(RestResponse::ok(Value::Object(request.fields.filter(data))))
     }
 
-    /// `GET /wp/v2/types/{type}`.
+    /// `GET /mc/v2/types/{type}`.
     ///
     /// # Errors
     ///
@@ -359,7 +359,7 @@ impl MetaRoutesController<'_> {
         Ok(RestResponse::ok(Value::Object(item)))
     }
 
-    /// `GET /wp/v2/taxonomies`: the taxonomies shown in the REST API, keyed by name; with
+    /// `GET /mc/v2/taxonomies`: the taxonomies shown in the REST API, keyed by name; with
     /// `type`, those of that post type.
     ///
     /// # Errors
@@ -400,7 +400,7 @@ impl MetaRoutesController<'_> {
         Ok(RestResponse::ok(Value::Object(request.fields.filter(data))))
     }
 
-    /// `GET /wp/v2/taxonomies/{taxonomy}`.
+    /// `GET /mc/v2/taxonomies/{taxonomy}`.
     ///
     /// # Errors
     ///
@@ -432,7 +432,7 @@ impl MetaRoutesController<'_> {
         ))))
     }
 
-    /// `GET /wp/v2/statuses`: the statuses the user may see, keyed by slug.
+    /// `GET /mc/v2/statuses`: the statuses the user may see, keyed by slug.
     ///
     /// # Errors
     ///
@@ -459,7 +459,7 @@ impl MetaRoutesController<'_> {
         Ok(RestResponse::ok(Value::Object(request.fields.filter(data))))
     }
 
-    /// `GET /wp/v2/statuses/{status}`.
+    /// `GET /mc/v2/statuses/{status}`.
     ///
     /// # Errors
     ///
@@ -554,8 +554,8 @@ impl MetaRoutesController<'_> {
         put("template", json!([]));
         put("template_lock", json!(false));
         let links = json!({
-            "collection": [{"href": site.rest_url("wp/v2/types")}],
-            "wp:items": [{"href": site.rest_url(&format!("wp/v2/{}", post_type.rest_base))}],
+            "collection": [{"href": site.rest_url("mc/v2/types")}],
+            "mc:items": [{"href": site.rest_url(&format!("mc/v2/{}", post_type.rest_base))}],
             "curies": curies(),
         });
         finish(item, TYPE_FIELDS, request, links, filter)
@@ -719,8 +719,8 @@ fn taxonomy_json(
         }),
     );
     let links = json!({
-        "collection": [{"href": site.rest_url("wp/v2/taxonomies")}],
-        "wp:items": [{"href": site.rest_url(&format!("wp/v2/{}", taxonomy.rest_base))}],
+        "collection": [{"href": site.rest_url("mc/v2/taxonomies")}],
+        "mc:items": [{"href": site.rest_url(&format!("mc/v2/{}", taxonomy.rest_base))}],
         "curies": curies(),
     });
     finish(item, TAXONOMY_FIELDS, request, links, filter)
@@ -745,7 +745,7 @@ fn status_json(
     put("show_in_list", json!(status.show_in_list));
     put("slug", json!(status.slug));
     put("date_floating", json!(status.date_floating));
-    let posts = site.rest_url("wp/v2/posts");
+    let posts = site.rest_url("mc/v2/posts");
     let archives = if status.slug == "publish" {
         posts
     } else {

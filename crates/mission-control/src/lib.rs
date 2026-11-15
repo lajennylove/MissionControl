@@ -39,13 +39,13 @@
 //! default sizes), the plugins (`Arc<Plugins>`) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
 //! once the server listens, and runs due events every minute.
 //!
-//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, posts, pages and every
-//! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`, categories, tags and every
-//! taxonomy in [`Taxonomies`] the same way, users at `/wp-json/wp/v2/users` (reads only),
-//! media at `/wp-json/wp/v2/media`, the content model at `/wp-json/wp/v2/types`, `/taxonomies`
-//! and `/statuses`, search at `/wp-json/wp/v2/search`, and the settings (administrators only) at
-//! `/wp-json/wp/v2/settings`. Code that registers a post type, taxonomy or setting after the app
-//! is built registers the routes again (`register_routes`), so discovery lists them. Uploads are served at `/wp-content/uploads/`, as data
+//! The REST API serves discovery at `/mc-json/` and `/?rest_route=/`, posts, pages and every
+//! post type in [`PostTypes`] at `/mc-json/mc/v2/{rest_base}`, categories, tags and every
+//! taxonomy in [`Taxonomies`] the same way, users at `/mc-json/mc/v2/users` (reads only),
+//! media at `/mc-json/mc/v2/media`, the content model at `/mc-json/mc/v2/types`, `/taxonomies`
+//! and `/statuses`, search at `/mc-json/mc/v2/search`, and the settings (administrators only) at
+//! `/mc-json/mc/v2/settings`. Code that registers a post type, taxonomy or setting after the app
+//! is built registers the routes again (`register_routes`), so discovery lists them. Uploads are served at `/mc-content/uploads/`, as data
 //! (`nosniff`, a sandbox policy, the stored type). REST clients sign in with
 //! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
 //! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
@@ -86,7 +86,7 @@ const SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
 /// built file is served before the site looks the path up.
 const FRONT_RANK: isize = 20;
 
-/// The rank of the REST routes that answer a family of paths (`/wp-json/<path..>`, the
+/// The rank of the REST routes that answer a family of paths (`/mc-json/<path..>`, the
 /// `rest_route` query). Below [`FRONT_RANK`], above every route with a path of its own.
 const REST_RANK: isize = 5;
 

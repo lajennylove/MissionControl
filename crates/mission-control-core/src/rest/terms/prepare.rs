@@ -183,7 +183,7 @@ fn links(
     parents: &HashMap<i64, Term>,
     defaults: &[i64],
 ) -> Map<String, Value> {
-    let base = format!("wp/v2/{}", ctl.taxonomy.rest_base);
+    let base = format!("mc/v2/{}", ctl.taxonomy.rest_base);
     let mut allow = vec!["GET"];
     if ctl.can_on("edit_term", term, defaults) {
         allow.extend(["POST", "PUT", "PATCH"]);
@@ -202,7 +202,7 @@ fn links(
     put("collection", json!([{"href": site.rest_url(&base)}]));
     put(
         "about",
-        json!([{"href": site.rest_url(&format!("wp/v2/taxonomies/{}", term.taxonomy))}]),
+        json!([{"href": site.rest_url(&format!("mc/v2/taxonomies/{}", term.taxonomy))}]),
     );
     if let Some(parent) = term.parent_id.and_then(|id| parents.get(&id)) {
         put(
@@ -219,14 +219,14 @@ fn links(
         .map(|post_type| {
             json!({"href": format!(
                 "{}?{}={}",
-                site.rest_url(&format!("wp/v2/{}", post_type.rest_base)),
+                site.rest_url(&format!("mc/v2/{}", post_type.rest_base)),
                 ctl.taxonomy.rest_base,
                 term.term_id
             )})
         })
         .collect();
     if !post_types.is_empty() {
-        put("wp:post_type", Value::Array(post_types));
+        put("mc:post_type", Value::Array(post_types));
     }
     put("curies", curies());
     links

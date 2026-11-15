@@ -1,4 +1,4 @@
-//! The discovery documents: `GET /wp-json/` as `WP_REST_Server::get_index` builds it, and a
+//! The discovery documents: `GET /mc-json/` as `WP_REST_Server::get_index` builds it, and a
 //! namespace index as `WP_REST_Server::get_namespace_index`.
 //!
 //! Both are plain JSON values built from the options and a [`RestRoutes`] registry.
@@ -8,7 +8,7 @@
 //! screen exists (WordPress's `rest_add_application_passwords_to_index` lists
 //! `application-passwords` with its `authorize-application.php` address; Mission Control serves
 //! application passwords but has no such screen yet), `site_icon_url` is empty until the media library can resolve an
-//! attachment's URL, and links always use `/wp-json/` (WordPress falls back to `?rest_route=`
+//! attachment's URL, and links always use `/mc-json/` (WordPress falls back to `?rest_route=`
 //! when permalinks are plain).
 
 use serde_json::{Map, Value, json};
@@ -20,18 +20,18 @@ use crate::rest::{RestRoutes, RouteSpec};
 use orbit_orm::Database;
 
 /// The path the API is served under.
-pub const REST_PREFIX: &str = "wp-json";
+pub const REST_PREFIX: &str = "mc-json";
 
 /// The REST handbook, the `help` link of the index.
 const HANDBOOK_URL: &str = "https://developer.wordpress.org/rest-api/";
 
 /// The address of the API's index under `home` (already through [`site_address`]):
-/// `https://example.com/wp-json/`.
+/// `https://example.com/mc-json/`.
 pub fn index_url(home: &str) -> String {
     format!("{home}/{REST_PREFIX}/")
 }
 
-/// `rest_url( $path )`: `path` under the API, such as `/wp/v2` or `/`.
+/// `rest_url( $path )`: `path` under the API, such as `/mc/v2` or `/`.
 fn rest_url(home: &str, path: &str) -> String {
     if path == "/" {
         index_url(home)
@@ -40,7 +40,7 @@ fn rest_url(home: &str, path: &str) -> String {
     }
 }
 
-/// The index document, `GET /wp-json/`, from the site's options and the registered routes. The
+/// The index document, `GET /mc-json/`, from the site's options and the registered routes. The
 /// `meta` argument of a route that writes meta lists the keys registered in `meta_keys`.
 ///
 /// # Errors

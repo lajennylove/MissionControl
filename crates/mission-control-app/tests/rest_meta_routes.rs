@@ -1,4 +1,4 @@
-//! The types, taxonomies, statuses and settings routes (Task 10.8): `/wp-json/wp/v2/types`,
+//! The types, taxonomies, statuses and settings routes (Task 10.8): `/mc-json/mc/v2/types`,
 //! `/taxonomies`, `/statuses` and `/settings`, as WordPress's controllers answer them.
 //!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
@@ -352,7 +352,7 @@ fn set(list: &[&str]) -> BTreeSet<String> {
 #[rocket::async_test]
 async fn types_have_wordpresss_keys_in_each_context() {
     let site = site().await;
-    let types = ok(site.get("/wp-json/wp/v2/types", None).await).await;
+    let types = ok(site.get("/mc-json/mc/v2/types", None).await).await;
     assert_eq!(keys(&types), set(&["post", "page", "attachment"]));
     for (name, item) in types.as_object().unwrap() {
         assert_eq!(keys(item), set(TYPE_VIEW_KEYS), "{name}");
@@ -362,7 +362,7 @@ async fn types_have_wordpresss_keys_in_each_context() {
     assert_eq!(post["slug"], "post");
     assert_eq!(post["taxonomies"], json!(["category", "post_tag"]));
     assert_eq!(post["rest_base"], "posts");
-    assert_eq!(post["rest_namespace"], "wp/v2");
+    assert_eq!(post["rest_namespace"], "mc/v2");
     assert_eq!(post["hierarchical"], false);
     assert_eq!(post["template"], json!([]));
     assert_eq!(post["template_lock"], false);
@@ -370,16 +370,16 @@ async fn types_have_wordpresss_keys_in_each_context() {
     assert_eq!(types["page"]["taxonomies"], json!([]));
     assert_eq!(types["attachment"]["rest_base"], "media");
     assert_eq!(
-        post["_links"]["wp:items"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/posts")
+        post["_links"]["mc:items"][0]["href"],
+        format!("{HOME}/mc-json/mc/v2/posts")
     );
     assert_eq!(
         post["_links"]["collection"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/types")
+        format!("{HOME}/mc-json/mc/v2/types")
     );
 
     let page = ok(site
-        .get("/wp-json/wp/v2/types/page?context=edit", Some("editor"))
+        .get("/mc-json/mc/v2/types/page?context=edit", Some("editor"))
         .await)
     .await;
     assert_eq!(keys(&page), set(TYPE_EDIT_KEYS));
@@ -390,7 +390,7 @@ async fn types_have_wordpresss_keys_in_each_context() {
     assert_eq!(page["viewable"], true);
     let media = ok(site
         .get(
-            "/wp-json/wp/v2/types/attachment?context=edit",
+            "/mc-json/mc/v2/types/attachment?context=edit",
             Some("admin"),
         )
         .await)
@@ -399,12 +399,12 @@ async fn types_have_wordpresss_keys_in_each_context() {
     assert_eq!(media["visibility"]["show_in_nav_menus"], false);
 
     let embed = ok(site
-        .get("/wp-json/wp/v2/types/post?context=embed", None)
+        .get("/mc-json/mc/v2/types/post?context=embed", None)
         .await)
     .await;
     assert_eq!(keys(&embed), set(TYPE_EMBED_KEYS));
     let fields = ok(site
-        .get("/wp-json/wp/v2/types/post?_fields=slug,name", None)
+        .get("/mc-json/mc/v2/types/post?_fields=slug,name", None)
         .await)
     .await;
     assert_eq!(keys(&fields), set(&["slug", "name"]));
@@ -414,14 +414,14 @@ async fn types_have_wordpresss_keys_in_each_context() {
 async fn the_edit_context_of_types_needs_edit_posts() {
     let site = site().await;
     assert_error(
-        site.get("/wp-json/wp/v2/types?context=edit", None).await,
+        site.get("/mc-json/mc/v2/types?context=edit", None).await,
         Status::Unauthorized,
         "rest_cannot_view",
     )
     .await;
     // A contributor may edit posts but not pages.
     let types = ok(site
-        .get("/wp-json/wp/v2/types?context=edit", Some("contributor"))
+        .get("/mc-json/mc/v2/types?context=edit", Some("contributor"))
         .await)
     .await;
     assert_eq!(keys(&types), set(&["post", "attachment"]));
@@ -430,7 +430,7 @@ async fn the_edit_context_of_types_needs_edit_posts() {
     }
     assert_error(
         site.get(
-            "/wp-json/wp/v2/types/page?context=edit",
+            "/mc-json/mc/v2/types/page?context=edit",
             Some("contributor"),
         )
         .await,
@@ -439,13 +439,13 @@ async fn the_edit_context_of_types_needs_edit_posts() {
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/types/nope", None).await,
+        site.get("/mc-json/mc/v2/types/nope", None).await,
         Status::NotFound,
         "rest_type_invalid",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/types?context=raw", None).await,
+        site.get("/mc-json/mc/v2/types?context=raw", None).await,
         Status::BadRequest,
         "rest_invalid_param",
     )
@@ -470,10 +470,10 @@ async fn registered_types_are_listed_only_when_shown_in_rest() {
         caps: mission_control_core::users::PostTypeCaps::for_post_type("book"),
     };
     post_types.register(book.clone());
-    let types = ok(site.get("/wp-json/wp/v2/types", None).await).await;
+    let types = ok(site.get("/mc-json/mc/v2/types", None).await).await;
     assert!(types.get("book").is_none());
     assert_error(
-        site.get("/wp-json/wp/v2/types/book", None).await,
+        site.get("/mc-json/mc/v2/types/book", None).await,
         Status::Unauthorized,
         "rest_cannot_read_type",
     )
@@ -482,7 +482,7 @@ async fn registered_types_are_listed_only_when_shown_in_rest() {
         show_in_rest: true,
         ..book
     });
-    let types = ok(site.get("/wp-json/wp/v2/types", None).await).await;
+    let types = ok(site.get("/mc-json/mc/v2/types", None).await).await;
     assert_eq!(keys(&types["book"]), set(TYPE_VIEW_KEYS));
     assert_eq!(types["book"]["name"], "book");
     assert_eq!(types["book"]["rest_base"], "books");
@@ -491,7 +491,7 @@ async fn registered_types_are_listed_only_when_shown_in_rest() {
 #[rocket::async_test]
 async fn taxonomies_have_wordpresss_keys_in_each_context() {
     let site = site().await;
-    let taxonomies = ok(site.get("/wp-json/wp/v2/taxonomies", None).await).await;
+    let taxonomies = ok(site.get("/mc-json/mc/v2/taxonomies", None).await).await;
     assert_eq!(keys(&taxonomies), set(&["category", "post_tag"]));
     for item in taxonomies.as_object().unwrap().values() {
         assert_eq!(keys(item), set(TAXONOMY_VIEW_KEYS));
@@ -502,14 +502,14 @@ async fn taxonomies_have_wordpresss_keys_in_each_context() {
     assert_eq!(category["hierarchical"], true);
     assert_eq!(category["rest_base"], "categories");
     assert_eq!(
-        category["_links"]["wp:items"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/categories")
+        category["_links"]["mc:items"][0]["href"],
+        format!("{HOME}/mc-json/mc/v2/categories")
     );
     assert_eq!(taxonomies["post_tag"]["hierarchical"], false);
 
     let tag = ok(site
         .get(
-            "/wp-json/wp/v2/taxonomies/post_tag?context=edit",
+            "/mc-json/mc/v2/taxonomies/post_tag?context=edit",
             Some("author"),
         )
         .await)
@@ -528,7 +528,7 @@ async fn taxonomies_have_wordpresss_keys_in_each_context() {
     assert_eq!(tag["show_cloud"], true);
     let edit = ok(site
         .get(
-            "/wp-json/wp/v2/taxonomies?context=edit",
+            "/mc-json/mc/v2/taxonomies?context=edit",
             Some("contributor"),
         )
         .await)
@@ -536,7 +536,7 @@ async fn taxonomies_have_wordpresss_keys_in_each_context() {
     assert_eq!(keys(&edit), set(&["category", "post_tag"]));
 
     let embed = ok(site
-        .get("/wp-json/wp/v2/taxonomies/category?context=embed", None)
+        .get("/mc-json/mc/v2/taxonomies/category?context=embed", None)
         .await)
     .await;
     assert_eq!(
@@ -548,26 +548,26 @@ async fn taxonomies_have_wordpresss_keys_in_each_context() {
 #[rocket::async_test]
 async fn taxonomies_filter_by_type_and_check_the_edit_context() {
     let site = site().await;
-    let for_pages = ok(site.get("/wp-json/wp/v2/taxonomies?type=page", None).await).await;
+    let for_pages = ok(site.get("/mc-json/mc/v2/taxonomies?type=page", None).await).await;
     assert_eq!(for_pages, json!({}));
-    let for_posts = ok(site.get("/wp-json/wp/v2/taxonomies?type=post", None).await).await;
+    let for_posts = ok(site.get("/mc-json/mc/v2/taxonomies?type=post", None).await).await;
     assert_eq!(keys(&for_posts), set(&["category", "post_tag"]));
     assert_error(
-        site.get("/wp-json/wp/v2/taxonomies?context=edit", None)
+        site.get("/mc-json/mc/v2/taxonomies?context=edit", None)
             .await,
         Status::Unauthorized,
         "rest_cannot_view",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/taxonomies/category?context=edit", None)
+        site.get("/mc-json/mc/v2/taxonomies/category?context=edit", None)
             .await,
         Status::Unauthorized,
         "rest_forbidden_context",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/taxonomies/genre", None).await,
+        site.get("/mc-json/mc/v2/taxonomies/genre", None).await,
         Status::NotFound,
         "rest_taxonomy_invalid",
     )
@@ -577,7 +577,7 @@ async fn taxonomies_filter_by_type_and_check_the_edit_context() {
 #[rocket::async_test]
 async fn statuses_show_only_what_the_user_may_see() {
     let site = site().await;
-    let visitor = ok(site.get("/wp-json/wp/v2/statuses", None).await).await;
+    let visitor = ok(site.get("/mc-json/mc/v2/statuses", None).await).await;
     assert_eq!(keys(&visitor), set(&["publish"]));
     assert_eq!(keys(&visitor["publish"]), set(STATUS_VIEW_KEYS));
     assert_eq!(visitor["publish"]["name"], "Published");
@@ -585,11 +585,11 @@ async fn statuses_show_only_what_the_user_may_see() {
     assert_eq!(visitor["publish"]["queryable"], true);
     assert_eq!(
         visitor["publish"]["_links"]["archives"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/posts")
+        format!("{HOME}/mc-json/mc/v2/posts")
     );
 
     let editor = ok(site
-        .get("/wp-json/wp/v2/statuses?context=edit", Some("contributor"))
+        .get("/mc-json/mc/v2/statuses?context=edit", Some("contributor"))
         .await)
     .await;
     assert_eq!(
@@ -605,35 +605,35 @@ async fn statuses_show_only_what_the_user_may_see() {
     assert_eq!(editor["trash"]["show_in_list"], false);
     assert_eq!(
         editor["draft"]["_links"]["archives"][0]["href"],
-        format!("{HOME}/wp-json/wp/v2/posts?status=draft")
+        format!("{HOME}/mc-json/mc/v2/posts?status=draft")
     );
 
     let draft = ok(site
-        .get("/wp-json/wp/v2/statuses/draft", Some("author"))
+        .get("/mc-json/mc/v2/statuses/draft", Some("author"))
         .await)
     .await;
     assert_eq!(keys(&draft), set(STATUS_VIEW_KEYS));
     assert_error(
-        site.get("/wp-json/wp/v2/statuses/draft", None).await,
+        site.get("/mc-json/mc/v2/statuses/draft", None).await,
         Status::Unauthorized,
         "rest_cannot_read_status",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/statuses/auto-draft", Some("admin"))
+        site.get("/mc-json/mc/v2/statuses/auto-draft", Some("admin"))
             .await,
         Status::Forbidden,
         "rest_cannot_read_status",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/statuses/nope", None).await,
+        site.get("/mc-json/mc/v2/statuses/nope", None).await,
         Status::NotFound,
         "rest_status_invalid",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/statuses?context=edit", None).await,
+        site.get("/mc-json/mc/v2/statuses?context=edit", None).await,
         Status::Unauthorized,
         "rest_cannot_view",
     )
@@ -644,13 +644,13 @@ async fn statuses_show_only_what_the_user_may_see() {
 async fn settings_are_for_administrators_only() {
     let site = site().await;
     assert_error(
-        site.get("/wp-json/wp/v2/settings", None).await,
+        site.get("/mc-json/mc/v2/settings", None).await,
         Status::Unauthorized,
         "rest_forbidden",
     )
     .await;
     assert_error(
-        site.get("/wp-json/wp/v2/settings", Some("editor")).await,
+        site.get("/mc-json/mc/v2/settings", Some("editor")).await,
         Status::Forbidden,
         "rest_forbidden",
     )
@@ -658,7 +658,7 @@ async fn settings_are_for_administrators_only() {
     assert_error(
         site.send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "editor",
             json!({"title": "Taken"}),
         )
@@ -669,7 +669,7 @@ async fn settings_are_for_administrators_only() {
     .await;
     assert_eq!(site.option("blogname").await, Some(json!("Test Site")));
 
-    let settings = ok(site.get("/wp-json/wp/v2/settings", Some("admin")).await).await;
+    let settings = ok(site.get("/mc-json/mc/v2/settings", Some("admin")).await).await;
     assert_eq!(keys(&settings), set(SETTINGS_KEYS));
     assert_eq!(settings["title"], "Test Site");
     assert_eq!(settings["description"], "Just another test site");
@@ -692,7 +692,7 @@ async fn administrators_write_settings_sanitized_as_wordpress() {
     let updated = ok(site
         .send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             json!({
                 "title": "Tom & Jerry <b>",
@@ -725,7 +725,7 @@ async fn administrators_write_settings_sanitized_as_wordpress() {
     let again = ok(site
         .send(
             "PUT",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             json!({"title": updated["title"]}),
         )
@@ -737,7 +737,7 @@ async fn administrators_write_settings_sanitized_as_wordpress() {
     let kept = ok(site
         .send(
             "PATCH",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             json!({"url": "ftp://files.example.test", "timezone": "Mars/Olympus", "language": "fr_FR"}),
         )
@@ -751,7 +751,7 @@ async fn administrators_write_settings_sanitized_as_wordpress() {
     let reset = ok(site
         .send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             json!({"posts_per_page": null}),
         )
@@ -767,7 +767,7 @@ async fn invalid_settings_are_refused_before_anything_is_written() {
     let error = assert_error(
         site.send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             json!({
                 "title": "Changed",
@@ -821,12 +821,12 @@ async fn a_taxonomy_not_shown_in_rest_is_forbidden() {
         ..TaxonomySpec::post_tag()
     });
     assert_error(
-        site.get("/wp-json/wp/v2/taxonomies/post_tag", None).await,
+        site.get("/mc-json/mc/v2/taxonomies/post_tag", None).await,
         Status::Unauthorized,
         "rest_forbidden",
     )
     .await;
-    let listed = ok(site.get("/wp-json/wp/v2/taxonomies", None).await).await;
+    let listed = ok(site.get("/mc-json/mc/v2/taxonomies", None).await).await;
     assert_eq!(keys(&listed), set(&["category"]));
 }
 
@@ -834,26 +834,26 @@ async fn a_taxonomy_not_shown_in_rest_is_forbidden() {
 async fn settings_refuse_head_and_fields_for_others_and_filter_for_administrators() {
     let site = site().await;
     assert_eq!(
-        site.head("/wp-json/wp/v2/settings", None).await,
+        site.head("/mc-json/mc/v2/settings", None).await,
         Status::Unauthorized
     );
     assert_eq!(
-        site.head("/wp-json/wp/v2/settings", Some("editor")).await,
+        site.head("/mc-json/mc/v2/settings", Some("editor")).await,
         Status::Forbidden
     );
     assert_eq!(
-        site.head("/wp-json/wp/v2/settings", Some("admin")).await,
+        site.head("/mc-json/mc/v2/settings", Some("admin")).await,
         Status::Ok
     );
     assert_error(
-        site.get("/wp-json/wp/v2/settings?_fields=title", Some("editor"))
+        site.get("/mc-json/mc/v2/settings?_fields=title", Some("editor"))
             .await,
         Status::Forbidden,
         "rest_forbidden",
     )
     .await;
     let fields = ok(site
-        .get("/wp-json/wp/v2/settings?_fields=title,email", Some("admin"))
+        .get("/mc-json/mc/v2/settings?_fields=title,email", Some("admin"))
         .await)
     .await;
     assert_eq!(
@@ -863,7 +863,7 @@ async fn settings_refuse_head_and_fields_for_others_and_filter_for_administrator
     let updated = ok(site
         .send(
             "POST",
-            "/wp-json/wp/v2/settings?_fields=posts_per_page",
+            "/mc-json/mc/v2/settings?_fields=posts_per_page",
             "admin",
             json!({"posts_per_page": 4}),
         )
@@ -882,13 +882,13 @@ async fn a_setting_is_in_the_rest_api_only_when_it_asks() {
         .expect("the app manages the settings");
     settings.register(Setting::new("acme_secret", SettingType::String));
     settings.register(Setting::new("acme_greeting", SettingType::String).show_in_rest());
-    let read = ok(site.get("/wp-json/wp/v2/settings", Some("admin")).await).await;
+    let read = ok(site.get("/mc-json/mc/v2/settings", Some("admin")).await).await;
     assert!(read.get("acme_secret").is_none());
     assert_eq!(read["acme_greeting"], Value::Null);
     let written = ok(site
         .send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             json!({"acme_secret": "leaked", "acme_greeting": "Hello"}),
         )
@@ -907,7 +907,7 @@ async fn timezones_are_checked_against_the_iana_list() {
     let named = ok(site
         .send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             set("US/Eastern"),
         )
@@ -917,7 +917,7 @@ async fn timezones_are_checked_against_the_iana_list() {
     let kept = ok(site
         .send(
             "POST",
-            "/wp-json/wp/v2/settings",
+            "/mc-json/mc/v2/settings",
             "admin",
             set("Europe/Narnia"),
         )
@@ -926,25 +926,25 @@ async fn timezones_are_checked_against_the_iana_list() {
     assert_eq!(kept["timezone"], "US/Eastern");
     // `UTC+N`, as WordPress's settings screen saves it: an offset, and no timezone.
     let offset = ok(site
-        .send("POST", "/wp-json/wp/v2/settings", "admin", set("UTC+5.5"))
+        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC+5.5"))
         .await)
     .await;
     assert_eq!(offset["timezone"], "");
     assert_eq!(site.option("gmt_offset").await, Some(json!("5.5")));
     ok(site
-        .send("POST", "/wp-json/wp/v2/settings", "admin", set("UTC-3"))
+        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC-3"))
         .await)
     .await;
     assert_eq!(site.option("gmt_offset").await, Some(json!("-3")));
     // An offset WordPress's menu does not offer is refused, and nothing changes.
     let refused = ok(site
-        .send("POST", "/wp-json/wp/v2/settings", "admin", set("UTC+5.3"))
+        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC+5.3"))
         .await)
     .await;
     assert_eq!(refused["timezone"], "");
     assert_eq!(site.option("gmt_offset").await, Some(json!("-3")));
     let utc = ok(site
-        .send("POST", "/wp-json/wp/v2/settings", "admin", set("UTC"))
+        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC"))
         .await)
     .await;
     assert_eq!(utc["timezone"], "UTC");
@@ -953,8 +953,8 @@ async fn timezones_are_checked_against_the_iana_list() {
 #[rocket::async_test]
 async fn editable_settings_list_no_default_in_discovery() {
     let site = site().await;
-    let index = ok(site.get("/wp-json/wp/v2", None).await).await;
-    let endpoints = index["routes"]["/wp/v2/settings"]["endpoints"]
+    let index = ok(site.get("/mc-json/mc/v2", None).await).await;
+    let endpoints = index["routes"]["/mc/v2/settings"]["endpoints"]
         .as_array()
         .unwrap();
     let edit = &endpoints[1]["args"];

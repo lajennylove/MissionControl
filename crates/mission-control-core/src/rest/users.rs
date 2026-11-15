@@ -1,4 +1,4 @@
-//! The users controller: `/wp/v2/users`, `/wp/v2/users/{id}` and `/wp/v2/users/me`, as
+//! The users controller: `/mc/v2/users`, `/mc/v2/users/{id}` and `/mc/v2/users/me`, as
 //! WordPress's `WP_REST_Users_Controller` reads them. Users are Ignite's (its `users` table:
 //! `id`, `name`, `email`, `created_at`); their roles come from the app's [`UserRoles`]
 //! provider. [`UsersController`] answers one request, with no Rocket types: the
@@ -20,7 +20,7 @@
 //!   `rest_not_logged_in`.
 //! - Lists take `page`, `per_page`, `search`, `include`, `exclude`, `offset`, `order` (default
 //!   `asc`), `orderby` (default `name`), `slug`, `roles`, `capabilities` and `who=authors`, and
-//!   answer with `X-WP-Total`, `X-WP-TotalPages` and `Link` headers. A page past the end is an
+//!   answer with `X-MC-Total`, `X-MC-TotalPages` and `Link` headers. A page past the end is an
 //!   empty list.
 //!
 //! Until Mission Control's profile layer (design 5.6, Task 8.1), Ruling R59: `slug` is the
@@ -95,11 +95,11 @@ pub fn register_routes(routes: &RestRoutes) {
         "required": false,
     });
     routes.register(RouteSpec::new(
-        "/wp/v2/users",
+        "/mc/v2/users",
         vec![Endpoint::new(["GET"], Value::Object(collection_args()))],
     ));
     routes.register(RouteSpec::new(
-        "/wp/v2/users/(?P<id>[\\d]+)",
+        "/mc/v2/users/(?P<id>[\\d]+)",
         vec![Endpoint::new(
             ["GET"],
             json!({
@@ -109,7 +109,7 @@ pub fn register_routes(routes: &RestRoutes) {
         )],
     ));
     routes.register(RouteSpec::new(
-        "/wp/v2/users/me",
+        "/mc/v2/users/me",
         vec![Endpoint::new(["GET"], json!({"context": context}))],
     ));
 }
@@ -241,7 +241,7 @@ pub struct UsersController<'a> {
 }
 
 impl UsersController<'_> {
-    /// `GET /wp/v2/users/me`: the current user. `query` is the request's query string.
+    /// `GET /mc/v2/users/me`: the current user. `query` is the request's query string.
     ///
     /// # Errors
     ///
@@ -253,7 +253,7 @@ impl UsersController<'_> {
         self.respond_one(self.user.id(), query, true).await
     }
 
-    /// `GET /wp/v2/users/{id}`.
+    /// `GET /mc/v2/users/{id}`.
     ///
     /// # Errors
     ///
@@ -301,7 +301,7 @@ impl UsersController<'_> {
         Ok(RestResponse::ok(items.pop().unwrap_or(Value::Null)))
     }
 
-    /// `GET /wp/v2/users`: page `page` of the users the query asks for.
+    /// `GET /mc/v2/users`: page `page` of the users the query asks for.
     ///
     /// # Errors
     ///
@@ -349,9 +349,9 @@ impl UsersController<'_> {
         let page = offset / list.per_page + 1;
         let max_pages = (total + list.per_page - 1) / list.per_page;
         let mut response = RestResponse::ok(Value::Array(items))
-            .with_header("X-WP-Total", total.to_string())
-            .with_header("X-WP-TotalPages", max_pages.to_string());
-        for link in page_links(&site.rest_url("wp/v2/users"), query, page, max_pages) {
+            .with_header("X-MC-Total", total.to_string())
+            .with_header("X-MC-TotalPages", max_pages.to_string());
+        for link in page_links(&site.rest_url("mc/v2/users"), query, page, max_pages) {
             response = response.with_header("Link", link);
         }
         Ok(response)
@@ -879,10 +879,10 @@ fn base_item(
 fn links(site: &Site, id: i64) -> Value {
     json!({
         "self": [{
-            "href": site.rest_url(&format!("wp/v2/users/{id}")),
+            "href": site.rest_url(&format!("mc/v2/users/{id}")),
             "targetHints": {"allow": ["GET"]},
         }],
-        "collection": [{"href": site.rest_url("wp/v2/users")}],
+        "collection": [{"href": site.rest_url("mc/v2/users")}],
     })
 }
 

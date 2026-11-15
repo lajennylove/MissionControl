@@ -4,7 +4,7 @@
 //! `DATABASE_URL` and `IGNITE_SECRET_KEY` are both there (and not blank), it runs the app
 //! ([`Mode::Normal`]). When there is no `.env` and the environment lacks either, the site is not
 //! configured yet and the binary starts in setup mode ([`Mode::Setup`]): only the installer is
-//! mounted, at WordPress's `/wp-admin/install.php`, every other path redirects there, and no
+//! mounted, at `/mc-admin/install.php` (WordPress's `/wp-admin/install.php`), every other path redirects there, and no
 //! database is opened.
 //!
 //! A `.env` that exists but lacks either variable is an error, not setup mode
@@ -30,8 +30,9 @@ use rocket::response::Redirect;
 use rocket::route::{Handler, Outcome, Route};
 use rocket::{Build, Data, Request, Rocket};
 
-/// The installer's path, WordPress's `wp-admin/install.php`.
-pub const INSTALL_PATH: &str = "/wp-admin/install.php";
+/// The installer's path, `/mc-admin/install.php`: WordPress's `wp-admin/install.php`, with
+/// Mission Control's initials (owner decision).
+pub const INSTALL_PATH: &str = "/mc-admin/install.php";
 
 /// The variables a configured site has. Without both (and no `.env`), the binary starts in
 /// setup mode.

@@ -480,7 +480,7 @@ fn links(
     context: Context,
 ) -> Map<String, Value> {
     let post_type = ctl.post_type;
-    let base = format!("wp/v2/{}", post_type.rest_base);
+    let base = format!("mc/v2/{}", post_type.rest_base);
     let this = site.rest_url(&format!("{base}/{}", post.id));
     let mut allow = vec!["GET"];
     if ctl.can_on("edit_post", post, trash, site) {
@@ -500,12 +500,12 @@ fn links(
     put("collection", json!([{"href": site.rest_url(&base)}]));
     put(
         "about",
-        json!([{"href": site.rest_url(&format!("wp/v2/types/{}", post.post_type))}]),
+        json!([{"href": site.rest_url(&format!("mc/v2/types/{}", post.post_type))}]),
     );
     if post_type.supports.author && post.author_id != 0 {
         put(
             "author",
-            json!([{"embeddable": true, "href": site.rest_url(&format!("wp/v2/users/{}", post.author_id))}]),
+            json!([{"embeddable": true, "href": site.rest_url(&format!("mc/v2/users/{}", post.author_id))}]),
         );
     }
     if post_type.supports.revisions {
@@ -523,14 +523,14 @@ fn links(
     }
     if let Some(media) = meta_id(batch, post.id, THUMBNAIL) {
         put(
-            "wp:featuredmedia",
-            json!([{"embeddable": true, "href": site.rest_url(&format!("wp/v2/media/{media}"))}]),
+            "mc:featuredmedia",
+            json!([{"embeddable": true, "href": site.rest_url(&format!("mc/v2/media/{media}"))}]),
         );
     }
     if !post_type.is_attachment() {
         put(
-            "wp:attachment",
-            json!([{"href": format!("{}?parent={}", site.rest_url("wp/v2/media"), post.id)}]),
+            "mc:attachment",
+            json!([{"href": format!("{}?parent={}", site.rest_url("mc/v2/media"), post.id)}]),
         );
     }
     if !post_type.taxonomies.is_empty() {
@@ -541,41 +541,41 @@ fn links(
                 json!({
                     "taxonomy": t.taxonomy.name,
                     "embeddable": true,
-                    "href": format!("{}?post={}", site.rest_url(&format!("wp/v2/{}", t.rest_base)), post.id),
+                    "href": format!("{}?post={}", site.rest_url(&format!("mc/v2/{}", t.rest_base)), post.id),
                 })
             })
             .collect();
-        put("wp:term", Value::Array(terms));
+        put("mc:term", Value::Array(terms));
     }
     if context == Context::Edit {
         let caps = post_type.caps();
         let action = json!([{"href": this}]);
         if ctl.has(&caps.publish_posts) {
-            put("wp:action-publish", action.clone());
+            put("mc:action-publish", action.clone());
         }
         if ctl.has("unfiltered_html") {
-            put("wp:action-unfiltered-html", action.clone());
+            put("mc:action-unfiltered-html", action.clone());
         }
         if post_type.has_sticky()
             && ctl.has(&caps.edit_others_posts)
             && ctl.has(&caps.publish_posts)
         {
-            put("wp:action-sticky", action.clone());
+            put("mc:action-sticky", action.clone());
         }
         if post_type.supports.author && ctl.has(&caps.edit_others_posts) {
-            put("wp:action-assign-author", action.clone());
+            put("mc:action-assign-author", action.clone());
         }
         for taxonomy in &post_type.taxonomies {
             // Categories and tags: `manage_categories` creates them, `edit_posts` assigns them.
             if ctl.has("manage_categories") {
                 put(
-                    &format!("wp:action-create-{}", taxonomy.rest_base),
+                    &format!("mc:action-create-{}", taxonomy.rest_base),
                     action.clone(),
                 );
             }
             if ctl.has("edit_posts") {
                 put(
-                    &format!("wp:action-assign-{}", taxonomy.rest_base),
+                    &format!("mc:action-assign-{}", taxonomy.rest_base),
                     action.clone(),
                 );
             }
@@ -628,7 +628,7 @@ impl Embeds {
         }
         let mut terms = HashMap::new();
         let mut post_terms: HashMap<i64, Vec<(String, i64)>> = HashMap::new();
-        if wanted("wp:term") && !ctl.post_type.taxonomies.is_empty() {
+        if wanted("mc:term") && !ctl.post_type.taxonomies.is_empty() {
             let mut unique: BTreeMap<(String, i64), &TermRow> = BTreeMap::new();
             for post in posts {
                 for row in batch.terms.get(&post.id).into_iter().flatten() {
@@ -672,11 +672,11 @@ impl Embeds {
                         "slug": term.slug,
                         "taxonomy": term.taxonomy,
                         "_links": {
-                            "self": [{"href": site.rest_url(&format!("wp/v2/{base}/{}", term.term_id))}],
-                            "collection": [{"href": site.rest_url(&format!("wp/v2/{base}"))}],
-                            "about": [{"href": site.rest_url(&format!("wp/v2/taxonomies/{}", term.taxonomy))}],
-                            "wp:post_type": [{"href": format!("{}?{}={}", site.rest_url("wp/v2/posts"), base, term.term_id)}],
-                            "curies": [{"name": "wp", "href": "https://api.w.org/{rel}", "templated": true}],
+                            "self": [{"href": site.rest_url(&format!("mc/v2/{base}/{}", term.term_id))}],
+                            "collection": [{"href": site.rest_url(&format!("mc/v2/{base}"))}],
+                            "about": [{"href": site.rest_url(&format!("mc/v2/taxonomies/{}", term.taxonomy))}],
+                            "mc:post_type": [{"href": format!("{}?{}={}", site.rest_url("mc/v2/posts"), base, term.term_id)}],
+                            "curies": [{"name": "mc", "href": "https://api.w.org/{rel}", "templated": true}],
                         },
                     }),
                 );
@@ -712,7 +712,7 @@ impl Embeds {
         {
             embedded.insert("author".to_owned(), json!([author]));
         }
-        if wanted("wp:term") && links.contains_key("wp:term") {
+        if wanted("mc:term") && links.contains_key("mc:term") {
             let mine = self.post_terms.get(&post.id).map_or(&[][..], Vec::as_slice);
             let lists: Vec<Value> = self
                 .taxonomies
@@ -730,7 +730,7 @@ impl Embeds {
                 .iter()
                 .any(|l| l.as_array().is_some_and(|a| !a.is_empty()))
             {
-                embedded.insert("wp:term".to_owned(), Value::Array(lists));
+                embedded.insert("mc:term".to_owned(), Value::Array(lists));
             }
         }
         (!embedded.is_empty()).then_some(Value::Object(embedded))

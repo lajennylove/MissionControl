@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 
 /// A route that answers for anyone, with the current user's id and roles (0 and none for a
 /// visitor).
-#[rocket::get("/wp-json/test/v1/whoami")]
+#[rocket::get("/mc-json/test/v1/whoami")]
 fn whoami(auth: RestAuth) -> String {
     let caps = auth.caps();
     json!({
@@ -41,7 +41,7 @@ fn whoami(auth: RestAuth) -> String {
 }
 
 /// A route that needs a signed-in user.
-#[rocket::get("/wp-json/test/v1/me")]
+#[rocket::get("/mc-json/test/v1/me")]
 fn me(user: RestUser) -> String {
     assert!(matches!(
         user.method(),
@@ -60,7 +60,7 @@ static OPEN_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// A REST route that forgot its guard, and writes: the central check must still stop bad
 /// credentials before it runs.
-#[rocket::post("/wp-json/test/v1/open")]
+#[rocket::post("/mc-json/test/v1/open")]
 fn open() -> &'static str {
     OPEN_CALLS.fetch_add(1, Ordering::SeqCst);
     "ran"
@@ -239,7 +239,7 @@ async fn a_valid_application_password_signs_the_user_in_with_the_providers_roles
     // The grouped form WordPress shows works too.
     let response = site
         .client
-        .get("/wp-json/test/v1/me")
+        .get("/mc-json/test/v1/me")
         .header(basic(&site.email, &site.password.chunked()))
         .dispatch()
         .await;
@@ -252,7 +252,7 @@ async fn a_valid_application_password_signs_the_user_in_with_the_providers_roles
 
     let response = site
         .client
-        .get("/wp-json/test/v1/whoami")
+        .get("/mc-json/test/v1/whoami")
         .header(basic(&site.email, site.password.as_str()))
         .dispatch()
         .await;
@@ -273,7 +273,7 @@ async fn with_no_provider_a_signed_in_user_has_no_role() {
     let site = site_with(Environment::Local, TrustedProxies::None, Roles::NoProvider).await;
     let response = site
         .client
-        .get("/wp-json/test/v1/whoami")
+        .get("/mc-json/test/v1/whoami")
         .header(basic(&site.email, site.password.as_str()))
         .dispatch()
         .await;
@@ -289,10 +289,10 @@ async fn with_no_provider_a_signed_in_user_has_no_role() {
 async fn a_wrong_password_is_refused_with_wordpresss_error_on_every_rest_route() {
     let site = local_site().await;
     for uri in [
-        "/wp-json/test/v1/me",
-        "/wp-json/test/v1/whoami",
-        "/wp-json/",
-        "/wp-json/wp/v2",
+        "/mc-json/test/v1/me",
+        "/mc-json/test/v1/whoami",
+        "/mc-json/",
+        "/mc-json/mc/v2",
         "/?rest_route=/",
     ] {
         let response = site
@@ -321,7 +321,7 @@ async fn a_revoked_password_is_refused() {
     );
     let response = site
         .client
-        .get("/wp-json/test/v1/whoami")
+        .get("/mc-json/test/v1/whoami")
         .header(basic(&site.email, site.password.as_str()))
         .dispatch()
         .await;
@@ -339,7 +339,7 @@ async fn an_unknown_user_is_refused_with_wordpresss_codes() {
     let site = local_site().await;
     let response = site
         .client
-        .get("/wp-json/")
+        .get("/mc-json/")
         .header(basic(&unique_email("nobody"), site.password.as_str()))
         .dispatch()
         .await;
@@ -353,7 +353,7 @@ async fn an_unknown_user_is_refused_with_wordpresss_codes() {
 
     let response = site
         .client
-        .get("/wp-json/")
+        .get("/mc-json/")
         .header(basic("nobody", site.password.as_str()))
         .dispatch()
         .await;
@@ -369,7 +369,7 @@ async fn an_unknown_user_is_refused_with_wordpresss_codes() {
 #[rocket::async_test]
 async fn a_request_without_credentials_is_anonymous() {
     let site = local_site().await;
-    let (status, json) = body(site.client.get("/wp-json/test/v1/whoami").dispatch().await).await;
+    let (status, json) = body(site.client.get("/mc-json/test/v1/whoami").dispatch().await).await;
     assert_eq!(status, Status::Ok);
     assert_eq!(
         json,
@@ -380,7 +380,7 @@ async fn a_request_without_credentials_is_anonymous() {
     // passwords: the request is anonymous, as in WordPress.
     let (status, json) = body(
         site.client
-            .get("/wp-json/test/v1/whoami")
+            .get("/mc-json/test/v1/whoami")
             .header(Header::new("Authorization", "Bearer abc"))
             .dispatch()
             .await,
@@ -389,14 +389,14 @@ async fn a_request_without_credentials_is_anonymous() {
     assert_eq!(status, Status::Ok);
     assert_eq!(json["id"], 0);
 
-    let (status, _) = body(site.client.get("/wp-json/").dispatch().await).await;
+    let (status, _) = body(site.client.get("/mc-json/").dispatch().await).await;
     assert_eq!(status, Status::Ok);
 }
 
 #[rocket::async_test]
 async fn a_route_that_needs_a_user_refuses_a_visitor() {
     let site = local_site().await;
-    let response = site.client.get("/wp-json/test/v1/me").dispatch().await;
+    let response = site.client.get("/mc-json/test/v1/me").dispatch().await;
     assert_error(
         response,
         Status::Unauthorized,
@@ -412,7 +412,7 @@ async fn an_oversized_authorization_header_is_not_tried() {
     let name = "a".repeat(4096);
     let response = site
         .client
-        .get("/wp-json/test/v1/whoami")
+        .get("/mc-json/test/v1/whoami")
         .header(basic(&name, site.password.as_str()))
         .dispatch()
         .await;
@@ -434,7 +434,7 @@ async fn over_plain_http_outside_a_local_environment_the_credentials_are_ignored
         let site = site_with(environment, TrustedProxies::None, Roles::Editor).await;
         let response = site
             .client
-            .get("/wp-json/test/v1/me")
+            .get("/mc-json/test/v1/me")
             .header(basic(&site.email, site.password.as_str()))
             .dispatch()
             .await;
@@ -448,7 +448,7 @@ async fn over_plain_http_outside_a_local_environment_the_credentials_are_ignored
         // A wrong password is not even checked.
         let response = site
             .client
-            .get("/wp-json/")
+            .get("/mc-json/")
             .header(basic(&site.email, "wrong"))
             .dispatch()
             .await;
@@ -467,7 +467,7 @@ async fn https_is_believed_only_from_a_trusted_proxy() {
     .await;
     let response = site
         .client
-        .get("/wp-json/test/v1/me")
+        .get("/mc-json/test/v1/me")
         .remote(proxy)
         .header(Header::new("X-Forwarded-Proto", "https"))
         .header(basic(&site.email, site.password.as_str()))
@@ -480,7 +480,7 @@ async fn https_is_believed_only_from_a_trusted_proxy() {
     // The same header from a peer that is not the proxy is not believed.
     let response = site
         .client
-        .get("/wp-json/test/v1/me")
+        .get("/mc-json/test/v1/me")
         .remote("10.0.0.6:4000".parse().unwrap())
         .header(Header::new("X-Forwarded-Proto", "https"))
         .header(basic(&site.email, site.password.as_str()))
@@ -497,7 +497,7 @@ async fn https_is_believed_only_from_a_trusted_proxy() {
     // Nor a proxy saying the client came over plain HTTP somewhere along the way.
     let response = site
         .client
-        .get("/wp-json/test/v1/me")
+        .get("/mc-json/test/v1/me")
         .remote(proxy)
         .header(Header::new("X-Forwarded-Proto", "https, http"))
         .header(basic(&site.email, site.password.as_str()))
@@ -514,7 +514,7 @@ async fn https_is_believed_only_from_a_trusted_proxy() {
     // An IPv4 peer seen as an IPv4-mapped IPv6 address is the same proxy.
     let response = site
         .client
-        .get("/wp-json/test/v1/me")
+        .get("/mc-json/test/v1/me")
         .remote("[::ffff:10.0.0.5]:4000".parse().unwrap())
         .header(Header::new("X-Forwarded-Proto", "https"))
         .header(basic(&site.email, site.password.as_str()))
@@ -528,7 +528,7 @@ async fn https_is_believed_only_from_a_trusted_proxy() {
 #[rocket::async_test]
 async fn the_index_lists_no_authentication_until_the_authorize_screen_exists() {
     let site = local_site().await;
-    let (_, index) = body(site.client.get("/wp-json/").dispatch().await).await;
+    let (_, index) = body(site.client.get("/mc-json/").dispatch().await).await;
     assert_eq!(index["authentication"], json!({}));
 }
 
@@ -541,7 +541,7 @@ async fn bad_credentials_are_refused_before_any_rest_route_runs() {
     let before = OPEN_CALLS.load(Ordering::SeqCst);
     let response = site
         .client
-        .post("/wp-json/test/v1/open")
+        .post("/mc-json/test/v1/open")
         .header(wrong())
         .dispatch()
         .await;
@@ -561,7 +561,7 @@ async fn bad_credentials_are_refused_before_any_rest_route_runs() {
     // With the right password it runs.
     let response = site
         .client
-        .post("/wp-json/test/v1/open")
+        .post("/mc-json/test/v1/open")
         .header(basic(&site.email, site.password.as_str()))
         .dispatch()
         .await;
@@ -570,11 +570,11 @@ async fn bad_credentials_are_refused_before_any_rest_route_runs() {
 
     // An unknown REST path, any method, either form, and a percent-encoded prefix.
     for (method, uri) in [
-        ("POST", "/wp-json/no/such/route"),
-        ("DELETE", "/wp-json/wp/v2/posts/1"),
+        ("POST", "/mc-json/no/such/route"),
+        ("DELETE", "/mc-json/mc/v2/posts/1"),
         ("POST", "/?rest_route=/no/such/route"),
-        ("GET", "/%77p-json/"),
-        ("PUT", "/%77p-json/test/v1/open"),
+        ("GET", "/%6Dc-json/"),
+        ("PUT", "/%6Dc-json/test/v1/open"),
     ] {
         let request = match method {
             "POST" => site.client.post(uri),
@@ -598,7 +598,7 @@ async fn a_failing_roles_provider_refuses_the_request() {
     let site = site_with(Environment::Local, TrustedProxies::None, Roles::Failing).await;
     let response = site
         .client
-        .get("/wp-json/test/v1/whoami")
+        .get("/mc-json/test/v1/whoami")
         .header(basic(&site.email, site.password.as_str()))
         .dispatch()
         .await;
@@ -652,7 +652,7 @@ async fn errors_outside_the_rest_api_keep_rockets_answers() {
 #[rocket::async_test]
 async fn a_refused_request_is_not_caught_by_a_site_route() {
     let site = local_site().await;
-    for uri in ["/wp-json/no/such/route", "/wp-json/test/v1/whoami"] {
+    for uri in ["/mc-json/no/such/route", "/mc-json/test/v1/whoami"] {
         let response = site
             .client
             .get(uri)
@@ -674,7 +674,7 @@ async fn a_refused_head_request_gets_401_and_no_body() {
     let site = local_site().await;
     let response = site
         .client
-        .head("/wp-json/")
+        .head("/mc-json/")
         .header(basic(&site.email, "wrong"))
         .dispatch()
         .await;

@@ -1,4 +1,4 @@
-//! The terms controller: `/wp/v2/categories`, `/wp/v2/tags` and each taxonomy shown in the REST
+//! The terms controller: `/mc/v2/categories`, `/mc/v2/tags` and each taxonomy shown in the REST
 //! API, as WordPress's `WP_REST_Terms_Controller` serves them.
 //!
 //! A [`TaxonomySpec`] describes what the controller reads from a taxonomy's registration: the
@@ -18,8 +18,8 @@
 //!   embeds the parent (`up`).
 //! - Lists take `page`, `per_page` (1 to 100), `search` (in the name and slug), `include`,
 //!   `exclude`, `order` (default `asc`), `orderby` (default `name`), `hide_empty`, `parent`
-//!   (hierarchical), `offset` (flat), `post` and `slug`, and answer with `X-WP-Total`,
-//!   `X-WP-TotalPages` and `Link` headers. A page past the end is an empty list, as WordPress
+//!   (hierarchical), `offset` (flat), `post` and `slug`, and answer with `X-MC-Total`,
+//!   `X-MC-TotalPages` and `Link` headers. A page past the end is an empty list, as WordPress
 //!   gives it for terms. With `hide_empty`, a hierarchical taxonomy keeps an empty term that has
 //!   a term with posts under it, as `get_terms` keeps it.
 //! - Writes check the taxonomy's capabilities ([`TaxonomyCaps`]) through
@@ -46,7 +46,7 @@
 //! `meta` shows the term meta registered in [`MetaKeys`] for the taxonomy, and creates and
 //! updates write it, as [`super::meta`] describes.
 //!
-//! Left out, for now: `/wp/v2/taxonomies`
+//! Left out, for now: `/mc/v2/taxonomies`
 //! (Task 10.8), the `Allow` header, term aliases (`term_group` is 0), a custom taxonomy's
 //! `default_term` and its own query var in links (a custom taxonomy's link is
 //! `?taxonomy={name}&term={slug}`), and the `?rest_route=` form for these routes.
@@ -74,7 +74,7 @@ use crate::users::{Object, TaxonomyCaps, TermContext, UserCaps, can};
 pub struct TaxonomySpec {
     /// The taxonomy: its name, whether it is hierarchical and its post types.
     pub taxonomy: Taxonomy,
-    /// The route under `wp/v2`, such as `categories`.
+    /// The route under `mc/v2`, such as `categories`.
     pub rest_base: String,
     /// Whether the REST API serves the taxonomy. One with `false` has no route and is not
     /// listed.
@@ -111,7 +111,7 @@ impl TaxonomySpec {
         self.caps.clone()
     }
 
-    /// The taxonomy's collection route, `/wp/v2/{rest_base}`.
+    /// The taxonomy's collection route, `/mc/v2/{rest_base}`.
     pub fn route(&self) -> String {
         format!("/{}/{}", super::CORE_NAMESPACE, self.rest_base)
     }
@@ -266,7 +266,7 @@ pub struct TermsController<'a> {
 }
 
 impl TermsController<'_> {
-    /// `GET /wp/v2/{base}`: page `page` of the terms the query asks for. `query` is the request's
+    /// `GET /mc/v2/{base}`: page `page` of the terms the query asks for. `query` is the request's
     /// query string.
     ///
     /// # Errors
@@ -277,7 +277,7 @@ impl TermsController<'_> {
         query::list(self, query).await
     }
 
-    /// `GET /wp/v2/{base}/{id}`.
+    /// `GET /mc/v2/{base}/{id}`.
     ///
     /// # Errors
     ///
@@ -287,7 +287,7 @@ impl TermsController<'_> {
         query::get(self, id, query).await
     }
 
-    /// `POST /wp/v2/{base}`: creates a term from `params` (the body, over the query string).
+    /// `POST /mc/v2/{base}`: creates a term from `params` (the body, over the query string).
     ///
     /// # Errors
     ///
@@ -297,7 +297,7 @@ impl TermsController<'_> {
         write::create(self, params).await
     }
 
-    /// `POST`, `PUT` or `PATCH /wp/v2/{base}/{id}`: updates the term from `params`.
+    /// `POST`, `PUT` or `PATCH /mc/v2/{base}/{id}`: updates the term from `params`.
     ///
     /// # Errors
     ///
@@ -307,7 +307,7 @@ impl TermsController<'_> {
         write::update(self, id, params).await
     }
 
-    /// `DELETE /wp/v2/{base}/{id}`: deletes the term, which needs `force=true`.
+    /// `DELETE /mc/v2/{base}/{id}`: deletes the term, which needs `force=true`.
     ///
     /// # Errors
     ///
@@ -389,13 +389,13 @@ mod tests {
         let routes = RestRoutes::new();
         taxonomies.register_routes(&routes);
         let paths: Vec<String> = routes.routes().into_iter().map(|r| r.path).collect();
-        assert!(paths.contains(&"/wp/v2/categories".to_owned()));
-        assert!(paths.contains(&"/wp/v2/categories/(?P<id>[\\d]+)".to_owned()));
+        assert!(paths.contains(&"/mc/v2/categories".to_owned()));
+        assert!(paths.contains(&"/mc/v2/categories/(?P<id>[\\d]+)".to_owned()));
         assert!(!paths.iter().any(|p| p.contains("tags")));
 
         taxonomies.register(TaxonomySpec::post_tag());
         taxonomies.register_routes(&routes);
-        assert!(routes.routes().iter().any(|r| r.path == "/wp/v2/tags"));
+        assert!(routes.routes().iter().any(|r| r.path == "/mc/v2/tags"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The settings controller: `/wp/v2/settings`, as WordPress's `WP_REST_Settings_Controller`
+//! The settings controller: `/mc/v2/settings`, as WordPress's `WP_REST_Settings_Controller`
 //! serves it, over a registry of settings ([`Settings`]) as WordPress's `register_setting` keeps
 //! them.
 //!
@@ -372,7 +372,7 @@ impl Settings {
             .collect()
     }
 
-    /// Registers `/wp/v2/settings` on `routes`, so discovery lists it: `GET` with no arguments,
+    /// Registers `/mc/v2/settings` on `routes`, so discovery lists it: `GET` with no arguments,
     /// and `POST`, `PUT` and `PATCH` with one argument per setting.
     pub fn register_routes(&self, routes: &RestRoutes) {
         let args: Map<String, Value> = self
@@ -381,7 +381,7 @@ impl Settings {
             .map(|s| (s.rest_name.clone(), s.arg()))
             .collect();
         routes.register(RouteSpec::new(
-            "/wp/v2/settings",
+            "/mc/v2/settings",
             vec![
                 Endpoint::new(["GET"], json!({})),
                 Endpoint::new(["POST", "PUT", "PATCH"], Value::Object(args)),
@@ -537,7 +537,7 @@ pub struct SettingsController<'a> {
 }
 
 impl SettingsController<'_> {
-    /// `GET /wp/v2/settings`: every setting shown in the REST API, or those `_fields` names.
+    /// `GET /mc/v2/settings`: every setting shown in the REST API, or those `_fields` names.
     /// `query` is the request's query string.
     ///
     /// # Errors
@@ -549,7 +549,7 @@ impl SettingsController<'_> {
         self.read_all(&fields).await
     }
 
-    /// `POST`, `PUT` or `PATCH /wp/v2/settings`: writes the settings `params` names, then
+    /// `POST`, `PUT` or `PATCH /mc/v2/settings`: writes the settings `params` names, then
     /// answers as [`get`](Self::get) (with the `_fields` in `params`).
     ///
     /// # Errors

@@ -38,7 +38,7 @@
 //! Known limits, deferred (ruling R90):
 //!
 //! - The REST route registry has no unregister, so a removed type's or taxonomy's routes stay
-//!   listed in `/wp-json/` discovery until the next start; requests to them answer
+//!   listed in `/mc-json/` discovery until the next start; requests to them answer
 //!   `rest_no_route`.
 //! - A built-in `post` or `page` that a registered taxonomy is attached to is registered again
 //!   from WordPress's own descriptor ([`PostType::post`], [`PostType::page`]), so it replaces a

@@ -1,5 +1,5 @@
-//! REST discovery (Task 10.1): `GET /wp-json/` in the shape of WordPress's `WP_REST_Server::get_index`,
-//! the `wp/v2` namespace index, and the `rest_route` fallback.
+//! REST discovery (Task 10.1): `GET /mc-json/` in the shape of WordPress's `WP_REST_Server::get_index`,
+//! the `mc/v2` namespace index, and the `rest_route` fallback.
 //!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
 
@@ -75,7 +75,7 @@ fn keys(value: &Value) -> BTreeSet<&str> {
 #[rocket::async_test]
 async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
     let (_test, client) = site().await;
-    let response = client.get("/wp-json/").dispatch().await;
+    let response = client.get("/mc-json/").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(
         response.headers().get_one("Content-Type"),
@@ -118,7 +118,7 @@ async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
     assert_eq!(index["page_for_posts"], 0);
     assert_eq!(index["page_on_front"], 0);
     assert_eq!(index["show_on_front"], "posts");
-    assert_eq!(index["namespaces"], json!(["wp/v2"]));
+    assert_eq!(index["namespaces"], json!(["mc/v2"]));
     assert_eq!(index["authentication"], json!({}));
     assert_eq!(index["site_logo"], 0);
     assert_eq!(index["site_icon"], 0);
@@ -133,33 +133,33 @@ async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
         routes.keys().map(String::as_str).collect::<Vec<_>>(),
         [
             "/",
-            "/wp/v2",
-            "/wp/v2/categories",
-            "/wp/v2/categories/(?P<id>[\\d]+)",
-            "/wp/v2/media",
-            "/wp/v2/media/(?P<id>[\\d]+)",
-            "/wp/v2/pages",
-            "/wp/v2/pages/(?P<id>[\\d]+)",
-            "/wp/v2/posts",
-            "/wp/v2/posts/(?P<id>[\\d]+)",
-            "/wp/v2/search",
-            "/wp/v2/settings",
-            "/wp/v2/statuses",
-            "/wp/v2/statuses/(?P<status>[\\w-]+)",
-            "/wp/v2/tags",
-            "/wp/v2/tags/(?P<id>[\\d]+)",
-            "/wp/v2/taxonomies",
-            "/wp/v2/taxonomies/(?P<taxonomy>[\\w-]+)",
-            "/wp/v2/types",
-            "/wp/v2/types/(?P<type>[\\w-]+)",
-            "/wp/v2/users",
-            "/wp/v2/users/(?P<id>[\\d]+)",
-            "/wp/v2/users/me",
+            "/mc/v2",
+            "/mc/v2/categories",
+            "/mc/v2/categories/(?P<id>[\\d]+)",
+            "/mc/v2/media",
+            "/mc/v2/media/(?P<id>[\\d]+)",
+            "/mc/v2/pages",
+            "/mc/v2/pages/(?P<id>[\\d]+)",
+            "/mc/v2/posts",
+            "/mc/v2/posts/(?P<id>[\\d]+)",
+            "/mc/v2/search",
+            "/mc/v2/settings",
+            "/mc/v2/statuses",
+            "/mc/v2/statuses/(?P<status>[\\w-]+)",
+            "/mc/v2/tags",
+            "/mc/v2/tags/(?P<id>[\\d]+)",
+            "/mc/v2/taxonomies",
+            "/mc/v2/taxonomies/(?P<taxonomy>[\\w-]+)",
+            "/mc/v2/types",
+            "/mc/v2/types/(?P<type>[\\w-]+)",
+            "/mc/v2/users",
+            "/mc/v2/users/(?P<id>[\\d]+)",
+            "/mc/v2/users/me",
         ]
     );
     // A route with a regex parameter has no `self` link (Controller ruling R44).
     assert!(
-        routes["/wp/v2/posts/(?P<id>[\\d]+)"]
+        routes["/mc/v2/posts/(?P<id>[\\d]+)"]
             .get("_links")
             .is_none()
     );
@@ -169,34 +169,34 @@ async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
             "namespace": "",
             "methods": ["GET"],
             "endpoints": [{"methods": ["GET"], "args": {"context": {"default": "view", "required": false}}}],
-            "_links": {"self": [{"href": "https://example.test/wp-json/"}]},
+            "_links": {"self": [{"href": "https://example.test/mc-json/"}]},
         })
     );
-    assert_eq!(routes["/wp/v2"]["namespace"], "wp/v2");
-    assert_eq!(routes["/wp/v2"]["methods"], json!(["GET"]));
+    assert_eq!(routes["/mc/v2"]["namespace"], "mc/v2");
+    assert_eq!(routes["/mc/v2"]["methods"], json!(["GET"]));
     assert_eq!(
-        routes["/wp/v2"]["endpoints"][0]["args"]["namespace"],
-        json!({"default": "wp/v2", "required": false})
+        routes["/mc/v2"]["endpoints"][0]["args"]["namespace"],
+        json!({"default": "mc/v2", "required": false})
     );
     assert_eq!(
-        routes["/wp/v2"]["_links"],
-        json!({"self": [{"href": "https://example.test/wp-json/wp/v2"}]})
+        routes["/mc/v2"]["_links"],
+        json!({"self": [{"href": "https://example.test/mc-json/mc/v2"}]})
     );
 }
 
 #[rocket::async_test]
 async fn the_index_answers_without_the_trailing_slash_and_by_rest_route() {
     let (_test, client) = site().await;
-    let (status, with_slash) = get_json(&client, "/wp-json/").await;
+    let (status, with_slash) = get_json(&client, "/mc-json/").await;
     assert_eq!(status, Status::Ok);
-    for uri in ["/wp-json", "/?rest_route=/"] {
+    for uri in ["/mc-json", "/?rest_route=/"] {
         let (status, index) = get_json(&client, uri).await;
         assert_eq!(status, Status::Ok, "{uri}");
         assert_eq!(index, with_slash, "{uri}");
     }
-    let (status, ns) = get_json(&client, "/?rest_route=/wp/v2").await;
+    let (status, ns) = get_json(&client, "/?rest_route=/mc/v2").await;
     assert_eq!(status, Status::Ok);
-    assert_eq!(ns["namespace"], "wp/v2");
+    assert_eq!(ns["namespace"], "mc/v2");
 }
 
 #[rocket::async_test]
@@ -219,7 +219,7 @@ async fn an_unset_site_uses_wordpresss_defaults() {
     let client = Client::tracked(rocket_with_database(config, test.shared()))
         .await
         .unwrap();
-    let (status, index) = get_json(&client, "/wp-json/").await;
+    let (status, index) = get_json(&client, "/mc-json/").await;
     assert_eq!(status, Status::Ok);
     assert_eq!(index["name"], "");
     assert_eq!(index["gmt_offset"], "0");
@@ -227,56 +227,56 @@ async fn an_unset_site_uses_wordpresss_defaults() {
     // With no `home` option the links start at the root.
     assert_eq!(
         index["routes"]["/"]["_links"]["self"][0]["href"],
-        "/wp-json/"
+        "/mc-json/"
     );
 }
 
 #[rocket::async_test]
 async fn the_namespace_index_lists_its_routes() {
     let (_test, client) = site().await;
-    for uri in ["/wp-json/wp/v2", "/wp-json/wp/v2/"] {
+    for uri in ["/mc-json/mc/v2", "/mc-json/mc/v2/"] {
         let response = client.get(uri).dispatch().await;
         assert_eq!(response.status(), Status::Ok, "{uri}");
         assert_eq!(response.content_type(), Some(ContentType::JSON), "{uri}");
         let ns: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
         assert_eq!(keys(&ns), ["namespace", "routes"].into(), "{uri}");
-        assert_eq!(ns["namespace"], "wp/v2");
+        assert_eq!(ns["namespace"], "mc/v2");
         let routes = ns["routes"].as_object().unwrap();
         assert_eq!(
             routes.keys().map(String::as_str).collect::<Vec<_>>(),
             [
-                "/wp/v2",
-                "/wp/v2/categories",
-                "/wp/v2/categories/(?P<id>[\\d]+)",
-                "/wp/v2/media",
-                "/wp/v2/media/(?P<id>[\\d]+)",
-                "/wp/v2/pages",
-                "/wp/v2/pages/(?P<id>[\\d]+)",
-                "/wp/v2/posts",
-                "/wp/v2/posts/(?P<id>[\\d]+)",
-                "/wp/v2/search",
-                "/wp/v2/settings",
-                "/wp/v2/statuses",
-                "/wp/v2/statuses/(?P<status>[\\w-]+)",
-                "/wp/v2/tags",
-                "/wp/v2/tags/(?P<id>[\\d]+)",
-                "/wp/v2/taxonomies",
-                "/wp/v2/taxonomies/(?P<taxonomy>[\\w-]+)",
-                "/wp/v2/types",
-                "/wp/v2/types/(?P<type>[\\w-]+)",
-                "/wp/v2/users",
-                "/wp/v2/users/(?P<id>[\\d]+)",
-                "/wp/v2/users/me",
+                "/mc/v2",
+                "/mc/v2/categories",
+                "/mc/v2/categories/(?P<id>[\\d]+)",
+                "/mc/v2/media",
+                "/mc/v2/media/(?P<id>[\\d]+)",
+                "/mc/v2/pages",
+                "/mc/v2/pages/(?P<id>[\\d]+)",
+                "/mc/v2/posts",
+                "/mc/v2/posts/(?P<id>[\\d]+)",
+                "/mc/v2/search",
+                "/mc/v2/settings",
+                "/mc/v2/statuses",
+                "/mc/v2/statuses/(?P<status>[\\w-]+)",
+                "/mc/v2/tags",
+                "/mc/v2/tags/(?P<id>[\\d]+)",
+                "/mc/v2/taxonomies",
+                "/mc/v2/taxonomies/(?P<taxonomy>[\\w-]+)",
+                "/mc/v2/types",
+                "/mc/v2/types/(?P<type>[\\w-]+)",
+                "/mc/v2/users",
+                "/mc/v2/users/(?P<id>[\\d]+)",
+                "/mc/v2/users/me",
             ]
         );
-        assert_eq!(routes["/wp/v2"]["namespace"], "wp/v2");
+        assert_eq!(routes["/mc/v2"]["namespace"], "mc/v2");
     }
 }
 
 #[rocket::async_test]
 async fn an_unknown_rest_route_is_wordpresss_404() {
     let (_test, client) = site().await;
-    let response = client.get("/wp-json/nope/v1/x").dispatch().await;
+    let response = client.get("/mc-json/nope/v1/x").dispatch().await;
     assert_eq!(response.status(), Status::NotFound);
     let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
     assert_eq!(body["code"], "rest_no_route");
@@ -293,14 +293,14 @@ async fn html_pages_advertise_the_api() {
     let response = client.get("/").dispatch().await;
     assert_eq!(
         response.headers().get_one("Link"),
-        Some("<https://example.test/wp-json/>; rel=\"https://api.w.org/\"")
+        Some("<https://example.test/mc-json/>; rel=\"https://api.w.org/\"")
     );
 }
 
 #[rocket::async_test]
 async fn an_empty_or_relative_rest_route_is_the_front_page() {
     let (_test, client) = site().await;
-    for uri in ["/?rest_route=", "/?rest_route=wp/v2"] {
+    for uri in ["/?rest_route=", "/?rest_route=mc/v2"] {
         let response = client.get(uri).dispatch().await;
         assert_eq!(response.status(), Status::Ok, "{uri}");
         let body = response.into_string().await.unwrap();
@@ -311,7 +311,7 @@ async fn an_empty_or_relative_rest_route_is_the_front_page() {
 #[rocket::async_test]
 async fn unknown_rest_paths_are_always_rest_no_route() {
     let (_test, client) = site().await;
-    for uri in ["/wp-json/.hidden", "/wp-json/a:b/c", "/wp-json/wp/v2/.x"] {
+    for uri in ["/mc-json/.hidden", "/mc-json/a:b/c", "/mc-json/mc/v2/.x"] {
         let (status, body) = get_json(&client, uri).await;
         assert_eq!(status, Status::NotFound, "{uri}");
         assert_eq!(body["code"], "rest_no_route", "{uri}");
@@ -337,14 +337,14 @@ async fn a_post_slugged_wp_json_is_shadowed_by_the_api() {
         NewPost {
             status: PostStatus::Publish,
             title: "Shadowed".to_owned(),
-            slug: "wp-json".to_owned(),
+            slug: "mc-json".to_owned(),
             content: "Body".to_owned(),
             ..NewPost::new(author, "post")
         },
     )
     .await
     .unwrap();
-    let (status, index) = get_json(&client, "/wp-json/").await;
+    let (status, index) = get_json(&client, "/mc-json/").await;
     assert_eq!(status, Status::Ok);
     assert_eq!(index["name"], "Test Site");
 }
@@ -365,23 +365,23 @@ async fn an_unsafe_home_option_gives_relative_links() {
         set_option(test.db(), "siteurl", &json!(home))
             .await
             .unwrap();
-        let (status, index) = get_json(&client, "/wp-json/").await;
+        let (status, index) = get_json(&client, "/mc-json/").await;
         assert_eq!(status, Status::Ok, "{home:?}");
         assert_eq!(index["home"], "", "{home:?}");
         assert_eq!(index["url"], "", "{home:?}");
         assert_eq!(
-            index["routes"]["/"]["_links"]["self"][0]["href"], "/wp-json/",
+            index["routes"]["/"]["_links"]["self"][0]["href"], "/mc-json/",
             "{home:?}"
         );
-        let (_, ns) = get_json(&client, "/wp-json/wp/v2").await;
+        let (_, ns) = get_json(&client, "/mc-json/mc/v2").await;
         assert_eq!(
-            ns["routes"]["/wp/v2"]["_links"]["self"][0]["href"], "/wp-json/wp/v2",
+            ns["routes"]["/mc/v2"]["_links"]["self"][0]["href"], "/mc-json/mc/v2",
             "{home:?}"
         );
         let response = client.get("/").dispatch().await;
         assert_eq!(
             response.headers().get_one("Link"),
-            Some("</wp-json/>; rel=\"https://api.w.org/\""),
+            Some("</mc-json/>; rel=\"https://api.w.org/\""),
             "{home:?}"
         );
     }

@@ -1,4 +1,4 @@
-//! The routes of the users controller: `GET /wp-json/wp/v2/users`, `/users/{id}` and
+//! The routes of the users controller: `GET /mc-json/mc/v2/users`, `/users/{id}` and
 //! `/users/me`, over the core's [`UsersController`].
 //!
 //! The paths are fixed, so these routes rank before the posts and terms routes, whose
@@ -83,19 +83,19 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     routes
 }
 
-#[rocket::get("/wp-json/wp/v2/users")]
+#[rocket::get("/mc-json/mc/v2/users")]
 async fn list(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).list(query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/users/me")]
+#[rocket::get("/mc-json/mc/v2/users/me")]
 async fn me(origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).me(query_of(origin)).await)
 }
 
-#[rocket::get("/wp-json/wp/v2/users/<id>")]
+#[rocket::get("/mc-json/mc/v2/users/<id>")]
 async fn get(id: Id, origin: &Origin<'_>, auth: RestAuth, app: App<'_>) -> Reply {
     let caps = auth.caps();
     Reply(app.controller(&caps).get(id.0, query_of(origin)).await)

@@ -7,6 +7,6 @@
 <p>{{ $message }}</p>
 </div>
 @if ($retry)
-<p><a class="button" href="/wp-admin/install.php">Try again</a></p>
+<p><a class="button" href="/mc-admin/install.php">Try again</a></p>
 @endif
 @endsection

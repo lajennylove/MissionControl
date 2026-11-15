@@ -4,7 +4,7 @@
 # Run:     docker run -d --name mission-control --restart unless-stopped \
 #            -p 8000:8000 -v mission-control-data:/data mission-control
 # Setup:   with no configuration the container starts in setup mode: open
-#          http://localhost:8000/wp-admin/install.php. When the wizard finishes, the binary exits
+#          http://localhost:8000/mc-admin/install.php. When the wizard finishes, the binary exits
 #          with status 0 and Docker starts it again in normal mode. That needs
 #          `--restart unless-stopped` (or `always`); `on-failure` does not restart status 0.
 #          See deploy/docker-compose.yml for the same as a Compose file.

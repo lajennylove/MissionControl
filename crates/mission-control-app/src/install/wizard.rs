@@ -1,4 +1,4 @@
-//! The installer wizard (design 5.1): the steps setup mode serves at `/wp-admin/install.php`.
+//! The installer wizard (design 5.1): the steps setup mode serves at `/mc-admin/install.php`.
 //!
 //! The steps follow WordPress's installer. WordPress's first step, the language, comes with
 //! translations in phase 3; phase 1 is English only.
@@ -492,7 +492,7 @@ impl<'r> FromRequest<'r> for SiteAddress {
 
 /// The installer page: the database step, the site step (`?step=2`, once a database is chosen),
 /// or the finished page once the install is done.
-#[rocket::get("/wp-admin/install.php?<step>")]
+#[rocket::get("/mc-admin/install.php?<step>")]
 async fn show(step: Option<&str>, wizard: &State<Wizard>, setup: &State<SetupState>) -> Reply {
     match wizard.phase() {
         Phase::Open => {}
@@ -589,7 +589,7 @@ fn database_page(
 
 /// Step 1: tests the connection to the chosen database. On success the database is kept for the
 /// finish and the wizard moves to step 2; on failure the same step shows why.
-#[rocket::post("/wp-admin/install.php?step=1", data = "<form>", rank = 1)]
+#[rocket::post("/mc-admin/install.php?step=1", data = "<form>", rank = 1)]
 async fn database_step(
     form: Form<DatabaseForm>,
     wizard: &State<Wizard>,
@@ -994,7 +994,7 @@ fn sanitize(settings: &Settings, name: &str, value: &str) -> Option<Value> {
 
 /// Step 2 and the finish: checks the site form, then installs (see [`finish`]) and asks for the
 /// restart into normal mode.
-#[rocket::post("/wp-admin/install.php?step=2", data = "<form>", rank = 2)]
+#[rocket::post("/mc-admin/install.php?step=2", data = "<form>", rank = 2)]
 async fn site_step(
     form: Form<SiteForm>,
     address: SiteAddress,

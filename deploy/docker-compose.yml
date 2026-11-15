@@ -1,6 +1,6 @@
 # Example Compose file for Mission Control. Run from the repository root:
 #   docker compose -f deploy/docker-compose.yml up -d
-# The first start is setup mode: open http://localhost:8000/wp-admin/install.php
+# The first start is setup mode: open http://localhost:8000/mc-admin/install.php
 # and finish setup at once.
 services:
   mission-control:
