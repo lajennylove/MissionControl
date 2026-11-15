@@ -1,0 +1,28 @@
+{{--
+  The primary menu, three levels deep (wp_nav_menu's `depth => 3`). Propel partials cannot
+  include themselves, so each level is its own loop, and each binds `item` again.
+--}}
+<nav class="primary-navigation site-container pb-4" aria-label="{{ $menus.primary.name }}">
+  <ul id="menu-{{ $menus.primary.slug }}" class="menu flex flex-wrap gap-x-6 gap-y-2">
+    @foreach (item in menus.primary.items)
+    @include('partials.menu-item')
+    @if ($item.children)
+    <ul class="sub-menu">
+      @foreach (item in item.children)
+      @include('partials.menu-item')
+      @if ($item.children)
+      <ul class="sub-menu">
+        @foreach (item in item.children)
+        @include('partials.menu-item')
+        </li>
+        @endforeach
+      </ul>
+      @endif
+      </li>
+      @endforeach
+    </ul>
+    @endif
+    </li>
+    @endforeach
+  </ul>
+</nav>

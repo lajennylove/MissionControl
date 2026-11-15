@@ -1,0 +1,7 @@
+{{-- A menu item's opening tag and link, for `item`; the caller closes the `<li>`. --}}
+<li id="menu-item-{{ $item.id }}" class="{{ $item.classes }}">
+@if ($item.url)
+<a href="{{ $item.url }}" target="{{ $item.target }}" rel="{{ $item.rel }}" title="{{ $item.attr_title }}" aria-current="{{ $item.aria_current }}">{{ $item.title }}</a>
+@else
+<a>{{ $item.title }}</a>
+@endif

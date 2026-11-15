@@ -12,4 +12,7 @@
     </div>
     @include('partials.search-form')
   </div>
+  @if ($menus.primary)
+  @include('partials.menu')
+  @endif
 </header>

@@ -600,3 +600,207 @@ async fn a_page_with_a_custom_template_gets_its_body_classes() {
         "{body}"
     );
 }
+
+/// The shipped default theme, loaded, for the menu and widget APIs.
+fn default_theme() -> mission_control_core::theme::Theme {
+    mission_control_core::theme::load_theme(&shipped_themes().join("default"))
+        .expect("the default theme loads")
+}
+
+/// The text of the `<li id="menu-item-{id}" ...>` start tag in `body`.
+fn menu_li(body: &str, id: i64) -> &str {
+    let start = body
+        .find(&format!("<li id=\"menu-item-{id}\""))
+        .unwrap_or_else(|| panic!("menu item {id} is shown: {body}"));
+    let end = start + body[start..].find('>').expect("the tag ends");
+    &body[start..=end]
+}
+
+#[rocket::async_test]
+async fn a_menu_assigned_to_the_primary_location_appears_in_the_header() {
+    use mission_control_core::theme::{
+        NewMenuItem, add_menu_item, create_nav_menu, set_menu_location,
+    };
+
+    let site = Site::new().await;
+    let db = site.db();
+    let about = site
+        .post("page", PostStatus::Publish, "About", "about", "About us.")
+        .await;
+    let team = Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Publish,
+            title: "Team".to_owned(),
+            slug: "team".to_owned(),
+            parent_id: Some(about.id),
+            published_at: Some(chrono_at(2026, 3, 7)),
+            ..NewPost::new(site.author, "page")
+        },
+    )
+    .await
+    .unwrap();
+    let draft = site
+        .post(
+            "page",
+            PostStatus::Draft,
+            "Secret draft",
+            "secret",
+            "Draft.",
+        )
+        .await;
+    let menu = create_nav_menu(db, "Main <menu>").await.unwrap();
+    let add = async |item: NewMenuItem| {
+        add_menu_item(db, &menu, site.author, item)
+            .await
+            .expect("adds the item")
+    };
+    let home = add(NewMenuItem::custom("Home & away", "/")).await;
+    let about_item = add(NewMenuItem::post(&about)).await;
+    let team_item = add(NewMenuItem {
+        parent: Some(about_item.id),
+        ..NewMenuItem::post(&team)
+    })
+    .await;
+    add(NewMenuItem::post(&draft)).await;
+    let evil = add(NewMenuItem::custom("Evil", "javascript:alert(1)")).await;
+    // Written straight to the meta, as an importer could.
+    mission_control_core::content::set_post_meta(
+        db,
+        evil.id,
+        "_menu_item_url",
+        &json!("javascript:alert('menu')"),
+    )
+    .await
+    .unwrap();
+    let client = site.client().await;
+
+    // No menu assigned: no navigation.
+    let (status, body) = get(&client, "/about/team/").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(!body.contains("menu-item-"), "{body}");
+
+    set_menu_location(db, &default_theme(), "primary", Some(&menu))
+        .await
+        .unwrap();
+    let (status, body) = get(&client, "/about/team/").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let header = &body[body.find("<header").unwrap()..body.find("</header>").unwrap()];
+    assert!(
+        header.contains("aria-label=\"Main &lt;menu&gt;\""),
+        "{header}"
+    );
+    assert!(header.contains(">Home &amp; away</a>"), "{header}");
+
+    // Nested: Team's item is inside About's, in a sub-menu.
+    let about_at = header.find(menu_li(header, about_item.id)).unwrap();
+    let sub_menu = header[about_at..].find("<ul class=\"sub-menu\">").unwrap() + about_at;
+    let team_at = header.find(menu_li(header, team_item.id)).unwrap();
+    let evil_at = header.find(menu_li(header, evil.id)).unwrap();
+    assert!(
+        about_at < sub_menu && sub_menu < team_at && team_at < evil_at,
+        "{header}"
+    );
+    assert!(
+        header[team_at..evil_at].contains("</ul>"),
+        "the sub-menu closes before the next top-level item: {header}"
+    );
+
+    let team_li = menu_li(header, team_item.id);
+    assert!(team_li.contains("current-menu-item"), "{team_li}");
+    assert!(
+        header.contains(
+            "href=\"/about/team/\" target=\"\" rel=\"\" title=\"\" aria-current=\"page\">Team</a>"
+        ),
+        "{header}"
+    );
+    let about_li = menu_li(header, about_item.id);
+    assert!(about_li.contains("current-menu-ancestor"), "{about_li}");
+    assert!(about_li.contains("menu-item-has-children"), "{about_li}");
+    assert!(!about_li.contains("current-menu-item"), "{about_li}");
+    assert!(!menu_li(header, home.id).contains("current-menu-item"));
+
+    // The draft's item is skipped; the script link is shown without a link.
+    assert!(!body.contains("Secret draft"), "{body}");
+    assert!(!body.contains("javascript:"), "{body}");
+    let evil_li = menu_li(header, evil.id);
+    let after = header.find(evil_li).unwrap() + evil_li.len();
+    assert!(
+        header[after..].trim_start().starts_with("<a>Evil</a>"),
+        "{header}"
+    );
+
+    // On the front page, the home link is current.
+    let (_, body) = get(&client, "/").await;
+    assert!(
+        menu_li(&body, home.id).contains("current-menu-item"),
+        "{body}"
+    );
+}
+
+#[rocket::async_test]
+async fn the_footer_widget_area_renders_its_widgets_in_order() {
+    use mission_control_core::theme::{save_widget, set_sidebar_widgets};
+
+    let site = Site::new().await;
+    let db = site.db();
+    site.published("Hello world", "hello-world").await;
+    let about = save_widget(
+        db,
+        "text",
+        None,
+        &json!({"title": "About <b>us</b>", "text": "We <script>alert('w')</script> build."}),
+    )
+    .await
+    .unwrap();
+    let recent = save_widget(db, "recent-posts", None, &json!({"number": 3}))
+        .await
+        .unwrap();
+    let search = save_widget(db, "search", None, &json!({})).await.unwrap();
+    set_option(
+        db,
+        "widget_calendar",
+        &json!({"2": {"title": "Calendar"}, "_multiwidget": 1}),
+    )
+    .await
+    .unwrap();
+    let client = site.client().await;
+
+    // An empty area renders nothing.
+    let (_, body) = get(&client, "/").await;
+    assert!(!body.contains("widget-area"), "{body}");
+
+    set_sidebar_widgets(db, "footer", &[&recent, "calendar-2", &about, &search])
+        .await
+        .unwrap();
+    let (status, body) = get(&client, "/").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let footer = &body[body.find("<footer").unwrap()..body.find("</footer>").unwrap()];
+    let at = |needle: &str| {
+        footer
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} is in the footer: {footer}"))
+    };
+    let recent_at = at(&format!(
+        "id=\"{recent}\" class=\"widget widget_recent_entries\""
+    ));
+    let about_at = at(&format!("id=\"{about}\" class=\"widget widget_text\""));
+    let search_at = at(&format!("id=\"{search}\" class=\"widget widget_search\""));
+    assert!(recent_at < about_at && about_at < search_at, "{footer}");
+    assert!(
+        !footer.contains("Calendar"),
+        "an unknown widget is skipped: {footer}"
+    );
+    assert!(footer.contains(">Recent Posts</h2>"), "{footer}");
+    assert!(footer.contains(">Hello world</a>"), "{footer}");
+    // The title and the text are escaped.
+    assert!(
+        footer.contains(">About &lt;b&gt;us&lt;/b&gt;</h2>"),
+        "{footer}"
+    );
+    assert!(
+        footer.contains("We &lt;script&gt;alert(&#039;w&#039;)&lt;/script&gt; build."),
+        "{footer}"
+    );
+    assert!(!body.contains("<script>alert('w')"), "{body}");
+}
