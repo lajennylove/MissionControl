@@ -31,6 +31,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Decodes, resizes and encodes image sub-sizes (MIT OR Apache-2.0). Only the four web formats
 # WordPress resizes by default; no rayon.
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+# The field kinds of custom fields (`FieldKindDef`), shared with the admin panel (MIT). Used only
+# for its field types (Ruling R75): it is built on Orbit 0.3, so no Orbit type of it may cross
+# into Mission Control's API.
+ignite-core = "0.4.0"
 # Detects a file's real type from its magic numbers (MIT; its `cfb` dependency is MIT).
 infer = "0.22"
 # The logging facade Rocket 0.5 logs through.

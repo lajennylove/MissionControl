@@ -1552,6 +1552,7 @@ dependencies = [
  "fs4",
  "futures-util",
  "getrandom 0.4.3",
+ "ignite-core",
  "image",
  "infer",
  "libc",
