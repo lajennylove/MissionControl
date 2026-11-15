@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 [dependencies]
+# Filters post HTML on save to WordPress's kses allow-lists (MIT OR Apache-2.0); parses with
+# html5ever, as a browser does.
+ammonia = "4.2"
 # Decodes HTTP Basic credentials and encodes application password hashes (MIT OR Apache-2.0).
 base64 = "0.22"
 # BLAKE2b for application password hashes, as WordPress 6.8's `wp_fast_hash` (MIT OR Apache-2.0).

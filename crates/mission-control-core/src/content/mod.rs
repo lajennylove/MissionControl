@@ -2,6 +2,9 @@
 //! autosaves, their slugs and permalinks, and the terms of their taxonomies, after `wp_terms`,
 //! `wp_term_taxonomy` and `wp_term_relationships`.
 //!
+//! A post's title, content and excerpt are stored as given. A path that saves them for a user
+//! passes them through [`kses_post_fields`] first, WordPress's HTML filter on save.
+//!
 //! ```ignore
 //! use mission_control_core::content::{NewPost, NewTerm, Post, PostStatus, Taxonomy, Term};
 //!
@@ -19,6 +22,7 @@
 //! ```
 
 mod future;
+mod kses;
 mod meta;
 mod permalink;
 mod post;
@@ -31,6 +35,7 @@ pub use future::{
     PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
     schedule_future_post,
 };
+pub use kses::{PostFields, kses_data, kses_post, kses_post_fields, safecss_filter_attr};
 pub(crate) use meta::put_post_meta_in;
 pub use meta::{
     MetaError, delete_option, delete_post_meta, delete_term_meta, delete_user_meta, get_option,
