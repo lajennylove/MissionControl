@@ -84,7 +84,7 @@ pub fn templates_for(resolved: &Resolved, page_template: Option<&str>) -> Vec<St
     names.push("index".to_owned());
     // Task 9.2 maps every name to a file, so a hostile slug, post type or MIME type never gets
     // through. Only the page template may have a folder.
-    names.retain(|name| custom == Some(name.as_str()) || is_safe_name(name));
+    names.retain(|name| is_safe_name(name, custom == Some(name.as_str())));
     names
 }
 
@@ -159,52 +159,34 @@ fn page_rules(names: &mut Vec<String>, post: &Post, custom: Option<&str>) {
     names.push("page".to_owned());
 }
 
-/// The name of a stored page template, or `None` when it is empty, `default` (the "no template"
-/// choice) or not safe. The file extension is dropped, as for every name (`templates/wide.php`
-/// is `templates/wide`). One folder level is allowed, as WordPress allows template subfolders.
+/// The name of a stored page template, or `None` when it is empty or `default` (the "no
+/// template" choice). The file extension of the last segment is dropped, as for every name
+/// (`templates/wide.php` is `templates/wide`). Whether the result is safe is decided by
+/// [`is_safe_name`] on the stripped name, with the other names.
 fn custom_template_name(template: &str) -> Option<String> {
-    if template.is_empty()
-        || template == "default"
-        || template.as_bytes().get(1).copied() == Some(b':')
-    {
+    if template.is_empty() || template == "default" {
         return None;
     }
-    let segments: Vec<&str> = template.split('/').collect();
-    if segments.len() > 2 || !segments.iter().all(|segment| is_safe_segment(segment)) {
-        return None;
-    }
-    let (folder, file) = match segments.as_slice() {
-        [file] => (None, *file),
-        [folder, file] => (Some(*folder), *file),
-        _ => return None,
-    };
-    let stem = match file.rfind('.') {
-        Some(dot) if dot > 0 => &file[..dot],
-        _ => file,
-    };
-    Some(match folder {
-        Some(folder) => format!("{folder}/{stem}"),
-        None => stem.to_owned(),
+    let file_start = template.rfind('/').map_or(0, |slash| slash + 1);
+    Some(match template[file_start..].rfind('.') {
+        Some(dot) if dot > 0 => template[..file_start + dot].to_owned(),
+        _ => template.to_owned(),
     })
 }
 
-/// A path segment that cannot leave the theme: not empty, not `.` or `..`, no backslash and no
-/// control character (NUL included).
-fn is_safe_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment != "."
-        && segment != ".."
-        && !segment.contains('\\')
-        && !segment.chars().any(char::is_control)
-}
-
-/// Whether a generated name may be passed on to load a file: one segment, no `..` anywhere, no
-/// drive prefix.
-fn is_safe_name(name: &str) -> bool {
-    is_safe_segment(name)
-        && !name.contains('/')
+/// Whether a name may be passed on to load a file: every segment non-empty and not `.` or `..`,
+/// no `..` anywhere (as `validate_file`), no backslash, no control character (NUL included), no
+/// `:` (a drive prefix), and at most one `/`, which only the page template may have
+/// (`allow_folder`).
+fn is_safe_name(name: &str, allow_folder: bool) -> bool {
+    let segments: Vec<&str> = name.split('/').collect();
+    segments.len() <= if allow_folder { 2 } else { 1 }
+        && segments
+            .iter()
+            .all(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
         && !name.contains("..")
-        && name.as_bytes().get(1).copied() != Some(b':')
+        && !name.contains(['\\', ':'])
+        && !name.chars().any(char::is_control)
 }
 
 /// The forms of a slug a theme may name a file by: decoded (`café`) first, then percent-encoded
