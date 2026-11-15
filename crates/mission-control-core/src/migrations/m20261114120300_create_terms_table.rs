@@ -11,7 +11,7 @@ use orbit_orm::schema;
 /// enforces it.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000300_create_terms_table",
+        "20261114120300_create_terms_table",
         vec![schema::create("terms", |t| {
             t.id();
             t.string("name").length(200).default("");

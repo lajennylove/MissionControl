@@ -12,7 +12,7 @@ use orbit_orm::schema::{self, Action};
 /// indexes both. Deleting the post deletes its rows.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000600_create_post_meta_table",
+        "20261114120600_create_post_meta_table",
         vec![schema::create("post_meta", |t| {
             t.id();
             t.big_integer("post_id");

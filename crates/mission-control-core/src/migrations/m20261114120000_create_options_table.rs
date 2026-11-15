@@ -11,7 +11,7 @@ use orbit_orm::schema;
 /// as WordPress sizes `option_value`; `TEXT` elsewhere).
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000000_create_options_table",
+        "20261114120000_create_options_table",
         vec![schema::create("options", |t| {
             t.id();
             t.string("name").length(191);

@@ -13,13 +13,13 @@
 //! 2. **Site and administrator** (`?step=2`), on one form as WordPress's `install.php` shows
 //!    them: site title, administrator username, password and email, and search engine
 //!    visibility.
-//! 3. **Finished**: the wizard checks that `.env` is still absent, runs the core migrations,
-//!    stores the options WordPress's installer sets that Mission Control has, writes `.env`
-//!    (`DATABASE_URL` and a generated `IGNITE_SECRET_KEY`, owner-only, never over an existing
-//!    file), and asks for the restart into normal mode ([`RestartHandle::request`]).
+//! 3. **Finished**: the wizard checks that `.env` is still absent, runs Ignite's panel migrations
+//!    and the core migrations ([`run_migrations`]), stores the options WordPress's installer
+//!    sets that Mission Control has, writes `.env` (`DATABASE_URL` and a generated
+//!    `IGNITE_SECRET_KEY`, owner-only, never over an existing file), and asks for the restart into normal mode ([`RestartHandle::request`]).
 //!
 //! **The administrator account is pending (Ruling R71).** Ignite's user creation runs on
-//! MariaDB and MySQL only, and creating the first user is a later task (Task 11.4). The form
+//! MariaDB and MySQL only, and creating the first user is a later task (Task 11.4b). The form
 //! shows the administrator fields as WordPress does, with a note that the account is not created
 //! yet. The username and password are never read into the wizard's state, stored, logged or
 //! echoed back; the email is stored as the `admin_email` option, as WordPress stores it. The rest
@@ -51,7 +51,6 @@ use mission_control_core::content::{get_option, set_option};
 use mission_control_core::install::env_file::{
     self, ENV_FILE_NAME, EnvFile, EnvFileError, generate_secret_key,
 };
-use mission_control_core::migrations::migrator;
 use mission_control_core::rest::settings::Settings;
 use orbit_orm::Database;
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -65,6 +64,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+use crate::install::run::{InstallError, run_migrations};
 use crate::restart::RestartHandle;
 use crate::setup::{INSTALL_PATH, SetupState};
 
@@ -1096,11 +1096,11 @@ fn site_options(
     ]
 }
 
-/// Installs on the database at `url`: checks `.env` is absent, runs the core migrations, stores
-/// `options`, and writes `.env` with the URL and a new secret key. `.env` is written last, so a
-/// failure before it leaves the wizard able to run again. Two finishes never run at once (the
-/// second is told an install is in progress); once one succeeds, the wizard remembers `home` and
-/// `database` and refuses every later form.
+/// Installs on the database at `url`: checks `.env` is absent, runs the panel and core
+/// migrations, stores `options`, and writes `.env` with the URL and a new secret key. `.env` is
+/// written last, so a failure before it leaves the wizard able to run again. Two finishes never
+/// run at once (the second is told an install is in progress); once one succeeds, the wizard
+/// remembers `home` and `database` and refuses every later form.
 async fn finish(
     wizard: &Wizard,
     url: &str,
@@ -1126,7 +1126,7 @@ async fn finish(
              saved.",
         )
     })?;
-    let result = install_database(&db, options).await;
+    let result = install_database(&db, url, options).await;
     db.close().await;
     result?;
 
@@ -1159,8 +1159,14 @@ fn env_exists(path: &Path) -> Refusal {
     }
 }
 
-/// Runs the core migrations and stores `options` on `db`, unless it already holds a site.
-async fn install_database(db: &Database, options: &[(&str, Value)]) -> Result<(), Refusal> {
+/// Runs the panel and core migrations on the database at `url` (each on its own connection, see
+/// [`run_migrations`]) and stores `options` on `db`, its connection, unless it already holds a
+/// site.
+async fn install_database(
+    db: &Database,
+    url: &str,
+    options: &[(&str, Value)],
+) -> Result<(), Refusal> {
     if holds_a_site(db).await {
         return Err(Refusal {
             status: Status::Conflict,
@@ -1169,23 +1175,27 @@ async fn install_database(db: &Database, options: &[(&str, Value)]) -> Result<()
             retry: false,
         });
     }
-    let migrations = match migrator() {
-        Ok(migrations) => migrations,
-        Err(e) => {
-            log::error!("The core migrations are not valid: {e}");
+    match run_migrations(url).await {
+        Ok(summary) => log::info!(
+            "The installer ran {} panel and {} core migrations.",
+            summary.panel.len(),
+            summary.core.len()
+        ),
+        Err(e @ (InstallError::CoreInvalid(_) | InstallError::VersionCollision(_))) => {
+            log::error!("The installer did not run the migrations: {e}");
             return Err(Refusal::failed(
                 "Mission Control's database migrations are not valid, so nothing was changed. \
                  Check the log.",
             ));
         }
-    };
-    if let Err(e) = migrations.run(db).await {
-        log::error!("The installer could not run the migrations: {e}");
-        return Err(Refusal::failed(
-            "Mission Control could not create its tables in the database. Nothing was written \
-             to .env, so you can fix the problem (the log has the details) and submit the form \
-             again.",
-        ));
+        Err(e) => {
+            log::error!("The installer could not run the migrations: {e}");
+            return Err(Refusal::failed(
+                "Mission Control could not create its tables in the database. Nothing was \
+                 written to .env, so you can fix the problem (the log has the details) and \
+                 submit the form again.",
+            ));
+        }
     }
     for (name, value) in options {
         if let Err(e) = set_option(db, name, value).await {

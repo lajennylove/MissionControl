@@ -12,7 +12,7 @@ use orbit_orm::schema;
 /// up by hook.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000200_create_scheduled_events_table",
+        "20261114120200_create_scheduled_events_table",
         vec![schema::create("scheduled_events", |t| {
             t.id();
             t.string("hook").length(191);

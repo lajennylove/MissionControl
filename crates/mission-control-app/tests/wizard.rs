@@ -3,7 +3,9 @@
 //! forms without the token.
 //!
 //! The full run uses SQLite, the wizard's default. When `MC_TEST_DATABASE_URL` names a MySQL,
-//! MariaDB or PostgreSQL server, the server test also runs the wizard against it. The wrong
+//! MariaDB or PostgreSQL server, the server test also runs the wizard against a new database of
+//! its own on that server ([`scratch_database`]): the finish runs Ignite's panel migrations, which
+//! must not run in the shared test database. The wrong
 //! password test uses the MariaDB test server on 127.0.0.1:3398 with a user that does not exist;
 //! when that server is not running, the connection is refused, which the step reports the same
 //! way.
@@ -12,9 +14,7 @@ use mission_control_app::install::wizard::{SQLITE_FILE_NAME, TOKEN_FIELD};
 use mission_control_app::restart::RestartHandle;
 use mission_control_app::setup::{INSTALL_PATH, Mode, setup_rocket_with_restart};
 use mission_control_core::content::get_option;
-use mission_control_testing::{
-    CORE_TABLES, DATABASE_URL_VAR, create_users_table, database, table_exists,
-};
+use mission_control_testing::{CORE_TABLES, scratch_database, table_exists};
 use orbit_orm::Database;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use rocket::http::uri::Host;
@@ -270,9 +270,7 @@ async fn full_run_on_sqlite_installs_and_restarts() {
     let db = Database::connect(&config.database_url)
         .await
         .expect("opens the installed database");
-    for table in CORE_TABLES {
-        assert!(table_exists(&db, table).await, "{table}");
-    }
+    check_tables(&db).await;
     check_options(&db, "http://example.test:8080").await;
     db.close().await;
 
@@ -313,6 +311,16 @@ async fn a_new_database_choice_refuses_the_older_site_form() {
     let response = finish(&client, &token, &current, "example.test").await;
     assert_eq!(response.status(), Status::Ok);
     assert!(handle.requested());
+}
+
+/// The tables of an installed site: the panel's (Ignite's `users` and roles) and the core ones.
+async fn check_tables(db: &Database) {
+    for table in ["users", "roles", "permissions", "role_user", "sessions"]
+        .iter()
+        .chain(CORE_TABLES)
+    {
+        assert!(table_exists(db, table).await, "{table}");
+    }
 }
 
 /// The options WordPress's installer stores, as the full runs set them.
@@ -547,18 +555,13 @@ fn parse_server_url(url: &str) -> Option<ServerUrl> {
 
 #[rocket::async_test]
 async fn full_run_on_the_test_server() {
-    let Some(server) = std::env::var(DATABASE_URL_VAR)
-        .ok()
-        .as_deref()
-        .and_then(parse_server_url)
-    else {
+    // A new, empty database on the test server: no `users` table, stand-in or other. The finish
+    // creates it with the panel's migrations.
+    let scratch = scratch_database("wizard").await;
+    if !scratch.is_server() {
         return; // SQLite: covered by the full run above.
-    };
-    // Locks the shared database and drops what earlier tests left. Ignite owns `users`, which
-    // the core tables reference; its creation is the deferred Task 11.4, so the stand-in is
-    // used here.
-    let test_db = database().await;
-    create_users_table(test_db.db()).await;
+    }
+    let server = parse_server_url(scratch.url()).expect("a server URL");
 
     let (dir, handle, client) = wizard().await;
     let token = first_token(&client).await;
@@ -607,5 +610,8 @@ async fn full_run_on_the_test_server() {
             .database_url
             .starts_with(&format!("{}://", server.driver))
     );
-    check_options(test_db.db(), "http://site.example").await;
+    let db = Database::connect(scratch.url()).await.expect("connects");
+    check_tables(&db).await;
+    check_options(&db, "http://site.example").await;
+    db.close().await;
 }

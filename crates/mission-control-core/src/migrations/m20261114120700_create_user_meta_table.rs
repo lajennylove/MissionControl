@@ -12,7 +12,7 @@ use orbit_orm::schema::{self, Action};
 /// indexes both. Deleting the user deletes its rows.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000700_create_user_meta_table",
+        "20261114120700_create_user_meta_table",
         vec![schema::create("user_meta", |t| {
             t.id();
             t.big_integer("user_id");

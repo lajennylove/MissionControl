@@ -20,7 +20,7 @@ use orbit_orm::schema::{self, Action};
 /// `type_status_date`, `post_parent` and `post_author`.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000100_create_posts_table",
+        "20261114120100_create_posts_table",
         vec![schema::create("posts", |t| {
             t.id();
             t.big_integer("author_id");

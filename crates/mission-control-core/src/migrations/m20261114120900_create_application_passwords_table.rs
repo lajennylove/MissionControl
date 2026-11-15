@@ -13,7 +13,7 @@ use orbit_orm::schema::{self, Action};
 /// compared without case as WordPress compares them, so the check is in code, not an index.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000900_create_application_passwords_table",
+        "20261114120900_create_application_passwords_table",
         vec![schema::create("application_passwords", |t| {
             t.id();
             t.string("uuid").length(36);

@@ -9,7 +9,7 @@ use orbit_orm::schema::{self, Action};
 /// no `id`. `term_order` defaults to 0. Deleting a post or a term deletes its rows.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000500_create_term_relationships_table",
+        "20261114120500_create_term_relationships_table",
         vec![schema::create("term_relationships", |t| {
             t.big_integer("object_id");
             t.big_integer("term_taxonomy_id");

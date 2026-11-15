@@ -18,7 +18,7 @@ use orbit_orm::schema::{self, Action};
 /// both are wrong for WordPress. Deleting a term deletes its `term_taxonomy` rows.
 pub(super) fn migration() -> Migration {
     Migration::schema(
-        "20261114000400_create_term_taxonomy_table",
+        "20261114120400_create_term_taxonomy_table",
         vec![schema::create("term_taxonomy", |t| {
             t.id();
             t.big_integer("term_id");

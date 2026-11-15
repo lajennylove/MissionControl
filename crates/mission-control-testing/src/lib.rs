@@ -188,6 +188,146 @@ pub async fn create_users_table(db: &Database) {
     }
 }
 
+/// A database of its own for one test, for migrations these helpers do not own, such as
+/// Ignite's panel migrations: they create `users`, `roles`, `sessions` and more, and alter
+/// `users`, so they must not run in the shared test database, where the stand-in `users` table
+/// (see [`create_users_table`]) and other suites' tables are.
+///
+/// On a server (`MC_TEST_DATABASE_URL` names MySQL, MariaDB or PostgreSQL) it is a new database
+/// on the same server, named `test_mc_<label>_<process id>_<n>` (the `test_` prefix is the one
+/// the MariaDB test server lets every user create), dropped when this value is dropped, even
+/// when the test panics. Otherwise it is a new SQLite file in its own temporary folder. A run
+/// that is killed leaves its server database behind; the next run in a process with the same
+/// id drops it first.
+pub struct ScratchDatabase {
+    url: String,
+    name: String,
+    /// The server database: the shared test database's URL, which the drop connects to.
+    server: Option<(String, Driver)>,
+    _dir: Option<TempDir>,
+}
+
+impl ScratchDatabase {
+    /// The database's URL, which holds no password unless `MC_TEST_DATABASE_URL` does.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The database's name on the server, or the SQLite file's path.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether this is a server database rather than a SQLite file.
+    pub fn is_server(&self) -> bool {
+        self.server.is_some()
+    }
+}
+
+impl Drop for ScratchDatabase {
+    fn drop(&mut self) {
+        let Some((admin_url, driver)) = self.server.take() else {
+            return;
+        };
+        let name = self.name.clone();
+        // A runtime of its own on another thread: drop runs inside the test's runtime, which
+        // cannot be blocked on.
+        let dropped = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("builds a runtime")
+                .block_on(drop_server_database(&admin_url, driver, &name))
+        })
+        .join();
+        if !matches!(dropped, Ok(Ok(()))) && !std::thread::panicking() {
+            panic!("drops the scratch database {}", self.name);
+        }
+    }
+}
+
+/// Opens a [`ScratchDatabase`] named after `label` (lowercase letters, digits and `_`).
+///
+/// # Panics
+///
+/// Panics when the server cannot be reached or the database cannot be created.
+pub async fn scratch_database(label: &str) -> ScratchDatabase {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let url = std::env::var(DATABASE_URL_VAR).unwrap_or_default();
+    let server = match url.split_once("://") {
+        Some(("mysql" | "mariadb", _)) => Some(Driver::MySql),
+        Some(("postgres" | "postgresql", _)) => Some(Driver::Postgres),
+        _ => None,
+    };
+    let Some(driver) = server else {
+        let dir = tempfile::tempdir().expect("creates a temporary folder");
+        let path = dir.path().join("scratch.db");
+        return ScratchDatabase {
+            url: format!("sqlite://{}?mode=rwc", path.display()),
+            name: path.display().to_string(),
+            server: None,
+            _dir: Some(dir),
+        };
+    };
+    let name = format!(
+        "test_mc_{label}_{}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    assert!(
+        name.len() <= 63
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+        "a scratch database name of lowercase letters, digits and _, at most 63 bytes: {name}"
+    );
+    drop_server_database(&url, driver, &name)
+        .await
+        .unwrap_or_else(|e| panic!("drops an earlier scratch database {name}: {e}"));
+    let db = Database::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("connects to {DATABASE_URL_VAR}: {e}"));
+    raw::execute(&db, &format!("CREATE DATABASE {name}"), &[])
+        .await
+        .unwrap_or_else(|e| panic!("creates the scratch database {name}: {e}"));
+    db.close().await;
+    ScratchDatabase {
+        url: with_database_name(&url, &name),
+        name,
+        server: Some((url, driver)),
+        _dir: None,
+    }
+}
+
+/// Drops the server database `name`, if it exists, through a connection to `admin_url`.
+/// PostgreSQL's `WITH (FORCE)` ends the connections a failed test left open.
+async fn drop_server_database(
+    admin_url: &str,
+    driver: Driver,
+    name: &str,
+) -> Result<(), orbit_orm::Error> {
+    let db = Database::connect(admin_url).await?;
+    let sql = match driver {
+        Driver::Postgres => format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
+        _ => format!("DROP DATABASE IF EXISTS {name}"),
+    };
+    let result = raw::execute(&db, &sql, &[]).await.map(|_| ());
+    db.close().await;
+    result
+}
+
+/// `url` with its database name (the path after the host) replaced by `name`, keeping the
+/// query string.
+fn with_database_name(url: &str, name: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let query = path.split_once('?').map(|(_, q)| q);
+    match query {
+        Some(query) => format!("{scheme}://{authority}/{name}?{query}"),
+        None => format!("{scheme}://{authority}/{name}"),
+    }
+}
+
 /// An email address no other test run has used, such as `ann.4242.1731600000000000000.0@example.test`,
 /// for rows in the shared `users` table.
 pub fn unique_email(local: &str) -> String {
