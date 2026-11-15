@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The application configuration, the equivalent of `wp-config.php`.
 #[derive(Clone, PartialEq, Eq)]
@@ -23,6 +23,11 @@ pub struct Config {
     /// `wp-content/uploads`, and served at `/wp-content/uploads/`. Default `uploads`, relative to
     /// the working directory.
     pub uploads_dir: PathBuf,
+    /// The folder that holds the installed plugins, one folder per plugin named by its slug
+    /// (`MC_PLUGINS_DIR`), as WordPress's `wp-content/plugins`. Default `plugins`, relative to
+    /// the working directory. It is never served, so it may not be the uploads or themes folder,
+    /// lie inside one, or hold one (compared as absolute paths with `.` and `..` collapsed).
+    pub plugins_dir: PathBuf,
     /// The kind of environment the site runs in (`MC_ENV`), as WordPress's
     /// `wp_get_environment_type`. Default `production`.
     pub environment: Environment,
@@ -169,6 +174,7 @@ impl fmt::Debug for Config {
             .field("upload_max_bytes", &self.upload_max_bytes)
             .field("themes_dir", &self.themes_dir)
             .field("uploads_dir", &self.uploads_dir)
+            .field("plugins_dir", &self.plugins_dir)
             .field("environment", &self.environment)
             .field("trusted_proxies", &self.trusted_proxies)
             .finish()
@@ -230,13 +236,14 @@ pub fn load() -> Result<Config, ConfigError> {
 }
 
 /// The variables [`load_from`] reads.
-pub const VARIABLES: [&str; 8] = [
+pub const VARIABLES: [&str; 9] = [
     "DATABASE_URL",
     "IGNITE_SECRET_KEY",
     "MC_DEBUG",
     "MC_UPLOAD_MAX_BYTES",
     "MC_THEMES_DIR",
     "MC_UPLOADS_DIR",
+    "MC_PLUGINS_DIR",
     "MC_ENV",
     "MC_TRUSTED_PROXIES",
 ];
@@ -324,6 +331,24 @@ pub fn load_from(
         }
         Some(value) => PathBuf::from(value),
     };
+    let plugins_dir = match get("MC_PLUGINS_DIR") {
+        None => PathBuf::from("plugins"),
+        Some(value) if value.trim().is_empty() => {
+            return Err(ConfigError::Invalid {
+                name: "MC_PLUGINS_DIR",
+                value,
+            });
+        }
+        Some(value) => PathBuf::from(value),
+    };
+    // Plugins are never served: their folder may not share the public uploads folder, nor the
+    // themes folder, whose assets are served.
+    if overlaps(&plugins_dir, &uploads_dir) || overlaps(&plugins_dir, &themes_dir) {
+        return Err(ConfigError::Invalid {
+            name: "MC_PLUGINS_DIR",
+            value: plugins_dir.to_string_lossy().into_owned(),
+        });
+    }
     let environment = match get("MC_ENV") {
         None => Environment::Production,
         Some(value) => Environment::parse(&value).ok_or(ConfigError::Invalid {
@@ -346,9 +371,43 @@ pub fn load_from(
         upload_max_bytes,
         themes_dir,
         uploads_dir,
+        plugins_dir,
         environment,
         trusted_proxies,
     })
+}
+
+/// Whether one of two folders is the other or lies inside it, compared as absolute paths
+/// normalized by their text: a relative path is taken from the working directory, and `.` and
+/// `..` are collapsed (links are not resolved).
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let (a, b) = (normalized(a), normalized(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// `path` made absolute against the working directory (when it can be read) and with `.` and
+/// `..` collapsed, by its text.
+fn normalized(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|dir| dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut out = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(part);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Reads the variables of a `.env` file. A missing file is empty; an unreadable or unparseable

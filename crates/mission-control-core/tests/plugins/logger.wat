@@ -1,7 +1,7 @@
 ;; A sample plugin built from `wit/mission-control.wit`, written in the component model's text
 ;; format (Ruling R99). No permission.
 ;;
-;; Its `activate` logs "spam" forever: the log budget of a call drops the lines past it, and
+;; Its `init` logs "spam" forever: the log budget of a call drops the lines past it, and
 ;; the fuel each log call costs stops it.
 (component
   (type $logging-type (instance
@@ -47,7 +47,7 @@
     ;; 16: the message (4 bytes).
     (data (i32.const 16) "spam")
 
-    (func (export "activate") (result i32)
+    (func (export "init") (result i32)
       (loop $forever
         ;; Level 2 is `info`.
         (call $log (i32.const 2) (i32.const 16) (i32.const 4))
@@ -60,21 +60,36 @@
 
     (func (export "apply-filter") (param i32 i32 i32 i32 i32 i32) (result i32)
       unreachable)
+
+    ;; Ruling R105: `activate` and `deactivate` do nothing; 8: where they write their result.
+    (func (export "activate") (result i32)
+      (i32.store8 (i32.const 8) (i32.const 0))
+      (i32.const 8))
+
+    (func (export "deactivate") (result i32)
+      (i32.store8 (i32.const 8) (i32.const 0))
+      (i32.const 8))
   )
   (core instance $main (instantiate $main
     (with "libc" (instance $libc))
     (with "logging" (instance (export "log" (func $log))))
   ))
 
+  (func $init (result (result (error string)))
+    (canon lift (core func $main "init") (memory $mem) (realloc $realloc)))
   (func $activate (result (result (error string)))
     (canon lift (core func $main "activate") (memory $mem) (realloc $realloc)))
+  (func $deactivate (result (result (error string)))
+    (canon lift (core func $main "deactivate") (memory $mem) (realloc $realloc)))
   (func $on-action (param "name" string) (param "payload-json" string) (result (result (error string)))
     (canon lift (core func $main "on-action") (memory $mem) (realloc $realloc)))
   (func $apply-filter (param "name" string) (param "value-json" string) (param "args-json" string)
     (result (result string (error string)))
     (canon lift (core func $main "apply-filter") (memory $mem) (realloc $realloc)))
   (instance $handler
+    (export "init" (func $init))
     (export "activate" (func $activate))
+    (export "deactivate" (func $deactivate))
     (export "on-action" (func $on-action))
     (export "apply-filter" (func $apply-filter))
   )

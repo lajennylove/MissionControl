@@ -1,7 +1,7 @@
 ;; A sample plugin built from `wit/mission-control.wit`, written in the component model's text
 ;; format (Ruling R99). Permission: `hooks`.
 ;;
-;; On activation it subscribes to the action `mc_test_deep`; its handler then calls itself
+;; On init it subscribes to the action `mc_test_deep`; its handler then calls itself
 ;; without end, as a plugin with a recursion bug does, until the stack overflows.
 (component
   (type $hooks-type (instance
@@ -49,7 +49,7 @@
     (func $recurse (param $depth i32) (result i32)
       (i32.add (call $recurse (i32.add (local.get $depth) (i32.const 1))) (i32.const 1)))
 
-    (func (export "activate") (result i32)
+    (func (export "init") (result i32)
       (call $add-action (i32.const 16) (i32.const 12) (i32.const 10) (i32.const 256))
       (i32.const 256))
 
@@ -59,21 +59,36 @@
 
     (func (export "apply-filter") (param i32 i32 i32 i32 i32 i32) (result i32)
       unreachable)
+
+    ;; Ruling R105: `activate` and `deactivate` do nothing; 8: where they write their result.
+    (func (export "activate") (result i32)
+      (i32.store8 (i32.const 8) (i32.const 0))
+      (i32.const 8))
+
+    (func (export "deactivate") (result i32)
+      (i32.store8 (i32.const 8) (i32.const 0))
+      (i32.const 8))
   )
   (core instance $main (instantiate $main
     (with "libc" (instance $libc))
     (with "hooks" (instance (export "add-action" (func $add-action))))
   ))
 
+  (func $init (result (result (error string)))
+    (canon lift (core func $main "init") (memory $mem) (realloc $realloc)))
   (func $activate (result (result (error string)))
     (canon lift (core func $main "activate") (memory $mem) (realloc $realloc)))
+  (func $deactivate (result (result (error string)))
+    (canon lift (core func $main "deactivate") (memory $mem) (realloc $realloc)))
   (func $on-action (param "name" string) (param "payload-json" string) (result (result (error string)))
     (canon lift (core func $main "on-action") (memory $mem) (realloc $realloc)))
   (func $apply-filter (param "name" string) (param "value-json" string) (param "args-json" string)
     (result (result string (error string)))
     (canon lift (core func $main "apply-filter") (memory $mem) (realloc $realloc)))
   (instance $handler
+    (export "init" (func $init))
     (export "activate" (func $activate))
+    (export "deactivate" (func $deactivate))
     (export "on-action" (func $on-action))
     (export "apply-filter" (func $apply-filter))
   )

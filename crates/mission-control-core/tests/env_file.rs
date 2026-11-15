@@ -15,6 +15,7 @@ fn tricky() -> EnvFile {
     env.upload_max_bytes = Some(1234);
     env.themes_dir = Some(PathBuf::from("my themes/#1 'x' \"y\" $Z"));
     env.uploads_dir = Some(PathBuf::from("up loads"));
+    env.plugins_dir = Some(PathBuf::from("plug ins/'x'"));
     env.environment = Some(Environment::Staging);
     env.trusted_proxies = Some(TrustedProxies::Addresses(vec![
         "127.0.0.1".parse().unwrap(),
@@ -58,6 +59,7 @@ fn file_round_trips_through_config() {
     assert_eq!(config.upload_max_bytes, 1234);
     assert_eq!(Some(config.themes_dir), env.themes_dir);
     assert_eq!(Some(config.uploads_dir), env.uploads_dir);
+    assert_eq!(Some(config.plugins_dir), env.plugins_dir);
     assert_eq!(Some(config.environment), env.environment);
     assert_eq!(Some(config.trusted_proxies), env.trusted_proxies);
 }

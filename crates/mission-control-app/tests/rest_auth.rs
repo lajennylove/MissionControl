@@ -122,6 +122,7 @@ fn config(environment: Environment, trusted_proxies: TrustedProxies) -> Config {
             .join("../../themes")
             .to_path_buf(),
         uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
+        plugins_dir: std::env::temp_dir().join("mc-unused-plugins"),
         environment,
         trusted_proxies,
     }

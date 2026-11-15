@@ -72,6 +72,10 @@ uuid = { version = "1", features = ["v4"] }
 # `wit/` (Apache-2.0 WITH LLVM-exception; Ruling R98). Only the component model, the Cranelift
 # compiler and the runtime: no async, no WAT text, no cache, no profiling.
 wasmtime = { version = "50.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+# Reads plugin zips on install (MIT). Only stored and deflated entries, inflated by flate2 with
+# its zlib-rs backend, both already in the lock: no bzip2, deflate64, lzma, xz, zstd, ppmd, AES or
+# time. The tests write their zips with it too.
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Zeroes plain application passwords and their random bytes when dropped (Apache-2.0 OR MIT).
 zeroize = "1"
 

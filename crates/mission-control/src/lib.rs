@@ -20,6 +20,13 @@
 //! ([`Registry::load_from_db`]) and served; when their tables cannot be read (a database
 //! installed before them), the error is logged and the site starts without them.
 //!
+//! Then the installed plugins in the plugins folder (`MC_PLUGINS_DIR`, default `plugins`) that
+//! the `active_plugins` option lists are loaded and started ([`Plugins::boot`]), after the
+//! stored definitions so a plugin's types override the admin's; a plugin that fails is
+//! deactivated with a notice for the owner, and the site starts anyway. A missing plugins folder
+//! means no plugins. A task writes the failures of plugins at run time
+//! ([`Plugins::spawn_recovery`]).
+//!
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
 //! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
@@ -29,7 +36,7 @@
 //! REST API reads and writes (`Arc<Settings>`, WordPress's core settings at start), the kses
 //! limiter (`Arc<KsesLimiter>`), the uploads' storage (`Arc<dyn Storage>`, on the local disk in
 //! the uploads folder, `MC_UPLOADS_DIR`), the image size registry (`Arc<ImageSizes>`, WordPress's
-//! default sizes) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
+//! default sizes), the plugins (`Arc<Plugins>`) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
 //! once the server listens, and runs due events every minute.
 //!
 //! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, posts, pages and every
@@ -58,6 +65,7 @@ use mission_control_core::content::{Shortcodes, register_publish_future_post};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
 use mission_control_core::media::{ImageSizes, LocalStorage, Storage};
+use mission_control_core::plugins::{PluginLimits, Plugins};
 use mission_control_core::rest::meta::MetaKeys;
 use mission_control_core::rest::posts::PostTypes;
 use mission_control_core::rest::settings::Settings;
@@ -222,6 +230,12 @@ impl Types {
                 return;
             }
         }
+        self.register_routes();
+    }
+
+    /// Lists the routes of every registered post type and taxonomy in discovery: after the
+    /// stored definitions load, and again after the plugins have registered theirs.
+    fn register_routes(&self) {
         let (post_types, taxonomies) = (self.registry.post_types(), self.registry.taxonomies());
         post_types.register_routes(&self.rest_routes);
         taxonomies.register_routes(&self.rest_routes);
@@ -257,6 +271,30 @@ async fn ignite(
         },
     };
     types.load(&db).await;
+    let plugins = match Plugins::new(
+        Arc::clone(&hooks),
+        Arc::clone(&db),
+        Arc::clone(&types.registry),
+        &config.plugins_dir,
+        PluginLimits::default(),
+    ) {
+        Ok(plugins) => Arc::new(plugins),
+        Err(e) => {
+            log::error!("The plugin host could not start: {e}");
+            return Err(rocket);
+        }
+    };
+    match plugins.boot().await {
+        Ok(failed) => {
+            for (slug, e) in failed {
+                log::error!("The plugin `{slug}` was deactivated at start: {e}");
+            }
+        }
+        Err(e) => log::error!("The plugins did not all start: {e}"),
+    }
+    // Plugins register post types and taxonomies in `init`, so discovery lists them too.
+    types.register_routes();
+    plugins.spawn_recovery();
     let theme = match load_active_theme(&db, &config.themes_dir).await {
         Ok(theme) => theme,
         Err(e) => {
@@ -284,5 +322,6 @@ async fn ignite(
     Ok(rocket
         .manage(db)
         .manage(scheduler)
+        .manage(plugins)
         .manage(Arc::new(frontend)))
 }

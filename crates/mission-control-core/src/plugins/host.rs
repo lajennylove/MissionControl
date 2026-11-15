@@ -4,7 +4,8 @@
 //! ```ignore
 //! let host = PluginHost::new(Arc::clone(&hooks), Arc::clone(&db))?;
 //! let plugin = host.load(manifest, &wasm)?;      // checks the imports against the manifest
-//! with_current_user(owner, || plugin.activate())?; // the plugin subscribes to hooks here
+//! plugin.init()?;                                 // the plugin subscribes to hooks here
+//! with_current_user(owner, || plugin.activate())?; // once, when the owner activates it
 //! with_current_user(editor, || hooks.do_action(SAVE_POST, &post.id)); // reaches the plugin
 //! plugin.remove_hooks();                          // on deactivation
 //! ```
@@ -28,12 +29,18 @@
 //! priority order among the other callbacks. A
 //! callback holds the plugin weakly: once the plugin is dropped, its callbacks do nothing.
 //!
-//! A plugin subscribes in its `activate` and only there; WordPress plugins may add hooks at any
-//! time, but here a subscription made later is refused, so that [`Plugin::remove_hooks`]
+//! A plugin's handler has three lifecycle exports (Ruling R105, WordPress's split):
+//! `init` ([`Plugin::init`]) runs on every load, at every start, with no user acting, as
+//! WordPress includes a plugin's main file; `activate` ([`Plugin::activate`]) and `deactivate`
+//! ([`Plugin::deactivate`]) run once when the owner activates or deactivates the plugin, with
+//! that user acting, as `register_activation_hook` and `register_deactivation_hook`.
+//!
+//! A plugin subscribes in its `init` and only there; WordPress plugins may add hooks at any
+//! time, but here a subscription made elsewhere is refused, so that [`Plugin::remove_hooks`]
 //! (Task 12.4's deactivation) removes everything the plugin added and a deactivated plugin
-//! cannot come back. A deactivated plugin is never called again. An activation that fails
-//! (the plugin refuses, or traps) deactivates it and removes what it subscribed before failing.
-//! A plugin is activated once per load. A host loads one plugin per slug at a time
+//! cannot come back. A deactivated plugin is never called again. An `init` or `activate` that
+//! fails (the plugin refuses, or traps) deactivates it and removes what it subscribed before
+//! failing. A load runs `init` once and `activate` at most once. A host loads one plugin per slug at a time
 //! ([`HostError::AlreadyLoaded`]); [`Hooks::remove_plugin`] removes every load's callbacks of a
 //! slug.
 //!
@@ -81,12 +88,22 @@
 //!
 //! A plugin that traps (or fails in a call for any other reason wasmtime reports, runs out of
 //! fuel, needs more memory than its limit, or during whose call the host panics) is marked
-//! [`Plugin::trapped`], its hooks are removed and it is not called again, as WordPress's
-//! recovery mode pauses a plugin that fails. The error is logged at `error` level and kept as
-//! [`Plugin::failure`]: that is where Task 12.4 reads why the plugin stopped, to deactivate it
-//! and tell the owner (its notice store). The call that failed returns: an activation returns
+//! [`Plugin::trapped`], its hooks and the types it registered are removed and it is not called
+//! again, as WordPress's recovery mode pauses a plugin that fails. The error is logged at
+//! `error` level, kept as [`Plugin::failure`] and handed to the host's failure handler
+//! ([`PluginHost::on_failure`]), through which [`Plugins`](super::Plugins) deactivates the
+//! plugin and tells the owner (Task 12.4). The call that failed returns: an activation returns
 //! the error, an action ends, and a filter keeps the value it was given, so the site goes on
 //! serving.
+//!
+//! # Types
+//!
+//! A plugin with the `register-types` permission registers post types, taxonomies and field
+//! groups through the `types` interface, in its `init` only, as for hooks, on the registry
+//! given to [`PluginHost::with_registry`], each with [`Origin::Plugin`] and its slug (at most
+//! [`MAX_TYPE_DEFINITIONS`]). It may not take a slug or key the site's code or another plugin
+//! registered ([`Registry::register_exclusive`]). Deactivating or stopping the plugin removes
+//! them ([`Registry::remove_plugin`]), once per load.
 //!
 //! # Limits
 //!
@@ -94,7 +111,7 @@
 //! [`PluginLimits`]:
 //!
 //! - **Fuel.** wasmtime counts the plugin's WebAssembly instructions (about one unit each).
-//!   Every call into the plugin (`activate`, `on-action`, `apply-filter`, and any export added
+//!   Every call into the plugin (`init`, `activate`, `deactivate`, `on-action`, `apply-filter`, and any export added
 //!   later, since all go through one call wrapper), and its instantiation, starts with a fresh
 //!   [`PluginLimits::fuel_per_call`]; a call that uses it all traps and fails with
 //!   [`HostError::OutOfFuel`]. Fuel counts only the plugin's own code: the time spent in host
@@ -158,6 +175,7 @@ use wasmtime::{Config, Engine, ResourceLimiter, Store, StoreContextMut, Trap};
 use super::content::{self, ContentError};
 use super::manifest::{HOST_API_VERSION, Manifest, Permission};
 use crate::hooks::{Hooks, Owner};
+use crate::types::{FieldGroupDef, Origin, PostTypeDef, Registry, TaxonomyDef};
 use crate::users::UserCaps;
 
 /// The bindings `wasmtime` generates from the WIT world `plugin`.
@@ -168,17 +186,20 @@ mod bindings {
     });
 }
 
-use bindings::mission_control::plugin::{content_read, content_write, hooks as wit_hooks, logging};
+use bindings::mission_control::plugin::{
+    content_read, content_write, hooks as wit_hooks, logging, types as wit_types,
+};
 
 /// The WIT package of the plugin API, without its version ([`HOST_API_VERSION`]).
 pub const PACKAGE: &str = "mission-control:plugin";
 
 /// The interfaces a plugin may import, with the permission each needs; `None` is always linked.
-pub const INTERFACES: [(&str, Option<Permission>); 4] = [
+pub const INTERFACES: [(&str, Option<Permission>); 5] = [
     ("logging", None),
     ("hooks", Some(Permission::Hooks)),
     ("content-read", Some(Permission::ReadContent)),
     ("content-write", Some(Permission::WriteContent)),
+    ("types", Some(Permission::RegisterTypes)),
 ];
 
 /// The largest component accepted, in bytes (32 MiB).
@@ -189,12 +210,15 @@ pub const MAX_HOOK_NAME_BYTES: usize = 128;
 
 /// The most subscriptions one plugin may make. Each subscription is a host call, charged
 /// [`PluginLimits::fuel_per_host_call`], so it stays below the about 1,000 host calls the
-/// default fuel allows in one `activate`.
+/// default fuel allows in one `init`.
 pub const MAX_SUBSCRIPTIONS: usize = 512;
 
 /// The largest hook payload or filter value passed to a plugin, and taken back from it, in
 /// bytes of JSON (4 MiB).
 pub const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most post types, taxonomies and field groups one plugin may register, together.
+pub const MAX_TYPE_DEFINITIONS: usize = 256;
 
 /// The longest log message a plugin may write, in characters; a longer one is cut.
 pub const MAX_LOG_MESSAGE_CHARS: usize = 4096;
@@ -460,8 +484,12 @@ pub enum HostError {
     /// The component could not be instantiated: it lacks the `handler` export, an import has
     /// the wrong type, or its start trapped.
     Instantiate(String),
+    /// The plugin's `init` refused, with its message: it does not start.
+    Init(String),
     /// The plugin's `activate` refused, with its message.
     Activation(String),
+    /// The plugin's `deactivate` failed, with its message; it is deactivated anyway.
+    Deactivation(String),
     /// The plugin trapped or failed in a call, or had trapped before.
     Trap(String),
     /// The plugin used all the fuel of a call ([`PluginLimits::fuel_per_call`]): it ran too
@@ -476,6 +504,10 @@ pub enum HostError {
     OutOfMemory(String),
     /// The plugin was deactivated ([`Plugin::remove_hooks`]); load it again to activate it.
     Deactivated,
+    /// The plugin was initialized before: a load runs `init` once.
+    AlreadyInitialized,
+    /// [`Plugin::activate`] was called before [`Plugin::init`].
+    NotInitialized,
     /// The plugin was activated before: a load is activated once.
     AlreadyActivated,
     /// A plugin with this slug is already loaded in this host, and neither deactivated nor
@@ -503,7 +535,9 @@ impl fmt::Display for HostError {
                  its manifest does not ask for it"
             ),
             Self::Instantiate(e) => write!(f, "the plugin could not be started: {e}"),
+            Self::Init(e) => write!(f, "the plugin refused to start: {e}"),
             Self::Activation(e) => write!(f, "the plugin refused to activate: {e}"),
+            Self::Deactivation(e) => write!(f, "the plugin's deactivation failed: {e}"),
             Self::Trap(e) => write!(f, "the plugin failed: {e}"),
             Self::OutOfFuel { fuel } => write!(
                 f,
@@ -514,6 +548,8 @@ impl fmt::Display for HostError {
             Self::Deactivated => {
                 f.write_str("the plugin is deactivated; load it again to activate it")
             }
+            Self::AlreadyInitialized => f.write_str("the plugin is already started"),
+            Self::NotInitialized => f.write_str("the plugin was not started before activation"),
             Self::AlreadyActivated => f.write_str("the plugin is already activated"),
             Self::AlreadyLoaded { slug } => {
                 write!(f, "a plugin with the slug `{slug}` is already loaded")
@@ -568,7 +604,14 @@ pub struct PluginHost {
     loaded: Mutex<HashMap<String, Weak<Plugin>>>,
     /// The number of the next load, for its hook owner.
     next_load: AtomicU64,
+    /// Where the plugins' `types` imports register, if the site has a type registry.
+    registry: Option<Arc<Registry>>,
+    /// Told when a plugin fails and is stopped.
+    on_failure: Option<FailureHandler>,
 }
+
+/// What [`PluginHost::on_failure`] calls when a plugin fails and is stopped: the plugin, and why.
+type FailureHandler = Arc<dyn Fn(&Plugin, &HostError) + Send + Sync>;
 
 impl fmt::Debug for PluginHost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -628,7 +671,58 @@ impl PluginHost {
             runtime: Handle::try_current().ok(),
             loaded: Mutex::new(HashMap::new()),
             next_load: AtomicU64::new(0),
+            registry: None,
+            on_failure: None,
         })
+    }
+
+    /// The host with `registry` as where its plugins' `types` imports (permission
+    /// `register-types`) register post types, taxonomies and field groups, each with
+    /// [`Origin::Plugin`] and the plugin's slug. Without a registry, every registration fails.
+    /// A plugin's definitions are removed when it is deactivated ([`Plugin::remove_hooks`]) or
+    /// stopped after a failure.
+    #[must_use]
+    pub fn with_registry(mut self, registry: Arc<Registry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// The host with `handler` called each time one of its plugins fails and is stopped
+    /// ([`Plugin::trapped`]), with the plugin and its [`Plugin::failure`], after its hooks and
+    /// types are removed. Task 12.4's recovery records the failure there; the handler runs on
+    /// the thread that called the plugin, inside the call that failed, so it must not call the
+    /// plugin, block or wait on the database: it hands the failure on.
+    #[must_use]
+    pub fn on_failure(
+        mut self,
+        handler: impl Fn(&Plugin, &HostError) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_failure = Some(Arc::new(handler));
+        self
+    }
+
+    /// Compiles `wasm` and checks its imports against `manifest`, as [`PluginHost::load`] does,
+    /// without instantiating or loading it: for an install, to refuse a module that would not
+    /// load before its files are written.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Compile`], [`HostError::UnknownImport`] and
+    /// [`HostError::MissingPermission`], as [`PluginHost::load`].
+    pub fn check(&self, manifest: &Manifest, wasm: &[u8]) -> Result<(), HostError> {
+        let component = self.compile(wasm)?;
+        self.check_imports(manifest, &component)
+    }
+
+    /// Compiles `wasm`, a binary component of at most [`MAX_COMPONENT_BYTES`].
+    fn compile(&self, wasm: &[u8]) -> Result<Component, HostError> {
+        if wasm.len() > MAX_COMPONENT_BYTES {
+            return Err(HostError::Compile(format!(
+                "it is {} bytes; at most {MAX_COMPONENT_BYTES} are accepted",
+                wasm.len()
+            )));
+        }
+        Component::from_binary(&self.engine, wasm).map_err(|e| HostError::Compile(format!("{e:#}")))
     }
 
     /// The limits the host's plugins run within.
@@ -649,7 +743,7 @@ impl PluginHost {
     }
 
     /// Compiles `wasm`, a binary WebAssembly component, checks its imports against `manifest`
-    /// and instantiates it. The plugin is not activated: call [`Plugin::activate`].
+    /// and instantiates it. The plugin is not started: call [`Plugin::init`].
     ///
     /// Compiling takes CPU time (tens to hundreds of milliseconds); call it from a blocking
     /// thread in a server.
@@ -672,14 +766,7 @@ impl PluginHost {
         if Self::is_loaded(&self.loaded(), &manifest.slug) {
             return Err(already());
         }
-        if wasm.len() > MAX_COMPONENT_BYTES {
-            return Err(HostError::Compile(format!(
-                "it is {} bytes; at most {MAX_COMPONENT_BYTES} are accepted",
-                wasm.len()
-            )));
-        }
-        let component = Component::from_binary(&self.engine, wasm)
-            .map_err(|e| HostError::Compile(format!("{e:#}")))?;
+        let component = self.compile(wasm)?;
         self.check_imports(&manifest, &component)?;
         let linker = self.linker(&manifest)?;
         let owner = Owner::PluginLoad {
@@ -693,6 +780,7 @@ impl PluginHost {
             db: Arc::clone(&self.db),
             runtime: self.runtime.clone(),
             plugin: Weak::new(),
+            registry: self.registry.clone(),
             limits: self.limits,
             limiter: Limiter::new(self.limits),
             log: LogBudget::default(),
@@ -713,14 +801,19 @@ impl PluginHost {
             manifest,
             owner,
             hooks: Arc::clone(&self.hooks),
+            registry: self.registry.clone(),
+            on_failure: self.on_failure.clone(),
             instance: Mutex::new(Instance { store, bindings }),
             fuel_per_call: self.limits.fuel_per_call,
             trapped: AtomicBool::new(false),
             failure: Mutex::new(None),
             deactivated: AtomicBool::new(false),
+            initialized: AtomicBool::new(false),
+            initializing: AtomicBool::new(false),
             activated: AtomicBool::new(false),
-            activating: AtomicBool::new(false),
             subscriptions: AtomicUsize::new(0),
+            definitions: AtomicUsize::new(0),
+            released: AtomicBool::new(false),
         });
         plugin.lock().store.data_mut().plugin = Arc::downgrade(&plugin);
         loaded.insert(slug, Arc::downgrade(&plugin));
@@ -783,6 +876,9 @@ impl PluginHost {
         }
         if manifest.allows(Permission::WriteContent) {
             define("content-write", define_content_write)?;
+        }
+        if manifest.allows(Permission::RegisterTypes) {
+            define("types", define_types)?;
         }
         Ok(linker)
     }
@@ -902,6 +998,24 @@ fn define_content_write(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime
     )
 }
 
+/// The `types` interface's imports, charged.
+fn define_types(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime::Result<()> {
+    for (name, kind) in [
+        ("register-post-type", TypeKind::PostType),
+        ("register-taxonomy", TypeKind::Taxonomy),
+        ("register-field-group", TypeKind::FieldGroup),
+    ] {
+        imports.func_wrap(
+            name,
+            move |mut store: StoreContextMut<'_, HostState>, (json,): (String,)| {
+                charge(&mut store)?;
+                Ok((store.data_mut().register(kind, &json),))
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// For an import named `mission-control:plugin/<interface>@<version>`, with an interface of
 /// [`INTERFACES`] and a version this host serves, the permission it needs (`Some(None)` for
 /// none); `None` for any other import.
@@ -933,7 +1047,7 @@ fn shown(text: &str) -> String {
 
 /// `text` with control characters escaped (so a message stays on one log line), cut at `max`
 /// characters with `…` marking the cut.
-fn clean(text: &str, max: usize) -> String {
+pub(super) fn clean(text: &str, max: usize) -> String {
     let mut out = String::with_capacity(text.len().min(max));
     for (i, c) in text.chars().enumerate() {
         if i == max {
@@ -1118,6 +1232,10 @@ pub struct Plugin {
     manifest: Manifest,
     owner: Owner,
     hooks: Arc<Hooks>,
+    /// Where its types are registered, if the host has a registry.
+    registry: Option<Arc<Registry>>,
+    /// Told when the plugin fails and is stopped.
+    on_failure: Option<FailureHandler>,
     instance: Mutex<Instance>,
     /// The fuel each call starts with ([`PluginLimits::fuel_per_call`]).
     fuel_per_call: u64,
@@ -1125,11 +1243,18 @@ pub struct Plugin {
     /// Why the plugin was stopped, once it is.
     failure: Mutex<Option<HostError>>,
     deactivated: AtomicBool,
+    /// Set by the first `init`: a load is initialized once.
+    initialized: AtomicBool,
+    /// Set while `init` runs: the only time the plugin may subscribe or register types.
+    initializing: AtomicBool,
     /// Set by the first `activate`: a load is activated once.
     activated: AtomicBool,
-    /// Set while `activate` runs: the only time the plugin may subscribe.
-    activating: AtomicBool,
     subscriptions: AtomicUsize,
+    /// How many definitions it registered.
+    definitions: AtomicUsize,
+    /// Set once its hooks and types are removed for good (deactivated or stopped), so a later
+    /// call removes nothing a newer load of the slug added.
+    released: AtomicBool,
 }
 
 impl fmt::Debug for Plugin {
@@ -1165,6 +1290,15 @@ impl Plugin {
         &self.manifest.slug
     }
 
+    /// The number of this load of the plugin, unique in its host: two loads of one slug (after
+    /// a deactivation) have different numbers.
+    pub fn load_number(&self) -> u64 {
+        match &self.owner {
+            Owner::PluginLoad { load, .. } => *load,
+            _ => 0,
+        }
+    }
+
     /// Whether the plugin trapped (or failed in a call, or the host panicked in one): its hooks
     /// are removed and it is no longer called.
     pub fn trapped(&self) -> bool {
@@ -1186,19 +1320,96 @@ impl Plugin {
         self.deactivated.load(Ordering::SeqCst)
     }
 
-    /// Calls the plugin's `activate`, where it subscribes to hooks, with the user set by
-    /// [`with_current_user`] acting.
+    /// Calls the plugin's `init`, where it subscribes to hooks and registers types (Ruling
+    /// R105, WordPress's main plugin file): once per load, at every start and before
+    /// [`Plugin::activate`], with no user acting unless [`with_current_user`] sets one.
     ///
     /// # Errors
     ///
-    /// [`HostError::Activation`] when the plugin refuses, with its message;
+    /// [`HostError::Init`] when the plugin refuses, with its message;
     /// [`HostError::Trap`] when it traps or had trapped, or is already running a call on this
     /// thread, or too many plugin calls are nested ([`MAX_NESTED_PLUGIN_CALLS`]);
     /// [`HostError::OutOfFuel`] and [`HostError::OutOfMemory`] when it passes a limit;
     /// [`HostError::Deactivated`] when it was deactivated;
-    /// [`HostError::AlreadyActivated`] when it was activated before. Any failure deactivates
-    /// the plugin and removes the hooks it subscribed before failing.
+    /// [`HostError::AlreadyInitialized`] when it was initialized before. Any failure
+    /// deactivates the plugin and removes the hooks and types it added before failing.
+    pub fn init(&self) -> Result<(), HostError> {
+        self.check_usable()?;
+        if self.initialized.swap(true, Ordering::SeqCst) {
+            return Err(HostError::AlreadyInitialized);
+        }
+        let outcome = self.call(|instance| {
+            struct Window<'a>(&'a AtomicBool);
+            impl Drop for Window<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            self.initializing.store(true, Ordering::SeqCst);
+            let _window = Window(&self.initializing);
+            instance
+                .bindings
+                .mission_control_plugin_handler()
+                .call_init(&mut instance.store)
+        });
+        self.finish(outcome, HostError::Init)
+    }
+
+    /// Calls the plugin's `activate`, once, when the owner activates it (WordPress's
+    /// `register_activation_hook`), with the user set by [`with_current_user`] acting. It must
+    /// follow [`Plugin::init`]; the plugin may not subscribe or register types here.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Activation`] when the plugin refuses, with its message;
+    /// [`HostError::NotInitialized`] before [`Plugin::init`];
+    /// [`HostError::AlreadyActivated`] when it was activated before; and as [`Plugin::init`].
+    /// Any failure deactivates the plugin and removes its hooks and types: it is not activated.
     pub fn activate(&self) -> Result<(), HostError> {
+        self.check_usable()?;
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Err(HostError::NotInitialized);
+        }
+        if self.activated.swap(true, Ordering::SeqCst) {
+            return Err(HostError::AlreadyActivated);
+        }
+        let outcome = self.call(|instance| {
+            instance
+                .bindings
+                .mission_control_plugin_handler()
+                .call_activate(&mut instance.store)
+        });
+        self.finish(outcome, HostError::Activation)
+    }
+
+    /// Calls the plugin's `deactivate` (WordPress's `register_deactivation_hook`), with the
+    /// user set by [`with_current_user`] acting, then deactivates it ([`Plugin::remove_hooks`])
+    /// whatever `deactivate` gave, as WordPress deactivates a plugin whose deactivation hook
+    /// fails. A plugin that was stopped or deactivated before is not called.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Deactivation`] when the plugin's `deactivate` fails, with its message, and
+    /// the errors of a failed call as [`Plugin::init`] (a trap also stops the plugin as any
+    /// trap does). The plugin is deactivated either way.
+    pub fn deactivate(&self) -> Result<(), HostError> {
+        if self.check_usable().is_err() || !self.initialized.load(Ordering::SeqCst) {
+            self.remove_hooks();
+            return Ok(());
+        }
+        let outcome = self.call(|instance| {
+            instance
+                .bindings
+                .mission_control_plugin_handler()
+                .call_deactivate(&mut instance.store)
+        });
+        let outcome = self.finish(outcome, HostError::Deactivation);
+        self.remove_hooks();
+        outcome
+    }
+
+    /// Refuses a call into a plugin that was deactivated or stopped.
+    fn check_usable(&self) -> Result<(), HostError> {
         if self.deactivated() {
             return Err(HostError::Deactivated);
         }
@@ -1207,26 +1418,19 @@ impl Plugin {
                 "it failed before and is stopped".to_owned(),
             ));
         }
-        if self.activated.swap(true, Ordering::SeqCst) {
-            return Err(HostError::AlreadyActivated);
-        }
-        let outcome = self.call(|instance| {
-            struct Activating<'a>(&'a AtomicBool);
-            impl Drop for Activating<'_> {
-                fn drop(&mut self) {
-                    self.0.store(false, Ordering::SeqCst);
-                }
-            }
-            self.activating.store(true, Ordering::SeqCst);
-            let _activating = Activating(&self.activating);
-            instance
-                .bindings
-                .mission_control_plugin_handler()
-                .call_activate(&mut instance.store)
-        });
+        Ok(())
+    }
+
+    /// The outcome of a lifecycle call (`init`, `activate`, `deactivate`): a refusal becomes
+    /// `refused` with the plugin's message; any failure deactivates the plugin.
+    fn finish(
+        &self,
+        outcome: Result<Result<(), String>, CallError>,
+        refused: fn(String) -> HostError,
+    ) -> Result<(), HostError> {
         let error = match outcome {
             Ok(Ok(())) => return Ok(()),
-            Ok(Err(message)) => HostError::Activation(shown(&message)),
+            Ok(Err(message)) => refused(shown(&message)),
             Err(CallError::Failed(e)) => e,
             Err(CallError::Deactivated) => HostError::Deactivated,
             Err(CallError::Nested) => {
@@ -1244,10 +1448,27 @@ impl Plugin {
     /// never called again and cannot subscribe again. To activate it again, load it again.
     /// The callbacks are owned by this load ([`Owner::PluginLoad`]), so a plugin loaded since
     /// with the same slug keeps its own.
+    ///
+    /// The post types, taxonomies and field groups it registered are removed too, the first
+    /// time this load is deactivated or stopped (not again, so a newer load's stay).
     pub fn remove_hooks(&self) {
         self.deactivated.store(true, Ordering::SeqCst);
         self.hooks.remove_owner(&self.owner);
         self.subscriptions.store(0, Ordering::SeqCst);
+        self.release_types();
+    }
+
+    /// Removes the definitions the plugin registered from the registry, once per load and
+    /// only when this load registered any.
+    fn release_types(&self) {
+        if self.released.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.definitions.load(Ordering::SeqCst) > 0
+            && let Some(registry) = &self.registry
+        {
+            registry.remove_plugin(self.slug());
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Instance> {
@@ -1342,11 +1563,22 @@ impl Plugin {
         *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
         self.trapped.store(true, Ordering::SeqCst);
         self.hooks.remove_owner(&self.owner);
+        self.release_types();
         log::error!(
             target: LOG_TARGET,
             "[{}] the plugin failed and is stopped: {error}",
             self.slug()
         );
+        if let Some(handler) = &self.on_failure {
+            // A panicking handler must not take the call down with it.
+            if catch_unwind(AssertUnwindSafe(|| handler(self, &error))).is_err() {
+                log::error!(
+                    target: LOG_TARGET,
+                    "[{}] the failure handler panicked",
+                    self.slug()
+                );
+            }
+        }
         CallError::Failed(error)
     }
 
@@ -1458,6 +1690,8 @@ struct HostState {
     runtime: Option<Handle>,
     /// The plugin this store belongs to, set once it is loaded.
     plugin: Weak<Plugin>,
+    /// Where the `types` imports register.
+    registry: Option<Arc<Registry>>,
     /// The host's limits.
     limits: PluginLimits,
     /// The store's limits on memories, tables and instances.
@@ -1476,6 +1710,14 @@ struct LogBudget {
     dropping: bool,
 }
 
+/// Which kind of definition a `types` import registers.
+#[derive(Clone, Copy)]
+enum TypeKind {
+    PostType,
+    Taxonomy,
+    FieldGroup,
+}
+
 /// Which kind of hook a subscription is on.
 #[derive(Clone, Copy)]
 enum HookKind {
@@ -1489,13 +1731,13 @@ impl HostState {
         check_hook_name(&name)?;
         check_hook_allowed(&name)?;
         let Some(plugin) = self.plugin.upgrade() else {
-            return Err("subscribe in activate, not while the plugin loads".to_owned());
+            return Err("subscribe in init, not while the plugin loads".to_owned());
         };
         if plugin.deactivated() {
             return Err("the plugin is deactivated".to_owned());
         }
-        if !plugin.activating.load(Ordering::SeqCst) {
-            return Err("subscribe in activate: hooks cannot be added later".to_owned());
+        if !plugin.initializing.load(Ordering::SeqCst) {
+            return Err("subscribe in init: hooks cannot be added elsewhere".to_owned());
         }
         if plugin.subscriptions.fetch_add(1, Ordering::SeqCst) >= MAX_SUBSCRIPTIONS {
             plugin.subscriptions.fetch_sub(1, Ordering::SeqCst);
@@ -1527,6 +1769,49 @@ impl HostState {
             return Err("the plugin is deactivated".to_owned());
         }
         Ok(())
+    }
+
+    /// Registers the definition `json` describes, of `kind`, for the plugin: during its
+    /// `init` only, with [`Origin::Plugin`] and its slug, never over a definition made in
+    /// code or by another plugin.
+    fn register(&mut self, kind: TypeKind, json: &str) -> Result<(), String> {
+        let Some(plugin) = self.plugin.upgrade() else {
+            return Err("register types in init, not while the plugin loads".to_owned());
+        };
+        if plugin.deactivated() {
+            return Err("the plugin is deactivated".to_owned());
+        }
+        if !plugin.initializing.load(Ordering::SeqCst) {
+            return Err("register types in init: they cannot be added elsewhere".to_owned());
+        }
+        let Some(registry) = &self.registry else {
+            return Err("this site has no type registry".to_owned());
+        };
+        if plugin.definitions.fetch_add(1, Ordering::SeqCst) >= MAX_TYPE_DEFINITIONS {
+            plugin.definitions.fetch_sub(1, Ordering::SeqCst);
+            return Err(format!(
+                "the plugin already registered {MAX_TYPE_DEFINITIONS} definitions, the most allowed"
+            ));
+        }
+        let origin = Origin::Plugin(self.slug.clone());
+        let registered = match kind {
+            TypeKind::PostType => PostTypeDef::from_json(json, origin)
+                .map_err(|e| e.to_string())
+                .and_then(|def| registry.register_exclusive(def).map_err(|e| e.to_string())),
+            TypeKind::Taxonomy => TaxonomyDef::from_json(json, origin)
+                .map_err(|e| e.to_string())
+                .and_then(|def| registry.register_exclusive(def).map_err(|e| e.to_string())),
+            TypeKind::FieldGroup => FieldGroupDef::from_json(json, origin)
+                .map_err(|e| e.to_string())
+                .and_then(|def| registry.register_exclusive(def).map_err(|e| e.to_string())),
+        };
+        // A deactivation on another thread between the check above and the registration would
+        // leave this definition behind.
+        if registered.is_ok() && plugin.deactivated() {
+            registry.remove_plugin(&self.slug);
+            return Err("the plugin is deactivated".to_owned());
+        }
+        registered.map_err(|e| shown(&e))
     }
 
     /// Runs a content call to its end, blocking this thread on the Tokio runtime (see the
@@ -1651,6 +1936,20 @@ impl wit_hooks::Host for HostState {
 
     fn add_filter(&mut self, name: String, priority: i32) -> Result<(), String> {
         self.subscribe(HookKind::Filter, name, priority)
+    }
+}
+
+impl wit_types::Host for HostState {
+    fn register_post_type(&mut self, json: String) -> Result<(), String> {
+        self.register(TypeKind::PostType, &json)
+    }
+
+    fn register_taxonomy(&mut self, json: String) -> Result<(), String> {
+        self.register(TypeKind::Taxonomy, &json)
+    }
+
+    fn register_field_group(&mut self, json: String) -> Result<(), String> {
+        self.register(TypeKind::FieldGroup, &json)
     }
 }
 

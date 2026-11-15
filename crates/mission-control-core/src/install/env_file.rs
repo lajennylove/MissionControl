@@ -48,6 +48,8 @@ pub struct EnvFile {
     pub themes_dir: Option<PathBuf>,
     /// The folder uploads are stored in (`MC_UPLOADS_DIR`).
     pub uploads_dir: Option<PathBuf>,
+    /// The folder that holds the installed plugins (`MC_PLUGINS_DIR`).
+    pub plugins_dir: Option<PathBuf>,
     /// The kind of environment the site runs in (`MC_ENV`).
     pub environment: Option<Environment>,
     /// The proxies whose `X-Forwarded-Proto` header is believed (`MC_TRUSTED_PROXIES`).
@@ -64,6 +66,7 @@ impl EnvFile {
             upload_max_bytes: None,
             themes_dir: None,
             uploads_dir: None,
+            plugins_dir: None,
             environment: None,
             trusted_proxies: None,
         }
@@ -125,6 +128,7 @@ impl EnvFile {
         for (name, path) in [
             ("MC_THEMES_DIR", &self.themes_dir),
             ("MC_UPLOADS_DIR", &self.uploads_dir),
+            ("MC_PLUGINS_DIR", &self.plugins_dir),
         ] {
             if let Some(path) = path {
                 let text = path.to_str().ok_or(EnvFileError::InvalidValue {
@@ -168,6 +172,7 @@ impl fmt::Debug for EnvFile {
             .field("upload_max_bytes", &self.upload_max_bytes)
             .field("themes_dir", &self.themes_dir)
             .field("uploads_dir", &self.uploads_dir)
+            .field("plugins_dir", &self.plugins_dir)
             .field("environment", &self.environment)
             .field("trusted_proxies", &self.trusted_proxies)
             .finish()

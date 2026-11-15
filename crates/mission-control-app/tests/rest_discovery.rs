@@ -45,6 +45,7 @@ async fn site() -> (TestDatabase, Client) {
             .join("../../themes")
             .to_path_buf(),
         uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
+        plugins_dir: std::env::temp_dir().join("mc-unused-plugins"),
         environment: Environment::Production,
         trusted_proxies: TrustedProxies::None,
     };
@@ -211,6 +212,7 @@ async fn an_unset_site_uses_wordpresss_defaults() {
         upload_max_bytes: 1024,
         themes_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../themes"),
         uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
+        plugins_dir: std::env::temp_dir().join("mc-unused-plugins"),
         environment: Environment::Production,
         trusted_proxies: TrustedProxies::None,
     };

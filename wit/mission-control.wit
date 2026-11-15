@@ -13,6 +13,7 @@
 /// | `hooks`         | `hooks`          |
 /// | `content-read`  | `read-content`   |
 /// | `content-write` | `write-content`  |
+/// | `types`         | `register-types` |
 ///
 /// Values cross the boundary as JSON text where they have a shape of their own: a hook's
 /// payload, a filter's value and a meta value. Every string is bounded by the host; a call over
@@ -49,8 +50,8 @@ interface logging {
 /// `the_content`).
 ///
 /// A subscription calls the plugin's `handler.on-action` or `handler.apply-filter` with the
-/// hook's name. Subscribe in `handler.activate`, and only there: a call at any other time
-/// fails, so that deactivating a plugin removes all it subscribed. A subscription lasts until
+/// hook's name. Subscribe in `handler.init`, and only there (WordPress's main plugin file): a
+/// call at any other time fails, so that deactivating a plugin removes all it subscribed. A subscription lasts until
 /// the plugin is deactivated, or until it traps.
 ///
 /// A plugin may subscribe to any hook, as in WordPress, except the hooks that decide who may do
@@ -63,8 +64,8 @@ interface hooks {
     /// WordPress's default); equal priorities run in the order subscribed.
     ///
     /// Fails when `name` is empty, longer than 128 bytes, has a character outside printable
-    /// ASCII or is a hook plugins may not subscribe to; when the plugin already has 1024
-    /// subscriptions; and outside `handler.activate`.
+    /// ASCII or is a hook plugins may not subscribe to; when the plugin already has 512
+    /// subscriptions; and outside `handler.init`.
     add-action: func(name: string, priority: s32) -> result<_, string>;
 
     /// Runs `handler.apply-filter` when the filter `name` is applied. As `add-action`.
@@ -171,12 +172,47 @@ interface content-write {
     delete-post-meta: func(post-id: s64, key: string) -> result<bool, error>;
 }
 
+/// Registering custom post types, taxonomies and field groups (permission `register-types`), as
+/// WordPress's `register_post_type` and `register_taxonomy` and ACF's `acf_add_local_field_group`.
+///
+/// Each takes a definition as JSON text, in the one format the admin's manager screens and Rust
+/// code use (WordPress's argument names, ACF's for field groups; at most 1 MiB). The definition
+/// belongs to the plugin: it is locked in the admin, held in memory only, and removed when the
+/// plugin is deactivated or stops. Register in `handler.init`, and only there, as for hooks.
+///
+/// Fails when the JSON is not a valid definition (a reserved slug, a bad key, too large), when a
+/// definition with the same slug or key was made by the site's code or another plugin, and
+/// outside `handler.init`. A definition made in the admin with the same slug or key is
+/// overridden while the plugin is active, as ACF's local JSON overrides it.
+interface types {
+    /// Registers the post type `definition-json` describes (`{"slug": "book", ...}`).
+    register-post-type: func(definition-json: string) -> result<_, string>;
+
+    /// Registers the taxonomy `definition-json` describes (`{"slug": "genre", ...}`).
+    register-taxonomy: func(definition-json: string) -> result<_, string>;
+
+    /// Registers the field group `definition-json` describes (`{"key": "group_book", ...}`).
+    register-field-group: func(definition-json: string) -> result<_, string>;
+}
+
 /// What the site calls in the plugin. Every plugin exports it.
 interface handler {
-    /// Called once when the plugin is activated, with the user who activates it acting.
-    /// Subscribe to hooks here. An error refuses the activation, with the message shown to
-    /// the site owner.
+    /// Called each time the site loads the plugin: at every start, and when the owner activates
+    /// it (before `activate`), with no user acting (a visitor), as WordPress loads a plugin's
+    /// main file. Subscribe to hooks (`hooks`) and register types (`types`) here, and only
+    /// here. An error stops the plugin: it is deactivated and the owner is told.
+    init: func() -> result<_, string>;
+
+    /// Called once when the owner activates the plugin, after `init`, with that user acting, as
+    /// WordPress's `register_activation_hook`: set things up (content, meta). Not called at the
+    /// site's start. Subscribing or registering types here fails. An error refuses the
+    /// activation, with the message shown to the owner.
     activate: func() -> result<_, string>;
+
+    /// Called once when the owner deactivates the plugin, with that user acting, as WordPress's
+    /// `register_deactivation_hook`. Subscribing or registering types here fails. An error is
+    /// logged, and the plugin is deactivated anyway.
+    deactivate: func() -> result<_, string>;
 
     /// Called when an action the plugin subscribed to fires: `name` is the action, and
     /// `payload-json` its payload as JSON text (`save_post` sends the post's id). An error is
@@ -198,6 +234,7 @@ world plugin {
     import hooks;
     import content-read;
     import content-write;
+    import types;
 
     export handler;
 }

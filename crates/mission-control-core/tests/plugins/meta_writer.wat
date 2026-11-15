@@ -1,7 +1,7 @@
 ;; A sample plugin built from `wit/mission-control.wit`, written in the component model's text
 ;; format (Ruling R99). Permissions: `hooks` and `write-content`; it also logs.
 ;;
-;; On activation it subscribes to the action `mc_test_saved`. When the action fires with a post
+;; On init it subscribes to the action `mc_test_saved`. When the action fires with a post
 ;; id, it sets the post meta `plugin_saw` of that post to the JSON string "seen" and logs
 ;; "handled mc_test_saved"; when the host refuses the write, the handler fails with
 ;; "set-post-meta failed".
@@ -77,9 +77,9 @@
     (data (i32.const 96) "set-post-meta failed")
     ;; 256: where imports write their results; 512: where exports write theirs.
 
-    (func (export "activate") (result i32)
+    (func (export "init") (result i32)
       (call $add-action (i32.const 16) (i32.const 13) (i32.const 10) (i32.const 256))
-      ;; add-action's `result<_, string>` is laid out as activate's: pass it on.
+      ;; add-action's `result<_, string>` is laid out as init's: pass it on.
       (i32.const 256))
 
     ;; The payload is a post id in decimal.
@@ -116,6 +116,15 @@
       (i32.store (i32.const 516) (local.get $value))
       (i32.store (i32.const 520) (local.get $value-len))
       (i32.const 512))
+
+    ;; Ruling R105: `activate` and `deactivate` do nothing; 8: where they write their result.
+    (func (export "activate") (result i32)
+      (i32.store8 (i32.const 8) (i32.const 0))
+      (i32.const 8))
+
+    (func (export "deactivate") (result i32)
+      (i32.store8 (i32.const 8) (i32.const 0))
+      (i32.const 8))
   )
   (core instance $main (instantiate $main
     (with "libc" (instance $libc))
@@ -124,15 +133,21 @@
     (with "content-write" (instance (export "set-post-meta" (func $set-post-meta))))
   ))
 
+  (func $init (result (result (error string)))
+    (canon lift (core func $main "init") (memory $mem) (realloc $realloc)))
   (func $activate (result (result (error string)))
     (canon lift (core func $main "activate") (memory $mem) (realloc $realloc)))
+  (func $deactivate (result (result (error string)))
+    (canon lift (core func $main "deactivate") (memory $mem) (realloc $realloc)))
   (func $on-action (param "name" string) (param "payload-json" string) (result (result (error string)))
     (canon lift (core func $main "on-action") (memory $mem) (realloc $realloc)))
   (func $apply-filter (param "name" string) (param "value-json" string) (param "args-json" string)
     (result (result string (error string)))
     (canon lift (core func $main "apply-filter") (memory $mem) (realloc $realloc)))
   (instance $handler
+    (export "init" (func $init))
     (export "activate" (func $activate))
+    (export "deactivate" (func $deactivate))
     (export "on-action" (func $on-action))
     (export "apply-filter" (func $apply-filter))
   )

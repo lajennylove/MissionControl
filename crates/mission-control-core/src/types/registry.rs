@@ -206,6 +206,16 @@ pub enum RegistryError {
         /// Its slug or key.
         key: String,
     },
+    /// [`register_exclusive`](Registry::register_exclusive) was given a definition whose slug
+    /// or key a definition made in code or by another plugin holds.
+    Taken {
+        /// The definition's kind.
+        kind: DefinitionKind,
+        /// Its slug or key.
+        key: String,
+        /// Who made the definition that holds it.
+        holder: Origin,
+    },
     /// The database refused a query.
     Database(Error),
 }
@@ -219,6 +229,18 @@ impl fmt::Display for RegistryError {
                 "the {} `{key}` is an admin definition: save it, do not register it",
                 kind.name()
             ),
+            Self::Taken { kind, key, holder } => {
+                let holder = match holder {
+                    Origin::Plugin(name) => format!("the plugin `{name}`"),
+                    Origin::Code => "the site's code".to_owned(),
+                    Origin::Admin => "the admin".to_owned(),
+                };
+                write!(
+                    f,
+                    "the {} `{key}` is already registered by {holder}",
+                    kind.name()
+                )
+            }
             Self::Database(e) => e.fmt(f),
         }
     }
@@ -228,7 +250,7 @@ impl std::error::Error for RegistryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Definition(e) => Some(e),
-            Self::AdminOrigin { .. } => None,
+            Self::AdminOrigin { .. } | Self::Taken { .. } => None,
             Self::Database(e) => Some(e),
         }
     }
@@ -430,6 +452,38 @@ impl Registry {
         }
         def.validate()?;
         let mut state = self.write();
+        state.local.put(def);
+        self.sync(&mut state);
+        Ok(())
+    }
+
+    /// Registers a definition as [`register`](Self::register) does, but refuses one whose slug
+    /// or key a definition made in code or with another origin holds: a plugin may replace its
+    /// own definitions and override the admin's, not another plugin's or the site's code's.
+    /// The check and the registration are one step.
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register), and [`RegistryError::Taken`] with the holder's origin.
+    pub fn register_exclusive(&self, def: impl Into<Definition>) -> Result<(), RegistryError> {
+        let def = def.into();
+        if !def.origin().is_locked() {
+            return Err(RegistryError::AdminOrigin {
+                kind: def.kind(),
+                key: def.key().to_owned(),
+            });
+        }
+        def.validate()?;
+        let mut state = self.write();
+        if let Some(holder) = state.local.origin(def.kind(), def.key())
+            && holder != def.origin()
+        {
+            return Err(RegistryError::Taken {
+                kind: def.kind(),
+                key: def.key().to_owned(),
+                holder: holder.clone(),
+            });
+        }
         state.local.put(def);
         self.sync(&mut state);
         Ok(())

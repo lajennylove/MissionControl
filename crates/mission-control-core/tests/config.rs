@@ -223,6 +223,73 @@ fn uploads_dir_defaults_to_uploads_and_can_be_set() {
 }
 
 #[test]
+fn plugins_dir_defaults_to_plugins_and_can_be_set() {
+    let path = env_file("pluginsdefault", REQUIRED);
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.plugins_dir, PathBuf::from("plugins"));
+
+    let path = env_file(
+        "pluginsset",
+        &format!("{REQUIRED}MC_PLUGINS_DIR=/srv/site/plugins\n"),
+    );
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.plugins_dir, PathBuf::from("/srv/site/plugins"));
+
+    let path = env_file("pluginsempty", &format!("{REQUIRED}MC_PLUGINS_DIR=\n"));
+    let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+    assert_eq!(
+        error,
+        ConfigError::Invalid {
+            name: "MC_PLUGINS_DIR",
+            value: String::new()
+        }
+    );
+}
+
+#[test]
+fn plugins_dir_may_not_be_in_the_public_uploads() {
+    for (name, uploads, plugins) in [
+        ("pluginsinuploads", "/srv/up", "/srv/up/plugins"),
+        ("pluginsisuploads", "/srv/up", "/srv/up/"),
+        ("uploadsinplugins", "/srv/p/uploads", "/srv/p"),
+        ("pluginsdot", "uploads", "uploads/./x"),
+        ("pluginsdotdot", "/srv/up", "/srv/other/../up/x"),
+        ("pluginsrelative", "uploads", "./uploads/../uploads/p"),
+    ] {
+        let path = env_file(
+            name,
+            &format!("{REQUIRED}MC_UPLOADS_DIR={uploads}\nMC_PLUGINS_DIR={plugins}\n"),
+        );
+        let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+        assert_eq!(
+            error,
+            ConfigError::Invalid {
+                name: "MC_PLUGINS_DIR",
+                value: plugins.to_owned()
+            },
+            "{name}"
+        );
+    }
+    // Nor the themes folder, whose assets are served.
+    let path = env_file(
+        "pluginsinthemes",
+        &format!("{REQUIRED}MC_THEMES_DIR=/srv/themes\nMC_PLUGINS_DIR=/srv/themes/../themes/p\n"),
+    );
+    assert!(matches!(
+        load_from(Some(&path), lookup(&[])),
+        Err(ConfigError::Invalid {
+            name: "MC_PLUGINS_DIR",
+            ..
+        })
+    ));
+    let path = env_file(
+        "pluginsbeside",
+        &format!("{REQUIRED}MC_UPLOADS_DIR=/srv/uploads\nMC_PLUGINS_DIR=/srv/uploads-plugins\n"),
+    );
+    assert!(load_from(Some(&path), lookup(&[])).is_ok());
+}
+
+#[test]
 fn environment_defaults_to_production_as_wordpress() {
     let path = env_file("envdefault", REQUIRED);
     let config = load_from(Some(&path), lookup(&[])).unwrap();

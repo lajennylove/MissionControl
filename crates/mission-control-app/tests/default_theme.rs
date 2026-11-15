@@ -110,6 +110,7 @@ impl Site {
             upload_max_bytes: 1024,
             themes_dir,
             uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
+            plugins_dir: std::env::temp_dir().join("mc-unused-plugins"),
             environment: Environment::Production,
             trusted_proxies: TrustedProxies::None,
         };

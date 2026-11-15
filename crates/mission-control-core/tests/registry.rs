@@ -598,3 +598,47 @@ async fn concurrent_admin_writes_leave_memory_as_stored() {
         stored.post_types().registered("book")
     );
 }
+
+/// Task 12.4: a plugin may not take a slug or key another plugin or the site's code registered,
+/// and may register its own again (its next load) and override an admin one.
+#[test]
+fn a_plugin_may_not_take_a_key_another_local_origin_holds() {
+    let registry = registry();
+    registry
+        .register(book(Origin::Plugin("shop".into()), "Shop books"))
+        .unwrap();
+    let err = registry
+        .register_exclusive(book(Origin::Plugin("library".into()), "Library books"))
+        .unwrap_err();
+    assert!(
+        matches!(&err, RegistryError::Taken { kind: DefinitionKind::PostType, key, holder: Origin::Plugin(p) } if key == "book" && p == "shop"),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("`book`") && err.to_string().contains("shop"));
+    assert_eq!(
+        registry.post_type("book").unwrap().labels.name,
+        "Shop books"
+    );
+
+    registry.register(genre(Origin::Code)).unwrap();
+    assert!(matches!(
+        registry.register_exclusive(genre(Origin::Plugin("shop".into()))),
+        Err(RegistryError::Taken {
+            holder: Origin::Code,
+            ..
+        })
+    ));
+
+    // Its own key again, and a new key, are fine.
+    registry
+        .register_exclusive(book(Origin::Plugin("shop".into()), "Shop books 2"))
+        .unwrap();
+    assert_eq!(
+        registry.post_type("book").unwrap().labels.name,
+        "Shop books 2"
+    );
+    registry
+        .register_exclusive(group(Origin::Plugin("library".into())))
+        .unwrap();
+    assert_eq!(registry.remove_plugin("library"), 1);
+}

@@ -136,10 +136,10 @@ async fn new_post(db: &Database, author: i64, status: PostStatus) -> Post {
     .expect("creates the post")
 }
 
-/// Loads and activates `wasm` as `manifest`.
+/// Loads `wasm` as `manifest` and runs its `init`, where it subscribes.
 fn activated(host: &PluginHost, manifest: Manifest, wasm: &[u8]) -> Arc<Plugin> {
     let plugin = host.load(manifest, wasm).expect("loads the plugin");
-    plugin.activate().expect("activates the plugin");
+    plugin.init().expect("starts the plugin");
     plugin
 }
 
@@ -156,7 +156,7 @@ async fn fire(hooks: &Arc<Hooks>, action: Action<i64>, id: i64, user: Option<Use
 }
 
 #[tokio::test]
-async fn a_filter_subscribed_on_activation_changes_the_value() {
+async fn a_filter_subscribed_in_init_changes_the_value() {
     let (_test, hooks, host, _) = setup().await;
     assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Hello");
 
@@ -514,10 +514,11 @@ async fn a_plugin_that_traps_is_stopped_and_the_site_goes_on() {
     assert_eq!(logged("trapper", "failed and is stopped") - before, 1);
     assert_eq!(ran.load(Ordering::SeqCst), 2);
     assert!(matches!(plugin.activate(), Err(HostError::Trap(_))));
+    assert!(matches!(plugin.init(), Err(HostError::Trap(_))));
 }
 
 #[tokio::test]
-async fn a_failed_activation_removes_what_the_plugin_subscribed() {
+async fn a_failed_init_removes_what_the_plugin_subscribed() {
     let (_test, hooks, host, _) = setup().await;
     let plugin = host
         .load(
@@ -526,25 +527,70 @@ async fn a_failed_activation_removes_what_the_plugin_subscribed() {
         )
         .expect("loads the plugin");
 
-    let error = plugin.activate().expect_err("the plugin refuses");
+    let error = plugin.init().expect_err("the plugin refuses");
 
-    assert_eq!(error, HostError::Activation("not today".into()));
+    assert_eq!(error, HostError::Init("not today".into()));
     assert!(plugin.deactivated());
     // It subscribed before refusing; the subscription is gone.
     assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Hello");
 }
 
 #[tokio::test]
-async fn a_plugin_is_activated_once_per_load() {
+async fn a_plugin_is_started_and_activated_once_per_load() {
+    let (_test, hooks, host, _) = setup().await;
+    let plugin = host
+        .load(
+            manifest("activated-twice", "\"hooks\""),
+            &sample("title_filter.wat"),
+        )
+        .expect("loads the plugin");
+    assert_eq!(plugin.activate(), Err(HostError::NotInitialized));
+    assert!(!plugin.deactivated());
+
+    plugin.init().expect("starts the plugin");
+    assert_eq!(plugin.init(), Err(HostError::AlreadyInitialized));
+    plugin.activate().expect("activates the plugin");
+    assert_eq!(plugin.activate(), Err(HostError::AlreadyActivated));
+    assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Filtered");
+}
+
+#[tokio::test]
+async fn a_plugin_may_not_subscribe_in_activate() {
     let (_test, hooks, host, _) = setup().await;
     let plugin = activated(
         &host,
-        manifest("activated-twice", "\"hooks\""),
-        &sample("title_filter.wat"),
+        manifest("activate-subscriber", "\"hooks\""),
+        &sample("activate_subscriber.wat"),
     );
 
-    assert_eq!(plugin.activate(), Err(HostError::AlreadyActivated));
+    let error = plugin.activate().expect_err("the subscription is refused");
+
+    assert!(
+        matches!(&error, HostError::Activation(m) if m.contains("subscribe in init")),
+        "{error:?}"
+    );
+    assert!(plugin.deactivated());
+    assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Hello");
+}
+
+#[tokio::test]
+async fn a_failing_deactivate_is_reported_and_the_plugin_is_deactivated_anyway() {
+    let (_test, hooks, host, _) = setup().await;
+    let plugin = activated(
+        &host,
+        manifest("bad-deactivator", "\"hooks\""),
+        &sample("bad_deactivator.wat"),
+    );
+    plugin.activate().expect("activates the plugin");
     assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Filtered");
+
+    let error = plugin.deactivate().expect_err("its deactivate traps");
+
+    assert!(matches!(error, HostError::Trap(_)), "{error:?}");
+    assert!(plugin.deactivated());
+    assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Hello");
+    // A plugin already deactivated is not called again.
+    assert_eq!(plugin.deactivate(), Ok(()));
 }
 
 #[test]
@@ -578,12 +624,13 @@ async fn a_deactivated_plugin_is_never_called_again_and_cannot_resubscribe() {
     plugin.remove_hooks();
 
     assert!(plugin.deactivated());
+    assert_eq!(plugin.init(), Err(HostError::Deactivated));
     assert_eq!(plugin.activate(), Err(HostError::Deactivated));
     assert_eq!(hooks.apply_filters(TITLE, "Hello".to_owned()), "Hello");
 }
 
 #[tokio::test]
-async fn subscribing_outside_activate_is_refused() {
+async fn subscribing_outside_init_is_refused() {
     let (_test, hooks, host, _) = setup().await;
     let _plugin = activated(
         &host,
@@ -595,7 +642,7 @@ async fn subscribing_outside_activate_is_refused() {
     hooks.do_action(LATE, &2);
 
     // Each run tried to subscribe once more, and was refused: the hook still has one callback.
-    assert_eq!(logged("late-subscriber", "subscribe in activate"), 2);
+    assert_eq!(logged("late-subscriber", "subscribe in init"), 2);
 }
 
 #[tokio::test]
@@ -608,10 +655,10 @@ async fn authorization_hooks_are_refused_to_every_plugin() {
         )
         .expect("loads the plugin");
 
-    let error = plugin.activate().expect_err("the subscription is refused");
+    let error = plugin.init().expect_err("the subscription is refused");
 
     match &error {
-        HostError::Activation(message) => {
+        HostError::Init(message) => {
             assert!(
                 message.contains("may not subscribe to `user_has_cap`"),
                 "{message}"

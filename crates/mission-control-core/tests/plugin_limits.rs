@@ -98,12 +98,12 @@ async fn setup(limits: PluginLimits) -> (TestDatabase, Arc<Hooks>, PluginHost) {
     (test, hooks, host)
 }
 
-/// Loads and activates the sample `file` as the plugin `slug` with the `hooks` permission.
+/// Loads the sample `file` as the plugin `slug` with the `hooks` permission and runs its `init`.
 fn activated(host: &PluginHost, slug: &str, file: &str) -> Arc<Plugin> {
     let plugin = host
         .load(manifest(slug, "\"hooks\""), &sample(file))
         .expect("loads the plugin");
-    plugin.activate().expect("activates the plugin");
+    plugin.init().expect("starts the plugin");
     plugin
 }
 
@@ -175,7 +175,7 @@ async fn a_host_made_with_new_has_the_default_limits() {
 }
 
 #[tokio::test]
-async fn an_activate_that_loops_forever_runs_out_of_fuel() {
+async fn an_init_that_loops_forever_runs_out_of_fuel() {
     let limits = PluginLimits {
         fuel_per_call: 1_000_000,
         ..PluginLimits::default()
@@ -185,10 +185,7 @@ async fn an_activate_that_loops_forever_runs_out_of_fuel() {
         .load(manifest("spinner", ""), &sample("spinner.wat"))
         .expect("loads the plugin");
 
-    assert_eq!(
-        plugin.activate(),
-        Err(HostError::OutOfFuel { fuel: 1_000_000 })
-    );
+    assert_eq!(plugin.init(), Err(HostError::OutOfFuel { fuel: 1_000_000 }));
     assert!(plugin.trapped());
     assert_eq!(
         plugin.failure(),
@@ -222,7 +219,7 @@ async fn an_action_that_loops_forever_is_stopped_and_the_site_goes_on() {
 async fn a_filter_that_loops_forever_on_a_runtime_worker_keeps_the_value() {
     let limits = PluginLimits {
         fuel_per_call: 1_000_000,
-        // Activation makes host calls; keep them cheap so the call itself runs out.
+        // `init` makes host calls; keep them cheap so the call itself runs out.
         fuel_per_host_call: 1_000,
         ..PluginLimits::default()
     };
@@ -370,7 +367,7 @@ async fn a_plugin_that_logs_forever_is_cut_off_and_stopped() {
 
     // Each log call costs fuel, so the loop ends.
     assert!(
-        matches!(plugin.activate(), Err(HostError::OutOfFuel { .. })),
+        matches!(plugin.init(), Err(HostError::OutOfFuel { .. })),
         "{:?}",
         plugin.failure()
     );
@@ -406,7 +403,7 @@ async fn a_plugin_that_reads_content_forever_runs_out_of_fuel() {
         .expect("loads the plugin");
 
     assert!(
-        matches!(plugin.activate(), Err(HostError::OutOfFuel { .. })),
+        matches!(plugin.init(), Err(HostError::OutOfFuel { .. })),
         "{:?}",
         plugin.failure()
     );
@@ -437,7 +434,7 @@ async fn a_table_over_the_limit_does_not_load() {
 async fn fuel_runs_out_in_the_allocator_while_the_host_copies_arguments_in() {
     let limits = PluginLimits {
         fuel_per_call: 1_000_000,
-        // Activation makes host calls; keep them cheap so the call itself runs out.
+        // `init` makes host calls; keep them cheap so the call itself runs out.
         fuel_per_host_call: 1_000,
         ..PluginLimits::default()
     };

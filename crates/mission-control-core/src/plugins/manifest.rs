@@ -27,9 +27,9 @@
 //! interface, not of Mission Control) the plugin works with. It is a version, not a requirement
 //! expression: `"0.1"` means 0.1.0 or newer. Breaking changes of the API are caught when the
 //! module is linked, by the WIT package version it imports, not by this field. A plugin that
-//! needs a newer API still parses, so the plugins screen can list it; activation refuses it with
-//! [`Manifest::check_compatible`], as WordPress refuses to activate a plugin that needs a newer
-//! WordPress.
+//! needs a newer API still parses, so the plugins screen can list it; installing and activation
+//! refuse it with [`Manifest::check_compatible`] (Ruling R106), as WordPress refuses to install
+//! (since 5.5) and to activate a plugin that needs a newer WordPress.
 //!
 //! The licence is required but never judged: WordPress core installs a plugin under any licence,
 //! and only its directory requires a GPL-compatible one. [`Manifest::license_is_known_gpl_compatible`]
@@ -137,7 +137,7 @@ pub struct Manifest {
 /// WordPress plugin reads its own folder and every browser extension its own package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Permission {
-    /// `hooks`: subscribe to actions and filters, in the plugin's `activate`.
+    /// `hooks`: subscribe to actions and filters, in the plugin's `init`.
     ///
     /// A subscriber sees every payload and value of the hooks it subscribes to (post content,
     /// user data a hook carries) and may rewrite a filter's value: the new value is taken as
@@ -968,7 +968,7 @@ fn minimum_version(text: &str) -> Option<Version> {
 }
 
 /// Checks the slug rules of [`Manifest::slug`].
-fn check_slug(slug: &str) -> Result<(), ManifestError> {
+pub(super) fn check_slug(slug: &str) -> Result<(), ManifestError> {
     let invalid = |reason: &'static str| ManifestError::InvalidSlug {
         slug: shown(slug),
         reason,
