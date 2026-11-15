@@ -68,6 +68,10 @@ toml = { version = "0.9", default-features = false, features = ["parse", "preser
 tokio = { workspace = true, features = ["time"] }
 # Version 4 UUIDs for application passwords, as `wp_generate_uuid4` (MIT OR Apache-2.0).
 uuid = { version = "1", features = ["v4"] }
+# Runs plugins: WebAssembly components in a sandbox, linked through the WIT interface in
+# `wit/` (Apache-2.0 WITH LLVM-exception; Ruling R98). Only the component model, the Cranelift
+# compiler and the runtime: no async, no WAT text, no cache, no profiling.
+wasmtime = { version = "50.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 # Zeroes plain application passwords and their random bytes when dropped (Apache-2.0 OR MIT).
 zeroize = "1"
 
@@ -79,3 +83,6 @@ libc = "0.2"
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }
 tempfile = "3"
+# Compiles the sample plugins, written in the component model's text format, to binary
+# components (Ruling R99). The version wasmtime 50 parses with.
+wat = "=1.261.0"

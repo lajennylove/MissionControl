@@ -40,6 +40,7 @@ pub mod users;
 
 pub use params::{MAX_INPUT_VARS, Params, parse_form};
 pub use shared::KsesLimiter;
+pub(crate) use shared::id_of;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

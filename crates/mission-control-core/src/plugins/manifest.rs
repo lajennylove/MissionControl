@@ -137,7 +137,13 @@ pub struct Manifest {
 /// WordPress plugin reads its own folder and every browser extension its own package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Permission {
-    /// `hooks`: subscribe to actions and filters.
+    /// `hooks`: subscribe to actions and filters, in the plugin's `activate`.
+    ///
+    /// A subscriber sees every payload and value of the hooks it subscribes to (post content,
+    /// user data a hook carries) and may rewrite a filter's value: the new value is taken as
+    /// given, not passed through kses or any other check. Hooks that decide who may do what or
+    /// carry credentials (`user_has_cap`, `map_meta_cap`, `authenticate`, `auth_*`, ...) are
+    /// refused to every plugin (Ruling R102; see the host's `DENIED_HOOKS`).
     Hooks,
     /// `read-content`: read posts of any type, terms, meta, users and options through the
     /// content API, with the acting user's capabilities applied.

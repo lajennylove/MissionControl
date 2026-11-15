@@ -1,0 +1,203 @@
+/// The plugin API of Mission Control: what a plugin, a WebAssembly component, may call in the
+/// site (the interfaces it imports) and what the site calls in the plugin (the `handler`
+/// interface it exports). Design sections 4.1 and 4.2.
+///
+/// Each imported interface belongs to one permission of the plugin's manifest (`plugin.toml`),
+/// and the host links only the interfaces the manifest grants: a plugin that imports an
+/// interface its manifest does not grant fails to instantiate, naming the import and the
+/// permission. Import only what the plugin uses.
+///
+/// | interface       | permission       |
+/// |-----------------|------------------|
+/// | `logging`       | none (always)    |
+/// | `hooks`         | `hooks`          |
+/// | `content-read`  | `read-content`   |
+/// | `content-write` | `write-content`  |
+///
+/// Values cross the boundary as JSON text where they have a shape of their own: a hook's
+/// payload, a filter's value and a meta value. Every string is bounded by the host; a call over
+/// a bound is refused, not cut.
+///
+/// The package version is the plugin API version (`HOST_API_VERSION`, the `requires` of a
+/// manifest). A plugin built against another major version (or another minor version while it
+/// is 0.x) imports names the host does not know and fails to instantiate.
+package mission-control:plugin@0.1.0;
+
+/// Writing to the site's log. Always linked: every plugin may log.
+interface logging {
+    /// How serious a message is, as the `log` crate's levels.
+    enum level {
+        /// Something failed.
+        error,
+        /// Something looks wrong.
+        warn,
+        /// Something worth knowing happened.
+        info,
+        /// Details for debugging.
+        debug,
+        /// Finer details.
+        trace,
+    }
+
+    /// Logs `message` at `level`, tagged with the plugin's slug. A message longer than 4096
+    /// characters is cut there; control characters are escaped.
+    log: func(level: level, message: string);
+}
+
+/// Subscribing to actions and filters (permission `hooks`), as WordPress's `add_action` and
+/// `add_filter`. Hook names are WordPress's where a WordPress equivalent exists (`save_post`,
+/// `the_content`).
+///
+/// A subscription calls the plugin's `handler.on-action` or `handler.apply-filter` with the
+/// hook's name. Subscribe in `handler.activate`, and only there: a call at any other time
+/// fails, so that deactivating a plugin removes all it subscribed. A subscription lasts until
+/// the plugin is deactivated, or until it traps.
+///
+/// A plugin may subscribe to any hook, as in WordPress, except the hooks that decide who may do
+/// what or carry credentials (`user_has_cap`, `map_meta_cap`, `authenticate`,
+/// `determine_current_user`, `check_password`, `auth_*`, ...): subscribing to one fails. A
+/// subscriber sees each payload and value, and a filter's new value is taken as given (it is
+/// not filtered again, for HTML or otherwise).
+interface hooks {
+    /// Runs `handler.on-action` when the action `name` fires. Lower `priority` runs first (10 is
+    /// WordPress's default); equal priorities run in the order subscribed.
+    ///
+    /// Fails when `name` is empty, longer than 128 bytes, has a character outside printable
+    /// ASCII or is a hook plugins may not subscribe to; when the plugin already has 1024
+    /// subscriptions; and outside `handler.activate`.
+    add-action: func(name: string, priority: s32) -> result<_, string>;
+
+    /// Runs `handler.apply-filter` when the filter `name` is applied. As `add-action`.
+    add-filter: func(name: string, priority: s32) -> result<_, string>;
+}
+
+/// Reading content (permission `read-content`), with the capabilities of the user the site is
+/// acting for: a visitor's when nobody is signed in.
+interface content-read {
+    /// Why a content call was refused.
+    variant error {
+        /// The acting user may not do this.
+        forbidden(string),
+        /// There is no such post.
+        not-found(string),
+        /// An argument is not valid: a key or value too long, a value that is not JSON.
+        invalid(string),
+        /// The site failed, such as its database. The details are in the site's log.
+        failed(string),
+    }
+
+    /// A post of any type, as WordPress's `WP_Post`.
+    record post {
+        /// The id.
+        id: s64,
+        /// `post`, `page`, `attachment` or a custom type's name.
+        post-type: string,
+        /// `publish`, `draft`, `pending`, `private`, `future`, `trash`, `inherit` or
+        /// `auto-draft`.
+        status: string,
+        /// The title, raw.
+        title: string,
+        /// The slug.
+        slug: string,
+        /// The body, raw. Empty when `password-protected`.
+        content: string,
+        /// The excerpt, raw. Empty when `password-protected`.
+        excerpt: string,
+        /// The author's user id.
+        author-id: s64,
+        /// The parent post's id, if any.
+        parent-id: option<s64>,
+        /// The order among siblings.
+        menu-order: s32,
+        /// When it was, or will be, published, in UTC (`2026-11-15T10:00:00Z`), if set.
+        published-at: option<string>,
+        /// When it last changed, in UTC.
+        modified-at: string,
+        /// Whether the post, or for an attachment or revision the parent with a password, has a
+        /// password the acting user may not bypass (they may not edit that post): then
+        /// `content` and `excerpt` are empty.
+        password-protected: bool,
+    }
+
+    /// Post `id`, when the acting user may read it, as the REST API decides: a published post
+    /// of a public type, one `read_post` allows, an attachment whose parent is readable, or a
+    /// revision (an autosave too) whose parent the user may edit.
+    get-post: func(id: s64) -> result<post, error>;
+
+    /// The value of post meta `key` on post `post-id` as JSON text, or none when the post has
+    /// none (the first value of a key that repeats). The post must be readable; a protected
+    /// key (one starting with `_`) also needs what writing it needs (`edit_post_meta`).
+    get-post-meta: func(post-id: s64, key: string) -> result<option<string>, error>;
+}
+
+/// Writing content (permission `write-content`), with the capabilities of the user the site is
+/// acting for. It does not include reading: a plugin that reads too imports `content-read`.
+interface content-write {
+    /// Why a content call was refused. The same cases as `content-read`'s.
+    variant error {
+        /// The acting user may not do this.
+        forbidden(string),
+        /// There is no such post.
+        not-found(string),
+        /// An argument is not valid: a key or value too long, a value that is not JSON.
+        invalid(string),
+        /// The site failed, such as its database. The details are in the site's log.
+        failed(string),
+    }
+
+    /// The fields of a post to change; a field left out keeps its value.
+    record post-changes {
+        /// The new title.
+        title: option<string>,
+        /// The new body.
+        content: option<string>,
+        /// The new excerpt.
+        excerpt: option<string>,
+    }
+
+    /// Changes post `id` as an editor's save does: it needs `edit_post`, the fields go through
+    /// the site's HTML filter (kses) unless the acting user holds `unfiltered_html`, and a
+    /// revision is recorded. A revision cannot be changed.
+    update-post: func(id: s64, changes: post-changes) -> result<_, error>;
+
+    /// Sets post meta `key` on post `post-id` to `value-json`, JSON text, replacing the stored
+    /// value (WordPress's `update_post_meta`). It needs `add_post_meta` when the post has no
+    /// value yet and `edit_post_meta` otherwise; a protected key (one starting with `_`) needs
+    /// that capability granted by name. A key is at most 255 bytes and a value 1 MiB.
+    set-post-meta: func(post-id: s64, key: string, value-json: string) -> result<_, error>;
+
+    /// Deletes post meta `key` from post `post-id`; true when the post had it. It needs
+    /// `delete_post_meta`, as `set-post-meta` needs its capability.
+    delete-post-meta: func(post-id: s64, key: string) -> result<bool, error>;
+}
+
+/// What the site calls in the plugin. Every plugin exports it.
+interface handler {
+    /// Called once when the plugin is activated, with the user who activates it acting.
+    /// Subscribe to hooks here. An error refuses the activation, with the message shown to
+    /// the site owner.
+    activate: func() -> result<_, string>;
+
+    /// Called when an action the plugin subscribed to fires: `name` is the action, and
+    /// `payload-json` its payload as JSON text (`save_post` sends the post's id). An error is
+    /// logged and the other subscribers still run.
+    on-action: func(name: string, payload-json: string) -> result<_, string>;
+
+    /// Called when a filter the plugin subscribed to is applied: `name` is the filter,
+    /// `value-json` the value as JSON text, and `args-json` the filter's further arguments as a
+    /// JSON array (WordPress's `apply_filters( $name, $value, ...$args )`; empty, `[]`, for
+    /// every filter of this version). Return the new value as JSON text of the same shape. An
+    /// error, or a value that does not read back as the filter's type, keeps the value as it
+    /// was and is logged.
+    apply-filter: func(name: string, value-json: string, args-json: string) -> result<string, string>;
+}
+
+/// A Mission Control plugin.
+world plugin {
+    import logging;
+    import hooks;
+    import content-read;
+    import content-write;
+
+    export handler;
+}
