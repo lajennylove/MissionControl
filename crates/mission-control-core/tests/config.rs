@@ -124,3 +124,30 @@ fn debug_output_and_errors_hide_secrets() {
     };
     assert!(invalid.to_string().contains("MC_DEBUG"));
 }
+
+#[test]
+fn themes_dir_defaults_to_themes_and_can_be_set() {
+    let path = env_file("themesdefault", REQUIRED);
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.themes_dir, PathBuf::from("themes"));
+
+    let path = env_file(
+        "themesset",
+        &format!("{REQUIRED}MC_THEMES_DIR=/srv/site/themes\n"),
+    );
+    let config = load_from(Some(&path), lookup(&[])).unwrap();
+    assert_eq!(config.themes_dir, PathBuf::from("/srv/site/themes"));
+}
+
+#[test]
+fn empty_themes_dir_is_invalid() {
+    let path = env_file("themesempty", &format!("{REQUIRED}MC_THEMES_DIR=\n"));
+    let error = load_from(Some(&path), lookup(&[])).err().unwrap();
+    assert_eq!(
+        error,
+        ConfigError::Invalid {
+            name: "MC_THEMES_DIR",
+            value: String::new()
+        }
+    );
+}

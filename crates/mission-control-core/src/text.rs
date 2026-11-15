@@ -58,7 +58,7 @@ fn remove_octets(text: &str) -> String {
 /// `text` with its tags stripped, after `wp_pre_kses_less_than` and `wp_strip_all_tags`: a tag
 /// is `<` followed by a letter, `/`, `!` or `?`, up to the next `>`; any other `<`, or one with
 /// no `>` after it, becomes `&lt;`. The content of `script` and `style` elements goes with them.
-fn strip_all_tags(text: &str) -> String {
+pub(crate) fn strip_all_tags(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('<') {

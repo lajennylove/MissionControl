@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The application configuration, the equivalent of `wp-config.php`.
 #[derive(Clone, PartialEq, Eq)]
@@ -15,6 +15,9 @@ pub struct Config {
     pub debug: bool,
     /// The largest accepted upload, in bytes (`MC_UPLOAD_MAX_BYTES`).
     pub upload_max_bytes: u64,
+    /// The folder that holds the installed themes, one folder per theme (`MC_THEMES_DIR`), as
+    /// WordPress's `wp-content/themes`. Default `themes`, relative to the working directory.
+    pub themes_dir: PathBuf,
 }
 
 /// An error raised while reading the configuration.
@@ -38,6 +41,7 @@ impl fmt::Debug for Config {
             .field("secret_key", &"[redacted]")
             .field("debug", &self.debug)
             .field("upload_max_bytes", &self.upload_max_bytes)
+            .field("themes_dir", &self.themes_dir)
             .finish()
     }
 }
@@ -102,11 +106,22 @@ pub fn load_from(
             value,
         })?,
     };
+    let themes_dir = match get("MC_THEMES_DIR") {
+        None => PathBuf::from("themes"),
+        Some(value) if value.trim().is_empty() => {
+            return Err(ConfigError::Invalid {
+                name: "MC_THEMES_DIR",
+                value,
+            });
+        }
+        Some(value) => PathBuf::from(value),
+    };
 
     Ok(Config {
         database_url,
         secret_key,
         debug,
         upload_max_bytes,
+        themes_dir,
     })
 }

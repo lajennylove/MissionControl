@@ -204,6 +204,137 @@ pub async fn resolve(
     router.query(&vars).await
 }
 
+/// The posts a request shows, as WordPress's main `WP_Query` holds them after the request is
+/// resolved: the loop's posts, how many posts the whole list has and how many pages it fills.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MainQuery {
+    /// The posts of this page, newest first; the one post of a singular request.
+    pub posts: Vec<Post>,
+    /// How many posts the whole list has (`found_posts`).
+    pub found_posts: i64,
+    /// How many pages the list fills (`max_num_pages`); 1 for a singular request, 0 for an empty
+    /// list or nothing found.
+    pub max_num_pages: u32,
+}
+
+/// The posts `resolved` shows, as WordPress's main query fetches them: the post of a singular
+/// request, or page `paged` of a list, `posts_per_page` to a page (every post on one page when
+/// the option is below 1). Lists hold published posts only, newest first, as [`resolve`] counts
+/// them: the latest posts for the front page and the posts page, a category with its children,
+/// a tag, an author, a date in the site's time zone, a custom type, and posts and pages
+/// matching a search. A redirect and a 404 show no posts.
+///
+/// Search results are ordered by date, not by WordPress's relevance (title matches first).
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn query_posts(db: &Database, resolved: &Resolved) -> Result<MainQuery, Error> {
+    let singular = |post: &Post| MainQuery {
+        posts: vec![post.clone()],
+        found_posts: 1,
+        max_num_pages: 1,
+    };
+    let site = Site::load(db).await?;
+    let (listing, paged) = match resolved {
+        Resolved::Redirect { .. } | Resolved::NotFound => return Ok(MainQuery::default()),
+        Resolved::Single(post) | Resolved::Page(post) | Resolved::Attachment(post) => {
+            return Ok(singular(post));
+        }
+        Resolved::FrontPage {
+            page: Some(page), ..
+        } => return Ok(singular(page)),
+        Resolved::FrontPage { page: None, paged } | Resolved::Home { paged, .. } => {
+            (Listing::default(), *paged)
+        }
+        Resolved::Search { terms, paged } => (
+            Listing {
+                post_types: &["post", "page"],
+                search: search_terms(terms),
+                ..Listing::default()
+            },
+            *paged,
+        ),
+        Resolved::Archive { archive, paged } => {
+            let listing = match archive {
+                Archive::PostType(post_type) => {
+                    let posts = Listing {
+                        post_types: &[post_type.as_str()],
+                        ..Listing::default()
+                    };
+                    return list_page(db, &site, &posts, *paged).await;
+                }
+                Archive::Category(term) => Listing {
+                    term_taxonomy_ids: Some(Categories::load(db).await?.with_descendants(term)),
+                    ..Listing::default()
+                },
+                Archive::Tag(term) => Listing {
+                    term_taxonomy_ids: Some(vec![term.term_taxonomy_id]),
+                    ..Listing::default()
+                },
+                Archive::Author(id) => Listing {
+                    author: Some(*id),
+                    ..Listing::default()
+                },
+                Archive::Date { year, month, day } => match site.date_range(*year, *month, *day) {
+                    Some(range) => Listing {
+                        range: Some(range),
+                        ..Listing::default()
+                    },
+                    None => return Ok(MainQuery::default()),
+                },
+            };
+            (listing, *paged)
+        }
+    };
+    list_page(db, &site, &listing, paged).await
+}
+
+/// Page `paged` of `listing`, with its totals.
+async fn list_page(
+    db: &Database,
+    site: &Site,
+    listing: &Listing<'_>,
+    paged: u32,
+) -> Result<MainQuery, Error> {
+    let found_posts = listing.count(db).await?;
+    let max_num_pages = match site.per_page {
+        Some(n) => u32::try_from(found_posts.saturating_add(n - 1) / n).unwrap_or(u32::MAX),
+        None => u32::from(found_posts > 0),
+    };
+    Ok(MainQuery {
+        posts: listing.fetch(db, site.per_page, paged).await?,
+        found_posts,
+        max_num_pages,
+    })
+}
+
+/// The permalinks of `posts`, in order, each a path from the site's root
+/// (`/2026/03/hello-world/`) as `get_permalink` gives it, with the values its tags need read
+/// from the database: a page's ancestors and a post's first category, or the default category.
+/// Prefix the site address for an absolute link.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn post_links(
+    db: &Database,
+    structure: &PermalinkStructure,
+    posts: &[Post],
+) -> Result<Vec<String>, Error> {
+    let site = Site::load(db).await?;
+    let router = Router {
+        db,
+        structure,
+        site: &site,
+    };
+    let mut links = Vec::with_capacity(posts.len());
+    for post in posts {
+        links.push(router.link(post).await?);
+    }
+    Ok(links)
+}
+
 /// The options routing reads, once per request.
 struct Site {
     /// `page_on_front`, when `show_on_front` is `page`.
@@ -270,6 +401,36 @@ impl Site {
         })
     }
 
+    /// The site's offset as a duration, to turn local dates to UTC.
+    fn offset_duration(&self) -> Duration {
+        Duration::seconds(i64::from(self.offset.local_minus_utc()))
+    }
+
+    /// The UTC range, end excluded, of a year, a month or a day in the site's time zone, or
+    /// `None` when the date is not valid (a day without a month, a year outside 1 to 9999).
+    fn date_range(
+        &self,
+        year: i32,
+        month: Option<u32>,
+        day: Option<u32>,
+    ) -> Option<(NaiveDateTime, NaiveDateTime)> {
+        if !(1..=9999).contains(&year) || (day.is_some() && month.is_none()) {
+            return None;
+        }
+        let start = NaiveDate::from_ymd_opt(year, month.unwrap_or(1), day.unwrap_or(1))?;
+        let end = match (month, day) {
+            (_, Some(_)) => start.succ_opt(),
+            (Some(_), None) => start.checked_add_months(chrono::Months::new(1)),
+            (None, None) => NaiveDate::from_ymd_opt(year + 1, 1, 1),
+        }?;
+        let utc = |d: NaiveDate| {
+            d.and_time(chrono::NaiveTime::MIN)
+                .checked_sub_signed(self.offset_duration())
+                .map(storable)
+        };
+        Some((utc(start)?, utc(end)?))
+    }
+
     /// Whether page `paged` of a list of `count` posts is empty, so the request is not found, as
     /// `handle_404` decides for a paged query that found nothing.
     fn past_the_end(&self, count: i64, paged: u32) -> bool {
@@ -282,7 +443,7 @@ impl Site {
 }
 
 /// Option `name`, with a value that is not valid JSON counted as unset.
-async fn option(db: &Database, name: &str) -> Result<Option<Value>, Error> {
+pub(super) async fn option(db: &Database, name: &str) -> Result<Option<Value>, Error> {
     match get_option(db, name).await {
         Ok(value) => Ok(value),
         Err(MetaError::InvalidJson(_)) => Ok(None),
@@ -291,7 +452,7 @@ async fn option(db: &Database, name: &str) -> Result<Option<Value>, Error> {
 }
 
 /// An option's text, WordPress storing strings and numbers alike.
-fn text(value: &Value) -> Option<String> {
+pub(super) fn text(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
@@ -300,7 +461,7 @@ fn text(value: &Value) -> Option<String> {
 }
 
 /// An option's number, from a JSON number or a numeric string.
-fn number(value: &Value) -> Option<f64> {
+pub(super) fn number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => s.trim().parse().ok(),
@@ -954,31 +1115,14 @@ impl Router<'_> {
             month = part(4, 6).or(month);
             day = part(6, 8).or(day);
         }
-        let Some(year) = year.filter(|y| (1..=9999).contains(y)) else {
+        let Some(year) = year else {
             return Ok(Resolved::NotFound);
         };
-        let start = NaiveDate::from_ymd_opt(year, month.unwrap_or(1), day.unwrap_or(1));
-        let Some(start) = start.filter(|_| day.is_none() || month.is_some()) else {
-            return Ok(Resolved::NotFound);
-        };
-        let end = match (month, day) {
-            (_, Some(_)) => start.succ_opt(),
-            (Some(_), None) => start.checked_add_months(chrono::Months::new(1)),
-            (None, None) => NaiveDate::from_ymd_opt(year + 1, 1, 1),
-        };
-        let Some(end) = end else {
-            return Ok(Resolved::NotFound);
-        };
-        let utc = |d: NaiveDate| {
-            d.and_time(chrono::NaiveTime::MIN)
-                .checked_sub_signed(self.offset())
-                .map(storable)
-        };
-        let (Some(from), Some(to)) = (utc(start), utc(end)) else {
+        let Some(range) = self.site.date_range(year, month, day) else {
             return Ok(Resolved::NotFound);
         };
         let listing = Listing {
-            range: Some((from, to)),
+            range: Some(range),
             ..Listing::default()
         };
         let count = listing.count(self.db).await?;
@@ -987,7 +1131,7 @@ impl Router<'_> {
 
     /// The site's offset as a duration, to turn local dates to UTC.
     fn offset(&self) -> Duration {
-        Duration::seconds(i64::from(self.site.offset.local_minus_utc()))
+        self.site.offset_duration()
     }
 
     /// Whether `post`'s local publish date matches the date parts in the URL.
@@ -1263,13 +1407,13 @@ impl Default for Listing<'_> {
 }
 
 impl Listing<'_> {
-    /// How many published posts the list has.
-    async fn count(&self, db: &Database) -> Result<i64, Error> {
+    /// The `FROM` and `WHERE` clauses, with their binds, or `None` when the list is empty
+    /// whatever the posts (an empty term list).
+    fn filter(&self) -> Option<(String, Vec<Sql>)> {
         let mut binds: Vec<Sql> = vec![PostStatus::Publish.into()];
         let types = vec!["?"; self.post_types.len()].join(", ");
         binds.extend(self.post_types.iter().map(|t| Sql::from(*t)));
-        let mut sql =
-            format!("SELECT COUNT(*) FROM posts p WHERE p.status = ? AND p.post_type IN ({types})");
+        let mut sql = format!("FROM posts p WHERE p.status = ? AND p.post_type IN ({types})");
         if let Some((from, to)) = self.range {
             sql.push_str(" AND p.published_at >= ? AND p.published_at < ?");
             binds.push(from.into());
@@ -1277,7 +1421,7 @@ impl Listing<'_> {
         }
         if let Some(ids) = &self.term_taxonomy_ids {
             if ids.is_empty() {
-                return Ok(0);
+                return None;
             }
             let marks = vec!["?"; ids.len()].join(", ");
             sql.push_str(&format!(
@@ -1298,7 +1442,46 @@ impl Listing<'_> {
             sql.push_str(columns);
             binds.extend(std::iter::repeat_n(Sql::from(like), 3));
         }
-        raw::fetch_scalar(db, &sql, &binds).await
+        Some((sql, binds))
+    }
+
+    /// How many published posts the list has.
+    async fn count(&self, db: &Database) -> Result<i64, Error> {
+        let Some((filter, binds)) = self.filter() else {
+            return Ok(0);
+        };
+        raw::fetch_scalar(db, &format!("SELECT COUNT(*) {filter}"), &binds).await
+    }
+
+    /// The posts of page `paged` of the list, newest first (`post_date DESC`, then the id, so
+    /// posts published in the same second keep one order), `per_page` to a page; every post
+    /// when `per_page` is `None`.
+    async fn fetch(
+        &self,
+        db: &Database,
+        per_page: Option<i64>,
+        paged: u32,
+    ) -> Result<Vec<Post>, Error> {
+        let Some((filter, mut binds)) = self.filter() else {
+            return Ok(Vec::new());
+        };
+        let mut sql = format!("SELECT p.id {filter} ORDER BY p.published_at DESC, p.id DESC");
+        if let Some(per_page) = per_page {
+            sql.push_str(" LIMIT ? OFFSET ?");
+            binds.push(per_page.into());
+            binds.push(i64::from(paged.max(1) - 1).saturating_mul(per_page).into());
+        }
+        let ids: Vec<(i64,)> = raw::fetch_all(db, &sql, &binds).await?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<i64> = ids.into_iter().map(|(id,)| id).collect();
+        let mut posts = Post::query()
+            .where_in(Post::PRIMARY_KEY, ids.clone())
+            .get(db)
+            .await?;
+        posts.sort_by_key(|post| ids.iter().position(|id| *id == post.id));
+        Ok(posts)
     }
 }
 
