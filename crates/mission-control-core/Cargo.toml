@@ -30,6 +30,10 @@ infer = "0.22"
 # The logging facade Rocket 0.5 logs through.
 log = "0.4"
 orbit-orm.workspace = true
+# The parsed template type `propel_runtime::Loader::template` returns (MIT).
+propel_parser = "0.3.0"
+# Renders themes from disk, confined to the theme and its parent (MIT).
+propel_runtime = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 # Scheduled event payloads are stored as JSON.
 serde_json = "1"
@@ -37,6 +41,8 @@ serde_json = "1"
 subtle = "2.6"
 # The `Decode` and `Type` traits, so `PostStatus` reads from a row. Orbit's own sqlx version.
 sqlx = { version = "0.9", default-features = false }
+# Parses `theme.toml` manifests (MIT OR Apache-2.0).
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 # The scheduler's background loop, and blocking threads for hook callbacks.
 tokio = { workspace = true, features = ["time"] }
 # Version 4 UUIDs for application passwords, as `wp_generate_uuid4` (MIT OR Apache-2.0).
@@ -46,3 +52,4 @@ zeroize = "1"
 
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }
+tempfile = "3"
