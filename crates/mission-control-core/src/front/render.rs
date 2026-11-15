@@ -40,7 +40,9 @@
 //!
 //! A post has `id`, `post_type`, `slug`, `title`, `url`, `content` (filtered by `the_content`;
 //! output raw), `excerpt` (HTML-safe: an auto excerpt is tag-stripped, a manual one escaped; output raw), `date`, `datetime` (ISO 8601), `author`,
-//! `classes` and `password_required`.
+//! `classes` and `password_required`. A manual excerpt stays escaped although kses filters
+//! excerpts on save ([`kses_post_fields`](crate::content::kses_post_fields)), because rows can
+//! be written without kses, by an import or before it existed (Ruling R34).
 //!
 //! A menu item ([`NavMenuItem`]) has `id`, `title`, `url` (empty when there is no safe link),
 //! `target`, `rel`, `attr_title`, `description`, `classes`, `current`, `aria_current` and
@@ -475,8 +477,10 @@ impl Frontend {
                     let excerpt = if post.excerpt.trim().is_empty() {
                         trim_excerpt(&content)
                     } else {
-                        // Ruling R34: kses does not run on save yet, so a manual excerpt is
-                        // text, escaped here, until it does.
+                        // Ruling R34, kept now that kses runs on save
+                        // (`content::kses_post_fields`): a row can be written without it (an
+                        // import, a row saved before kses existed, code that skips the save
+                        // helper), so a manual excerpt stays text, escaped here.
                         escape_html(&post.excerpt)
                     };
                     (post.title.clone(), content, excerpt)
