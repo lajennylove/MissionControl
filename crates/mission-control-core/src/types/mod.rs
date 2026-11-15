@@ -5,6 +5,7 @@
 //! code and by plugins in memory, the admin's in the database.
 
 pub mod definition;
+pub mod location;
 pub mod registry;
 
 pub use definition::{
@@ -15,4 +16,5 @@ pub use definition::{
     PostTypeDef, PostTypeLabels, Rewrite, RewriteRules, ShowInMenu, Support, TaxonomyCapabilities,
     TaxonomyDef, TaxonomyLabels,
 };
+pub use location::{Rule, ScreenContext, matches};
 pub use registry::{Definition, DefinitionKind, Registry, RegistryError};
