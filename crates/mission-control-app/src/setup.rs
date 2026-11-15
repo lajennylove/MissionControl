@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::restart::RestartHandle;
 use mission_control_core::config::{self, Config, ConfigError};
 use mission_control_core::install::preflight::{IssueCode, PreflightIssue, preflight};
 use rocket::fairing::AdHoc;
@@ -127,6 +128,16 @@ pub struct SetupState {
 /// path, and no database. At ignition it runs the installer's preflight checks on `install_dir`
 /// (where `.env` will be written) and the configured port, and shows their issues on the page.
 pub fn setup_rocket(install_dir: impl Into<PathBuf>) -> Rocket<Build> {
+    setup_rocket_with_restart(install_dir, &RestartHandle::new())
+}
+
+/// [`setup_rocket`] with `restart` in Rocket's state, so the wizard can restart the binary into
+/// normal mode once it has written `.env` (see [`crate::restart`]). `main` keeps a clone of the
+/// handle to see whether the restart was asked for when Rocket returns.
+pub fn setup_rocket_with_restart(
+    install_dir: impl Into<PathBuf>,
+    restart: &RestartHandle,
+) -> Rocket<Build> {
     let install_dir = install_dir.into();
     let redirects = [
         Method::Get,
@@ -139,7 +150,7 @@ pub fn setup_rocket(install_dir: impl Into<PathBuf>) -> Rocket<Build> {
     .into_iter()
     .map(|method| Route::ranked(REDIRECT_RANK, method, "/<_..>", ToInstaller));
 
-    rocket::build()
+    let rocket = rocket::build()
         .mount("/", rocket::routes![install])
         .mount("/", redirects.collect::<Vec<_>>())
         .attach(AdHoc::on_ignite("Mission Control preflight", |rocket| {
@@ -168,7 +179,8 @@ pub fn setup_rocket(install_dir: impl Into<PathBuf>) -> Rocket<Build> {
                     config.port
                 );
             })
-        }))
+        }));
+    restart.attach(rocket)
 }
 
 /// Runs the preflight `checks` on a blocking thread and logs the issues they find. When the

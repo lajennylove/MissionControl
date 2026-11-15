@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The binary's restart test hook (see `main.rs`). Enabled for the tests by the dev-dependency
+# below; never part of a normal build.
+test-hooks = []
+
 [dependencies]
 mission-control = { path = "../mission-control" }
 mission-control-core = { path = "../mission-control-core" }
@@ -14,6 +19,8 @@ log = "0.4"
 rocket = "0.5.2"
 
 [dev-dependencies]
+# Turns on `test-hooks` for the binary the integration tests run.
+mission-control-app = { path = ".", features = ["test-hooks"] }
 # Encodes HTTP Basic credentials in the REST authentication tests.
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

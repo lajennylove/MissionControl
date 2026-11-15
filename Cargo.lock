@@ -1382,6 +1382,7 @@ dependencies = [
  "image",
  "log",
  "mission-control",
+ "mission-control-app",
  "mission-control-core",
  "mission-control-testing",
  "orbit-orm",
