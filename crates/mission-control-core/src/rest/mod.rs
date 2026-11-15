@@ -130,11 +130,12 @@ impl RestRoutes {
     /// Registers `route`, replacing a route with the same path. Registering a route in a new
     /// namespace adds the namespace's index route.
     pub fn register(&self, route: RouteSpec) {
-        let namespace = route.namespace.clone();
-        if !namespace.is_empty() && !self.read().contains_key(&format!("/{namespace}")) {
-            self.add_route(namespace_route(&namespace));
+        let mut routes = self.write();
+        let namespace_path = format!("/{}", route.namespace);
+        if !route.namespace.is_empty() && !routes.contains_key(&namespace_path) {
+            routes.insert(namespace_path, namespace_route(&route.namespace));
         }
-        self.add_route(route);
+        routes.insert(route.path.clone(), route);
     }
 
     fn add_route(&self, route: RouteSpec) {

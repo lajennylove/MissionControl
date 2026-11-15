@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 
 use mission_control::rocket_with_database;
 use mission_control_core::config::Config;
-use mission_control_core::content::set_option;
+use mission_control_core::content::{NewPost, Post, PostStatus, set_option};
 use mission_control_core::migrations::migrator;
-use mission_control_testing::{TestDatabase, create_users_table, database};
+use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
+use orbit_orm::raw;
 use rocket::http::{ContentType, Status};
 use rocket::local::asynchronous::Client;
 use serde_json::{Value, json};
@@ -154,7 +155,7 @@ async fn the_index_answers_without_the_trailing_slash_and_by_rest_route() {
     let (_test, client) = site().await;
     let (status, with_slash) = get_json(&client, "/wp-json/").await;
     assert_eq!(status, Status::Ok);
-    for uri in ["/wp-json", "/?rest_route=/", "/?rest_route="] {
+    for uri in ["/wp-json", "/?rest_route=/"] {
         let (status, index) = get_json(&client, uri).await;
         assert_eq!(status, Status::Ok, "{uri}");
         assert_eq!(index, with_slash, "{uri}");
@@ -230,4 +231,94 @@ async fn html_pages_advertise_the_api() {
         response.headers().get_one("Link"),
         Some("<https://example.test/wp-json/>; rel=\"https://api.w.org/\"")
     );
+}
+
+#[rocket::async_test]
+async fn an_empty_or_relative_rest_route_is_the_front_page() {
+    let (_test, client) = site().await;
+    for uri in ["/?rest_route=", "/?rest_route=wp/v2"] {
+        let response = client.get(uri).dispatch().await;
+        assert_eq!(response.status(), Status::Ok, "{uri}");
+        let body = response.into_string().await.unwrap();
+        assert!(body.starts_with("<!doctype html>"), "{uri}: {body}");
+    }
+}
+
+#[rocket::async_test]
+async fn unknown_rest_paths_are_always_rest_no_route() {
+    let (_test, client) = site().await;
+    for uri in ["/wp-json/.hidden", "/wp-json/a:b/c", "/wp-json/wp/v2/.x"] {
+        let (status, body) = get_json(&client, uri).await;
+        assert_eq!(status, Status::NotFound, "{uri}");
+        assert_eq!(body["code"], "rest_no_route", "{uri}");
+    }
+}
+
+#[rocket::async_test]
+async fn a_post_slugged_wp_json_is_shadowed_by_the_api() {
+    let (test, client) = site().await;
+    let db = test.db();
+    raw::execute(
+        db,
+        "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+        &["Ann".into(), unique_email("ann").into(), "hash".into()],
+    )
+    .await
+    .unwrap();
+    let author = raw::fetch_scalar(db, "SELECT MAX(id) FROM users", &[])
+        .await
+        .unwrap();
+    Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Publish,
+            title: "Shadowed".to_owned(),
+            slug: "wp-json".to_owned(),
+            content: "Body".to_owned(),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .unwrap();
+    let (status, index) = get_json(&client, "/wp-json/").await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(index["name"], "Test Site");
+}
+
+#[rocket::async_test]
+async fn an_unsafe_home_option_gives_relative_links() {
+    for home in [
+        "javascript:alert(1)",
+        "//evil.test",
+        "https://a.test/a\"b",
+        "https://a.test/a>b",
+        "https://a.test/a b",
+        "https://a.test/\u{1}x",
+        "https://a.test/\r\nSet-Cookie: x=1",
+    ] {
+        let (test, client) = site().await;
+        set_option(test.db(), "home", &json!(home)).await.unwrap();
+        set_option(test.db(), "siteurl", &json!(home))
+            .await
+            .unwrap();
+        let (status, index) = get_json(&client, "/wp-json/").await;
+        assert_eq!(status, Status::Ok, "{home:?}");
+        assert_eq!(index["home"], "", "{home:?}");
+        assert_eq!(index["url"], "", "{home:?}");
+        assert_eq!(
+            index["routes"]["/"]["_links"]["self"][0]["href"], "/wp-json/",
+            "{home:?}"
+        );
+        let (_, ns) = get_json(&client, "/wp-json/wp/v2").await;
+        assert_eq!(
+            ns["routes"]["/wp/v2"]["_links"]["self"][0]["href"], "/wp-json/wp/v2",
+            "{home:?}"
+        );
+        let response = client.get("/").dispatch().await;
+        assert_eq!(
+            response.headers().get_one("Link"),
+            Some("</wp-json/>; rel=\"https://api.w.org/\""),
+            "{home:?}"
+        );
+    }
 }

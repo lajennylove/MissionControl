@@ -68,10 +68,13 @@ async fn front(
         Ok(response) => {
             // Not worth failing a page for: without the home option the header is left out.
             let api = match &response {
-                Response::Page { .. } => discovery::home_address(db)
-                    .await
-                    .map(|home| discovery::index_url(&home))
-                    .ok(),
+                Response::Page { .. } => match discovery::home_address(db).await {
+                    Ok(home) => Some(discovery::index_url(&home)),
+                    Err(e) => {
+                        log::warn!("Could not read the home option for the Link header: {e}");
+                        None
+                    }
+                },
                 Response::Redirect { .. } => None,
             };
             Ok(Page { response, api })

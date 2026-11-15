@@ -12,6 +12,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::content::{MetaError, get_option};
+use crate::front::site_address;
 use crate::rest::{RestRoutes, RouteSpec};
 use orbit_orm::Database;
 
@@ -20,26 +21,6 @@ pub const REST_PREFIX: &str = "wp-json";
 
 /// The REST handbook, the `help` link of the index.
 const HANDBOOK_URL: &str = "https://developer.wordpress.org/rest-api/";
-
-/// `home` as a web address without a trailing slash, or an empty string when the option is not
-/// set or not an http(s) address without characters that break out of a header or an attribute.
-/// An empty string makes links start at the root.
-pub fn site_address(home: &str) -> String {
-    let home = home.trim().trim_end_matches('/');
-    let lower = home.to_ascii_lowercase();
-    let is_web = ["http://", "https://"]
-        .iter()
-        .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
-    if is_web
-        && !home
-            .chars()
-            .any(|c| c.is_control() || "\"<>\\ ".contains(c))
-    {
-        home.to_owned()
-    } else {
-        String::new()
-    }
-}
 
 /// The address of the API's index under `home` (already through [`site_address`]):
 /// `https://example.com/wp-json/`.
@@ -62,14 +43,13 @@ fn rest_url(home: &str, path: &str) -> String {
 ///
 /// Fails with the database's error when an option cannot be read.
 pub async fn index(db: &Database, routes: &RestRoutes) -> Result<Value, MetaError> {
-    let home_option = text(db, "home").await?;
-    let home = site_address(&home_option);
+    let home = site_address(&text(db, "home").await?);
     let mut document = Map::new();
     let mut put = |key: &str, value: Value| document.insert(key.to_owned(), value);
     put("name", json!(text(db, "blogname").await?));
     put("description", json!(text(db, "blogdescription").await?));
-    put("url", json!(text(db, "siteurl").await?));
-    put("home", json!(home_option));
+    put("url", json!(site_address(&text(db, "siteurl").await?)));
+    put("home", json!(home));
     put("gmt_offset", json!(offset(db).await?));
     put("timezone_string", json!(text(db, "timezone_string").await?));
     put(
@@ -119,7 +99,8 @@ pub async fn namespace_index(
     })))
 }
 
-/// The `home` option as a web address without a trailing slash (see [`site_address`]).
+/// The `home` option as a web address without a trailing slash (see [`site_address`], which
+/// logs a value it cannot use).
 ///
 /// # Errors
 ///
@@ -151,7 +132,9 @@ fn routes_document(home: &str, routes: &[RouteSpec]) -> Value {
             "methods": route.methods(),
             "endpoints": endpoints,
         });
-        // A route with a pattern in it has no address of its own to link to.
+        // WordPress's `WP_REST_Server::get_data_for_routes` adds the `self` link only to routes
+        // without regex parameters (`(?P<name>...)`), as they have no address of their own
+        // (Controller ruling R44).
         if !route.path.contains("(?P<") {
             entry["_links"] = json!({"self": [{"href": rest_url(home, &route.path)}]});
         }

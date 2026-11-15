@@ -844,14 +844,21 @@ fn pagenum_link(
 
 /// The `home` option as a link prefix: an `http` or `https` address without its trailing
 /// slash, as `esc_url` keeps it. Anything else (a `javascript:` URL, a relative path) is logged
-/// and ignored, so links and redirects start from the root instead.
-fn site_address(home: &str) -> String {
+/// and ignored, so links and redirects start from the root instead. Control characters, quotes,
+/// angle brackets, spaces and backslashes make an address unusable, as they could break out of a
+/// header or an attribute. Shared by the front end and the REST API.
+pub fn site_address(home: &str) -> String {
     let home = home.trim().trim_end_matches('/');
     let lower = home.to_ascii_lowercase();
     let is_web = ["http://", "https://"]
         .iter()
         .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
-    if home.is_empty() || (is_web && !home.contains(['"', '<', '>', ' ', '\\'])) {
+    if home.is_empty()
+        || (is_web
+            && !home
+                .chars()
+                .any(|c| c.is_control() || "\"<>\\ ".contains(c)))
+    {
         home.to_owned()
     } else {
         log::warn!("The home option is not an http or https address; links start from the root.");
@@ -1116,6 +1123,11 @@ mod tests {
         assert_eq!(site_address("JavaScript:alert(1)"), "");
         assert_eq!(site_address("//evil.example"), "");
         assert_eq!(site_address(""), "");
+        assert_eq!(site_address("https://a.test/\u{1}x"), "");
+        assert_eq!(site_address("https://a.test/\r\nSet-Cookie: x"), "");
+        assert_eq!(site_address("https://a.test/a\"b"), "");
+        assert_eq!(site_address("https://a.test/a>b"), "");
+        assert_eq!(site_address("https://a.test/a b"), "");
     }
 
     #[test]

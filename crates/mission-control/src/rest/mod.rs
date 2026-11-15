@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use mission_control_core::rest::{RestRoutes, discovery};
 use orbit_orm::Database;
+use rocket::http::uri::Origin;
 use rocket::http::{ContentType, Status};
-use rocket::{Route, State};
+use rocket::request::{FromRequest, Outcome};
+use rocket::{Request, Route, State};
 
 /// A JSON body with WordPress's content type, `application/json; charset=UTF-8`.
 type Json = (Status, (ContentType, String));
@@ -53,22 +55,42 @@ async fn answer(db: &Database, routes: &RestRoutes, route: &str) -> Json {
 }
 
 /// `/wp-json`, with or without a trailing slash, and any path under it that no other REST route
-/// answers.
-#[rocket::get("/wp-json/<path..>")]
+/// answers. The path is read from the request, not from a path guard, so a segment such as
+/// `.hidden` or `a:b` gets `rest_no_route` like any other unknown route.
+#[rocket::get("/wp-json/<_..>")]
 async fn wp_json(
-    path: std::path::PathBuf,
+    origin: &Origin<'_>,
     db: &State<Arc<Database>>,
     routes: &State<Arc<RestRoutes>>,
 ) -> Json {
-    answer(db, routes, &path.to_string_lossy()).await
+    let path = origin.path().as_str();
+    let route = path.strip_prefix("/wp-json").unwrap_or(path);
+    answer(db, routes, route).await
+}
+
+/// The `rest_route` query of a request to the site root, as WordPress's `rest_api_loaded` reads
+/// it: a route with a leading slash (`/`, `/wp/v2`). An empty or relative value is no REST
+/// request, and the request goes on to the public site.
+struct RestRouteQuery(String);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for RestRouteQuery {
+    type Error = std::convert::Infallible;
+
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match request.query_value::<&str>("rest_route") {
+            Some(Ok(route)) if route.starts_with('/') => Outcome::Success(Self(route.to_owned())),
+            _ => Outcome::Forward(Status::NotFound),
+        }
+    }
 }
 
 /// WordPress's `/?rest_route=/wp/v2` form, which works where the server cannot rewrite paths.
-#[rocket::get("/?<rest_route>")]
+#[rocket::get("/")]
 async fn rest_route(
-    rest_route: &str,
+    route: RestRouteQuery,
     db: &State<Arc<Database>>,
     routes: &State<Arc<RestRoutes>>,
 ) -> Json {
-    answer(db, routes, rest_route).await
+    answer(db, routes, &route.0).await
 }
