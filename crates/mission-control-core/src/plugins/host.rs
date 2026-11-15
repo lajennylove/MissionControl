@@ -23,8 +23,9 @@
 //!
 //! A subscription made through the `hooks` interface is a JSON callback on the site's
 //! [`Hooks`] ([`Hooks::add_json_action`], [`Hooks::add_json_filter`]), owned by
-//! [`Owner::PluginLoad`] with the plugin's slug and a number unique to the load: core's `do_action` and `apply_filters` reach the
-//! plugin's `on-action` and `apply-filter` in priority order among the other callbacks. A
+//! [`Owner::PluginLoad`] with the plugin's slug and a number unique to the load: core's
+//! `do_action` and `apply_filters` reach the plugin's `on-action` and `apply-filter` in
+//! priority order among the other callbacks. A
 //! callback holds the plugin weakly: once the plugin is dropped, its callbacks do nothing.
 //!
 //! A plugin subscribes in its `activate` and only there; WordPress plugins may add hooks at any
@@ -78,10 +79,57 @@
 //!
 //! # Failures
 //!
-//! A plugin that traps (or fails in a call for any other reason wasmtime reports, or during
-//! whose call the host panics) is marked [`Plugin::trapped`], its hooks are removed and it is
-//! not called again. The error is logged. Task 12.4 deactivates such a plugin and tells the owner; Task 12.3 adds fuel and
-//! memory limits to the store, made in one place (`PluginHost::new_store`).
+//! A plugin that traps (or fails in a call for any other reason wasmtime reports, runs out of
+//! fuel, needs more memory than its limit, or during whose call the host panics) is marked
+//! [`Plugin::trapped`], its hooks are removed and it is not called again, as WordPress's
+//! recovery mode pauses a plugin that fails. The error is logged at `error` level and kept as
+//! [`Plugin::failure`]: that is where Task 12.4 reads why the plugin stopped, to deactivate it
+//! and tell the owner (its notice store). The call that failed returns: an activation returns
+//! the error, an action ends, and a filter keeps the value it was given, so the site goes on
+//! serving.
+//!
+//! # Limits
+//!
+//! Every store is made in one place (`PluginHost::new_store`) with the host's
+//! [`PluginLimits`]:
+//!
+//! - **Fuel.** wasmtime counts the plugin's WebAssembly instructions (about one unit each).
+//!   Every call into the plugin (`activate`, `on-action`, `apply-filter`, and any export added
+//!   later, since all go through one call wrapper), and its instantiation, starts with a fresh
+//!   [`PluginLimits::fuel_per_call`]; a call that uses it all traps and fails with
+//!   [`HostError::OutOfFuel`]. Fuel counts only the plugin's own code: the time spent in host
+//!   calls (a database query, a hook the plugin's call fires) is not counted, and there is no
+//!   wall-clock limit (no epoch interruption).
+//! - **Host calls** (Ruling R104). So that the host's own work is bounded too, each call of an
+//!   import (every function of `logging`, `hooks`, `content-read` and `content-write`) costs
+//!   [`PluginLimits::fuel_per_host_call`] fuel, taken before it runs; with less fuel left, the
+//!   plugin traps and fails with [`HostError::OutOfFuel`]. The imports are defined in one
+//!   place (`PluginHost::linker`), each through `charge`. The defaults allow about 1,000
+//!   import calls per plugin call, so about 1,000 database queries at most.
+//! - **Log lines.** A plugin call writes at most [`PluginLimits::log_lines_per_call`] lines
+//!   and [`PluginLimits::log_bytes_per_call`] bytes to the site's log; the call's lines past
+//!   either are dropped, after one warning.
+//! - **Memory.** The plugin's linear memories together may not grow past
+//!   [`PluginLimits::memory_max_bytes`], nor its tables past
+//!   [`PluginLimits::table_max_elements`] elements. A growth past a limit is refused as the
+//!   WebAssembly specification has it (`memory.grow` gives -1), so a plugin may handle it; one
+//!   that then traps (as Rust's allocator aborts) fails with [`HostError::OutOfMemory`]. A
+//!   component whose memory starts over the limit does not load ([`HostError::OutOfMemory`]).
+//!   The limit also bounds what the host copies (Task 12.2's M3): into the plugin, a value is
+//!   copied through the plugin's own allocator, so into its limited memory; out of it, a string
+//!   the plugin passes or returns lies in its memory, so it is at most the limit (1.5 times
+//!   that once a UTF-16 string is transcoded to UTF-8) before the host checks its size. One
+//!   import call takes up to three strings (`update-post`), so it may make the host allocate
+//!   up to three times that for the length of the call. The limit is per plugin: there is no
+//!   cap across plugins, so N plugins may hold N times [`PluginLimits::memory_max_bytes`].
+//! - **Counts.** A store holds at most [`PluginLimits::instances_max`] core instances,
+//!   [`PluginLimits::memories_max`] memories and [`PluginLimits::tables_max`] tables; a
+//!   component with more does not load ([`HostError::Instantiate`]).
+//! - **Nesting.** A plugin's call may fire hooks that reach other plugins (once content
+//!   writes fire core's hooks; they do not yet). Each store has its own wasm stack limit ([`MAX_WASM_STACK_BYTES`]),
+//!   all on the one native stack of the thread, so a long chain could overflow it: at most
+//!   [`MAX_NESTED_PLUGIN_CALLS`] plugin calls run nested on a thread, and a deeper one is
+//!   skipped with a warning, as a nested call of the same plugin is.
 //!
 //! # Bounds
 //!
@@ -104,8 +152,8 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use orbit_orm::Database;
 use semver::Version;
 use tokio::runtime::{Handle, RuntimeFlavor};
-use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::component::{Component, Linker, LinkerInstance};
+use wasmtime::{Config, Engine, ResourceLimiter, Store, StoreContextMut, Trap};
 
 use super::content::{self, ContentError};
 use super::manifest::{HOST_API_VERSION, Manifest, Permission};
@@ -139,8 +187,10 @@ pub const MAX_COMPONENT_BYTES: usize = 32 * 1024 * 1024;
 /// The longest hook name a plugin may subscribe to, in bytes.
 pub const MAX_HOOK_NAME_BYTES: usize = 128;
 
-/// The most subscriptions one plugin may make.
-pub const MAX_SUBSCRIPTIONS: usize = 1024;
+/// The most subscriptions one plugin may make. Each subscription is a host call, charged
+/// [`PluginLimits::fuel_per_host_call`], so it stays below the about 1,000 host calls the
+/// default fuel allows in one `activate`.
+pub const MAX_SUBSCRIPTIONS: usize = 512;
 
 /// The largest hook payload or filter value passed to a plugin, and taken back from it, in
 /// bytes of JSON (4 MiB).
@@ -155,6 +205,100 @@ pub const MAX_PLUGIN_MESSAGE_CHARS: usize = 1024;
 /// The largest stack a plugin's code may use, in bytes (512 KiB, wasmtime's default, set so it
 /// does not change with wasmtime's).
 pub const MAX_WASM_STACK_BYTES: usize = 512 * 1024;
+
+/// The limits of a plugin's calls and memory (design section 4.2), given to
+/// [`PluginHost::with_limits`]; [`PluginHost::new`] takes the [`Default`] ones. See the module
+/// documentation, "Limits".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginLimits {
+    /// The fuel each call into a plugin starts with, about one unit per WebAssembly instruction
+    /// the plugin runs; a call that uses it all fails with [`HostError::OutOfFuel`]. Default one
+    /// billion, measured on an Apple-silicon laptop in a release build: a plugin that loops
+    /// forever is stopped after about 0.1 s of a tight loop (longer for code that touches
+    /// memory), and a filter that reads and changes every byte of a 256 KiB post uses about 6
+    /// million, so a plugin has more than a hundred times that before it is stopped.
+    pub fuel_per_call: u64,
+    /// The fuel each call of an import (a host call: logging, hooks, content) costs, taken from
+    /// the call's [`PluginLimits::fuel_per_call`], so the host's work for a plugin is bounded
+    /// too (Ruling R104). Default one million: with the default fuel per call, about 1,000
+    /// import calls, so about 1,000 database queries, per plugin call.
+    pub fuel_per_host_call: u64,
+    /// The most lines a plugin may write to the site's log in one call; the call's lines past
+    /// it are dropped, after one warning. Default 100.
+    pub log_lines_per_call: usize,
+    /// The most bytes of messages a plugin may write to the site's log in one call; the call's
+    /// lines past it are dropped, after one warning. Default 64 KiB.
+    pub log_bytes_per_call: usize,
+    /// The most bytes a plugin's linear memories may hold together. Default 64 MiB: sixteen
+    /// times [`MAX_JSON_BYTES`], room for a plugin to parse the largest value it is passed.
+    ///
+    /// It bounds what the host copies out of the plugin: a string the plugin passes or returns
+    /// is at most this many bytes (1.5 times for a UTF-16 string transcoded), and one import
+    /// call, with up to three strings, may make the host allocate up to three times that while
+    /// it runs. The limit is per plugin; there is no cap across plugins.
+    pub memory_max_bytes: usize,
+    /// The most elements a plugin's tables may hold together. Default 100,000, far more than
+    /// the function tables a compiled plugin has.
+    pub table_max_elements: usize,
+    /// The most core instances a plugin's store may hold. Default 64; a component built from
+    /// Rust has a handful.
+    pub instances_max: usize,
+    /// The most linear memories a plugin's store may hold. Default 8; a component built from
+    /// Rust has one.
+    pub memories_max: usize,
+    /// The most tables a plugin's store may hold. Default 64; a component built from Rust has
+    /// a few.
+    pub tables_max: usize,
+}
+
+impl Default for PluginLimits {
+    fn default() -> Self {
+        Self {
+            fuel_per_call: 1_000_000_000,
+            fuel_per_host_call: 1_000_000,
+            log_lines_per_call: 100,
+            log_bytes_per_call: 64 * 1024,
+            memory_max_bytes: 64 * 1024 * 1024,
+            table_max_elements: 100_000,
+            instances_max: 64,
+            memories_max: 8,
+            tables_max: 64,
+        }
+    }
+}
+
+impl PluginLimits {
+    /// Refuses limits that leave a plugin nothing to run with: no fuel, a host call costing
+    /// nothing or more than a whole call, less memory than one WebAssembly page (64 KiB), or no
+    /// instance or memory.
+    fn check(&self) -> Result<(), HostError> {
+        let invalid = |message: &str| Err(HostError::InvalidLimits(message.to_owned()));
+        if self.fuel_per_call == 0 {
+            return invalid("`fuel_per_call` is 0: no plugin could run");
+        }
+        if self.fuel_per_host_call == 0 {
+            return invalid("`fuel_per_host_call` is 0: host calls would be free and unbounded");
+        }
+        if self.fuel_per_host_call > self.fuel_per_call {
+            return invalid("`fuel_per_host_call` is over `fuel_per_call`: no host call could run");
+        }
+        if self.memory_max_bytes < WASM_PAGE_BYTES {
+            return invalid("`memory_max_bytes` is under one WebAssembly page (64 KiB)");
+        }
+        if self.instances_max == 0 || self.memories_max == 0 {
+            return invalid("`instances_max` and `memories_max` must be at least 1");
+        }
+        Ok(())
+    }
+}
+
+/// The size of a WebAssembly page, the unit linear memory grows by.
+const WASM_PAGE_BYTES: usize = 64 * 1024;
+
+/// The most plugin calls that may run nested on one thread (a plugin's call fires a hook that
+/// reaches another plugin, and so on); a deeper call is skipped with a warning. Each store has
+/// its own wasm stack limit on the thread's one native stack, so the chain is kept short.
+pub const MAX_NESTED_PLUGIN_CALLS: usize = 4;
 
 /// Hooks no plugin may subscribe to (Ruling R102): those that decide who may do what, carry
 /// credentials (passwords, reset keys, mail with either), or switch a security check off
@@ -295,6 +439,9 @@ const LOG_TARGET: &str = "mission_control::plugins";
 pub enum HostError {
     /// wasmtime could not be set up.
     Engine(String),
+    /// The [`PluginLimits`] given to [`PluginHost::with_limits`] leave a plugin nothing to run
+    /// with, such as zero fuel.
+    InvalidLimits(String),
     /// The bytes are not a valid WebAssembly component, or are too large.
     Compile(String),
     /// The component imports something the host does not provide: another package, or an API
@@ -317,6 +464,16 @@ pub enum HostError {
     Activation(String),
     /// The plugin trapped or failed in a call, or had trapped before.
     Trap(String),
+    /// The plugin used all the fuel of a call ([`PluginLimits::fuel_per_call`]): it ran too
+    /// long, or loops forever.
+    OutOfFuel {
+        /// The fuel the call started with.
+        fuel: u64,
+    },
+    /// The plugin needed more memory, or more table elements, than its limits
+    /// ([`PluginLimits::memory_max_bytes`], [`PluginLimits::table_max_elements`]), with what
+    /// was refused.
+    OutOfMemory(String),
     /// The plugin was deactivated ([`Plugin::remove_hooks`]); load it again to activate it.
     Deactivated,
     /// The plugin was activated before: a load is activated once.
@@ -333,6 +490,7 @@ impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Engine(e) => write!(f, "the plugin host could not start: {e}"),
+            Self::InvalidLimits(e) => write!(f, "the plugin limits are not valid: {e}"),
             Self::Compile(e) => write!(f, "the plugin is not a valid WebAssembly component: {e}"),
             Self::UnknownImport { import } => write!(
                 f,
@@ -347,6 +505,12 @@ impl fmt::Display for HostError {
             Self::Instantiate(e) => write!(f, "the plugin could not be started: {e}"),
             Self::Activation(e) => write!(f, "the plugin refused to activate: {e}"),
             Self::Trap(e) => write!(f, "the plugin failed: {e}"),
+            Self::OutOfFuel { fuel } => write!(
+                f,
+                "the plugin used all the fuel of a call ({fuel} units): it ran too long, or \
+                 loops forever"
+            ),
+            Self::OutOfMemory(e) => write!(f, "the plugin needed more memory than it may use: {e}"),
             Self::Deactivated => {
                 f.write_str("the plugin is deactivated; load it again to activate it")
             }
@@ -397,6 +561,7 @@ pub struct PluginHost {
     engine: Engine,
     hooks: Arc<Hooks>,
     db: Arc<Database>,
+    limits: PluginLimits,
     /// The runtime the host was created in, for content calls from threads outside it.
     runtime: Option<Handle>,
     /// The plugins loaded, by slug.
@@ -412,15 +577,33 @@ impl fmt::Debug for PluginHost {
 }
 
 impl PluginHost {
-    /// A host whose plugins subscribe on `hooks` and reach content in `db`. Created inside a
-    /// Tokio runtime, it keeps that runtime for content calls made from outside one.
+    /// A host whose plugins subscribe on `hooks` and reach content in `db`, with the default
+    /// [`PluginLimits`]. Created inside a Tokio runtime, it keeps that runtime for content
+    /// calls made from outside one.
     ///
     /// # Errors
     ///
     /// [`HostError::Engine`] when wasmtime cannot be set up on this machine.
     pub fn new(hooks: Arc<Hooks>, db: Arc<Database>) -> Result<Self, HostError> {
+        Self::with_limits(hooks, db, PluginLimits::default())
+    }
+
+    /// A host as [`PluginHost::new`] makes, whose plugins run within `limits`.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::InvalidLimits`] when `limits` leave a plugin nothing to run with (zero
+    /// fuel, a host call costing nothing or more than a call, less than 64 KiB of memory, no
+    /// instance or memory); [`HostError::Engine`] when wasmtime cannot be set up on this
+    /// machine.
+    pub fn with_limits(
+        hooks: Arc<Hooks>,
+        db: Arc<Database>,
+        limits: PluginLimits,
+    ) -> Result<Self, HostError> {
+        limits.check()?;
         let mut config = Config::new();
-        config.wasm_component_model(true);
+        config.wasm_component_model(true).consume_fuel(true);
         // Only the proposals plugins need: what Rust's and C's wasm32 targets emit by default
         // (bulk memory, multi-value, reference types, SIMD, ...). Threads and the async
         // component model are not compiled in.
@@ -441,10 +624,16 @@ impl PluginHost {
             engine,
             hooks,
             db,
+            limits,
             runtime: Handle::try_current().ok(),
             loaded: Mutex::new(HashMap::new()),
             next_load: AtomicU64::new(0),
         })
+    }
+
+    /// The limits the host's plugins run within.
+    pub fn limits(&self) -> &PluginLimits {
+        &self.limits
     }
 
     /// Whether a plugin with `slug` is loaded and neither deactivated nor stopped.
@@ -470,7 +659,10 @@ impl PluginHost {
     /// [`HostError::Compile`] for bytes that are not a component (a core module, text) or are
     /// over [`MAX_COMPONENT_BYTES`]; [`HostError::UnknownImport`] and
     /// [`HostError::MissingPermission`] for an import the host does not provide or the manifest
-    /// does not grant; [`HostError::Instantiate`] when instantiation fails;
+    /// does not grant; [`HostError::Instantiate`] when instantiation fails, or the component
+    /// has more instances, memories or tables than [`PluginLimits`] allows;
+    /// [`HostError::OutOfMemory`] when its memory or tables start over the limits;
+    /// [`HostError::OutOfFuel`] when its start functions use all the fuel;
     /// [`HostError::AlreadyLoaded`] when a plugin with the same slug is loaded in this host and
     /// neither deactivated nor stopped (its hooks are owned by the slug).
     pub fn load(&self, manifest: Manifest, wasm: &[u8]) -> Result<Arc<Plugin>, HostError> {
@@ -501,9 +693,17 @@ impl PluginHost {
             db: Arc::clone(&self.db),
             runtime: self.runtime.clone(),
             plugin: Weak::new(),
-        });
-        let bindings = bindings::Plugin::instantiate(&mut store, &component, &linker)
-            .map_err(|e| HostError::Instantiate(format!("{e:#}")))?;
+            limits: self.limits,
+            limiter: Limiter::new(self.limits),
+            log: LogBudget::default(),
+        })?;
+        let bindings = match bindings::Plugin::instantiate(&mut store, &component, &linker) {
+            Ok(bindings) => bindings,
+            Err(e) => {
+                return Err(failure(&e, &mut store, self.limits.fuel_per_call)
+                    .unwrap_or_else(|| HostError::Instantiate(format!("{e:#}"))));
+            }
+        };
         let mut loaded = self.loaded();
         if Self::is_loaded(&loaded, &manifest.slug) {
             return Err(already());
@@ -514,7 +714,9 @@ impl PluginHost {
             owner,
             hooks: Arc::clone(&self.hooks),
             instance: Mutex::new(Instance { store, bindings }),
+            fuel_per_call: self.limits.fuel_per_call,
             trapped: AtomicBool::new(false),
+            failure: Mutex::new(None),
             deactivated: AtomicBool::new(false),
             activated: AtomicBool::new(false),
             activating: AtomicBool::new(false),
@@ -525,10 +727,15 @@ impl PluginHost {
         Ok(plugin)
     }
 
-    /// The store a plugin runs in. Every store is made here, so the limits of Task 12.3 (fuel,
-    /// memory) are set in one place.
-    fn new_store(&self, state: HostState) -> Store<HostState> {
-        Store::new(&self.engine, state)
+    /// The store a plugin runs in, with the host's limits: every store is made here. It holds
+    /// the fuel of one call, for the instantiation; [`Plugin::call`] refills it for each call.
+    fn new_store(&self, state: HostState) -> Result<Store<HostState>, HostError> {
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|state| &mut state.limiter);
+        store
+            .set_fuel(self.limits.fuel_per_call)
+            .map_err(|e| HostError::Engine(format!("{e:#}")))?;
+        Ok(store)
     }
 
     /// Refuses an import the host does not provide or `manifest` does not grant.
@@ -552,26 +759,147 @@ impl PluginHost {
         Ok(())
     }
 
-    /// A linker with the interfaces `manifest` grants, and only those.
+    /// A linker with the interfaces `manifest` grants, and only those. Every import is defined
+    /// here, and each runs through [`charge`], which takes
+    /// [`PluginLimits::fuel_per_host_call`] fuel before the import runs (Ruling R104).
     fn linker(&self, manifest: &Manifest) -> Result<Linker<HostState>, HostError> {
         let mut linker = Linker::new(&self.engine);
-        let engine_error = |e: wasmtime::Error| HostError::Engine(format!("{e:#}"));
-        logging::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)
-            .map_err(engine_error)?;
+        let mut define =
+            |interface: &str,
+             imports: fn(&mut LinkerInstance<'_, HostState>) -> wasmtime::Result<()>|
+             -> Result<(), HostError> {
+                let name = format!("{PACKAGE}/{interface}@{HOST_API_VERSION}");
+                linker
+                    .instance(&name)
+                    .and_then(|mut instance| imports(&mut instance))
+                    .map_err(|e| HostError::Engine(format!("{e:#}")))
+            };
+        define("logging", define_logging)?;
         if manifest.allows(Permission::Hooks) {
-            wit_hooks::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)
-                .map_err(engine_error)?;
+            define("hooks", define_hooks)?;
         }
         if manifest.allows(Permission::ReadContent) {
-            content_read::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)
-                .map_err(engine_error)?;
+            define("content-read", define_content_read)?;
         }
         if manifest.allows(Permission::WriteContent) {
-            content_write::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)
-                .map_err(engine_error)?;
+            define("content-write", define_content_write)?;
         }
         Ok(linker)
     }
+}
+
+/// Takes [`PluginLimits::fuel_per_host_call`] fuel from the plugin's store for a call of an
+/// import; with less left, the plugin traps out of fuel and the import does not run.
+fn charge(store: &mut StoreContextMut<'_, HostState>) -> wasmtime::Result<()> {
+    let cost = store.data().limits.fuel_per_host_call;
+    let left = store.get_fuel()?;
+    match left.checked_sub(cost) {
+        Some(rest) => store.set_fuel(rest),
+        None => {
+            store.set_fuel(0)?;
+            Err(Trap::OutOfFuel.into())
+        }
+    }
+}
+
+/// The `logging` interface's import, charged.
+fn define_logging(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime::Result<()> {
+    imports.func_wrap(
+        "log",
+        |mut store: StoreContextMut<'_, HostState>, (level, message): (logging::Level, String)| {
+            charge(&mut store)?;
+            logging::Host::log(store.data_mut(), level, message);
+            Ok(())
+        },
+    )
+}
+
+/// The `hooks` interface's imports, charged.
+fn define_hooks(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime::Result<()> {
+    imports.func_wrap(
+        "add-action",
+        |mut store: StoreContextMut<'_, HostState>, (name, priority): (String, i32)| {
+            charge(&mut store)?;
+            Ok((wit_hooks::Host::add_action(
+                store.data_mut(),
+                name,
+                priority,
+            ),))
+        },
+    )?;
+    imports.func_wrap(
+        "add-filter",
+        |mut store: StoreContextMut<'_, HostState>, (name, priority): (String, i32)| {
+            charge(&mut store)?;
+            Ok((wit_hooks::Host::add_filter(
+                store.data_mut(),
+                name,
+                priority,
+            ),))
+        },
+    )
+}
+
+/// The `content-read` interface's imports, charged.
+fn define_content_read(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime::Result<()> {
+    imports.func_wrap(
+        "get-post",
+        |mut store: StoreContextMut<'_, HostState>, (id,): (i64,)| {
+            charge(&mut store)?;
+            Ok((content_read::Host::get_post(store.data_mut(), id),))
+        },
+    )?;
+    imports.func_wrap(
+        "get-post-meta",
+        |mut store: StoreContextMut<'_, HostState>, (post_id, key): (i64, String)| {
+            charge(&mut store)?;
+            Ok((content_read::Host::get_post_meta(
+                store.data_mut(),
+                post_id,
+                key,
+            ),))
+        },
+    )
+}
+
+/// The `content-write` interface's imports, charged.
+fn define_content_write(imports: &mut LinkerInstance<'_, HostState>) -> wasmtime::Result<()> {
+    imports.func_wrap(
+        "update-post",
+        |mut store: StoreContextMut<'_, HostState>,
+         (id, changes): (i64, content_write::PostChanges)| {
+            charge(&mut store)?;
+            Ok((content_write::Host::update_post(
+                store.data_mut(),
+                id,
+                changes,
+            ),))
+        },
+    )?;
+    imports.func_wrap(
+        "set-post-meta",
+        |mut store: StoreContextMut<'_, HostState>,
+         (post_id, key, value_json): (i64, String, String)| {
+            charge(&mut store)?;
+            Ok((content_write::Host::set_post_meta(
+                store.data_mut(),
+                post_id,
+                key,
+                value_json,
+            ),))
+        },
+    )?;
+    imports.func_wrap(
+        "delete-post-meta",
+        |mut store: StoreContextMut<'_, HostState>, (post_id, key): (i64, String)| {
+            charge(&mut store)?;
+            Ok((content_write::Host::delete_post_meta(
+                store.data_mut(),
+                post_id,
+                key,
+            ),))
+        },
+    )
 }
 
 /// For an import named `mission-control:plugin/<interface>@<version>`, with an interface of
@@ -652,6 +980,118 @@ fn is_format_char(c: char) -> bool {
     )
 }
 
+/// What a failure of the plugin's code in `store` was, when it was a limit: fuel used up (the
+/// store started with `fuel`), or a growth the limiter refused. `None` for any other failure.
+/// Takes the limiter's refusal, so the next call starts without one.
+fn failure(error: &wasmtime::Error, store: &mut Store<HostState>, fuel: u64) -> Option<HostError> {
+    let refused = store.data_mut().limiter.refused.take();
+    if error.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) {
+        return Some(HostError::OutOfFuel { fuel });
+    }
+    refused.map(HostError::OutOfMemory)
+}
+
+/// `bytes` as a message shows it: in MiB or KiB when it is a whole number of them.
+fn size(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    if bytes >= MIB && bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes >= KIB && bytes.is_multiple_of(KIB) {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// The resource limiter of a plugin's store: [`PluginLimits`] on its memories, tables and
+/// instances. The memory and table limits count all the plugin's memories (tables) together.
+/// A growth past a limit is refused (`memory.grow` and `table.grow` give -1, an instantiation
+/// fails) and noted, so a trap that follows is reported as [`HostError::OutOfMemory`].
+struct Limiter {
+    limits: PluginLimits,
+    /// The bytes of the plugin's linear memories, together.
+    memory_bytes: usize,
+    /// The elements of the plugin's tables, together.
+    table_elements: usize,
+    /// What the last refused growth asked for, until the call ends.
+    refused: Option<String>,
+}
+
+impl Limiter {
+    fn new(limits: PluginLimits) -> Self {
+        Self {
+            limits,
+            memory_bytes: 0,
+            table_elements: 0,
+            refused: None,
+        }
+    }
+}
+
+impl ResourceLimiter for Limiter {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if maximum.is_some_and(|maximum| desired > maximum) {
+            return Ok(false);
+        }
+        let total = self
+            .memory_bytes
+            .saturating_sub(current)
+            .saturating_add(desired);
+        if total > self.limits.memory_max_bytes {
+            self.refused = Some(format!(
+                "its linear memory would hold {}; the limit is {}",
+                size(total),
+                size(self.limits.memory_max_bytes)
+            ));
+            return Ok(false);
+        }
+        self.memory_bytes = total;
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if maximum.is_some_and(|maximum| desired > maximum) {
+            return Ok(false);
+        }
+        let total = self
+            .table_elements
+            .saturating_sub(current)
+            .saturating_add(desired);
+        if total > self.limits.table_max_elements {
+            self.refused = Some(format!(
+                "its tables would hold {total} elements; the limit is {}",
+                self.limits.table_max_elements
+            ));
+            return Ok(false);
+        }
+        self.table_elements = total;
+        Ok(true)
+    }
+
+    fn instances(&self) -> usize {
+        self.limits.instances_max
+    }
+
+    fn tables(&self) -> usize {
+        self.limits.tables_max
+    }
+
+    fn memories(&self) -> usize {
+        self.limits.memories_max
+    }
+}
+
 /// The message of a panic's payload.
 fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
@@ -679,7 +1119,11 @@ pub struct Plugin {
     owner: Owner,
     hooks: Arc<Hooks>,
     instance: Mutex<Instance>,
+    /// The fuel each call starts with ([`PluginLimits::fuel_per_call`]).
+    fuel_per_call: u64,
     trapped: AtomicBool,
+    /// Why the plugin was stopped, once it is.
+    failure: Mutex<Option<HostError>>,
     deactivated: AtomicBool,
     /// Set by the first `activate`: a load is activated once.
     activated: AtomicBool,
@@ -702,10 +1146,12 @@ impl fmt::Debug for Plugin {
 enum CallError {
     /// The plugin is already running a call on this thread.
     Nested,
+    /// [`MAX_NESTED_PLUGIN_CALLS`] plugin calls are already running on this thread.
+    TooDeep,
     /// The plugin was deactivated.
     Deactivated,
-    /// The plugin trapped, now or before.
-    Trapped(String),
+    /// The plugin failed (trapped, ran out of fuel or memory), now or before.
+    Failed(HostError),
 }
 
 impl Plugin {
@@ -725,6 +1171,16 @@ impl Plugin {
         self.trapped.load(Ordering::SeqCst)
     }
 
+    /// Why the plugin was stopped ([`Plugin::trapped`]): [`HostError::Trap`],
+    /// [`HostError::OutOfFuel`] or [`HostError::OutOfMemory`]; `None` while it runs. This is
+    /// what the owner is told (Task 12.4).
+    pub fn failure(&self) -> Option<HostError> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Whether the plugin was deactivated ([`Plugin::remove_hooks`]): it is no longer called.
     pub fn deactivated(&self) -> bool {
         self.deactivated.load(Ordering::SeqCst)
@@ -737,7 +1193,9 @@ impl Plugin {
     ///
     /// [`HostError::Activation`] when the plugin refuses, with its message;
     /// [`HostError::Trap`] when it traps or had trapped, or is already running a call on this
-    /// thread; [`HostError::Deactivated`] when it was deactivated;
+    /// thread, or too many plugin calls are nested ([`MAX_NESTED_PLUGIN_CALLS`]);
+    /// [`HostError::OutOfFuel`] and [`HostError::OutOfMemory`] when it passes a limit;
+    /// [`HostError::Deactivated`] when it was deactivated;
     /// [`HostError::AlreadyActivated`] when it was activated before. Any failure deactivates
     /// the plugin and removes the hooks it subscribed before failing.
     pub fn activate(&self) -> Result<(), HostError> {
@@ -769,11 +1227,14 @@ impl Plugin {
         let error = match outcome {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(message)) => HostError::Activation(shown(&message)),
-            Err(CallError::Trapped(e)) => HostError::Trap(e),
+            Err(CallError::Failed(e)) => e,
             Err(CallError::Deactivated) => HostError::Deactivated,
             Err(CallError::Nested) => {
                 HostError::Trap("the plugin is already running a call on this thread".to_owned())
             }
+            Err(CallError::TooDeep) => HostError::Trap(format!(
+                "{MAX_NESTED_PLUGIN_CALLS} plugin calls are already running on this thread"
+            )),
         };
         self.remove_hooks();
         Err(error)
@@ -794,8 +1255,9 @@ impl Plugin {
     }
 
     /// Runs `f` on the instance: one call at a time, never nested on one thread, never after a
-    /// trap or a deactivation. A failure, or a panic of the host during the call, marks the
-    /// plugin trapped, removes its hooks and is logged.
+    /// trap or a deactivation, with a fresh [`PluginLimits::fuel_per_call`]. A failure (a limit
+    /// passed included), or a panic of the host during the call, marks the plugin trapped,
+    /// removes its hooks and is logged.
     ///
     /// The store's mutex and the plugin's code may block for the length of a call, so on a
     /// worker of a multi-thread Tokio runtime both run in `block_in_place`; a content call
@@ -815,19 +1277,42 @@ impl Plugin {
         if RUNNING.with(|running| running.borrow().contains(&id)) {
             return Err(CallError::Nested);
         }
+        if RUNNING.with(|running| running.borrow().len()) >= MAX_NESTED_PLUGIN_CALLS {
+            return Err(CallError::TooDeep);
+        }
         self.check_running()?;
         RUNNING.with(|running| running.borrow_mut().push(id));
         let _running = Running(id);
         let locked_call = || {
             let mut instance = self.lock();
             self.check_running()?;
-            match catch_unwind(AssertUnwindSafe(|| f(&mut instance))) {
-                Ok(Ok(value)) => Ok(value),
-                Ok(Err(e)) => Err(self.stop(&format!("{e:#}"))),
-                Err(panic) => Err(self.stop(&format!(
+            let instance = &mut *instance;
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let state = instance.store.data_mut();
+                state.limiter.refused = None;
+                state.log = LogBudget::default();
+                instance.store.set_fuel(self.fuel_per_call)?;
+                f(instance)
+            }));
+            match outcome {
+                Ok(Ok(value)) => {
+                    if let Some(refused) = instance.store.data_mut().limiter.refused.take() {
+                        log::warn!(
+                            target: LOG_TARGET,
+                            "[{}] a memory growth was refused ({refused}); the plugin went on",
+                            self.slug()
+                        );
+                    }
+                    Ok(value)
+                }
+                Ok(Err(e)) => Err(self.stop(
+                    failure(&e, &mut instance.store, self.fuel_per_call)
+                        .unwrap_or_else(|| HostError::Trap(shown(&format!("{e:#}")))),
+                )),
+                Err(panic) => Err(self.stop(HostError::Trap(shown(&format!(
                     "the site panicked during the call: {}",
                     panic_message(panic.as_ref())
-                ))),
+                ))))),
             }
         };
         if on_multi_thread_runtime() {
@@ -843,24 +1328,26 @@ impl Plugin {
             return Err(CallError::Deactivated);
         }
         if self.trapped() {
-            return Err(CallError::Trapped(
+            return Err(CallError::Failed(HostError::Trap(
                 "it failed before and is stopped".to_owned(),
-            ));
+            )));
         }
         Ok(())
     }
 
-    /// Stops the plugin after a failure: marks it trapped, removes its hooks and logs `error`.
-    fn stop(&self, error: &str) -> CallError {
-        let message = shown(error);
+    /// Stops the plugin after a failure: marks it trapped, keeps `error` as its
+    /// [`Plugin::failure`], removes its hooks and logs `error`. Task 12.4 tells the owner from
+    /// here.
+    fn stop(&self, error: HostError) -> CallError {
+        *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
         self.trapped.store(true, Ordering::SeqCst);
         self.hooks.remove_owner(&self.owner);
         log::error!(
             target: LOG_TARGET,
-            "[{}] the plugin failed and is stopped: {message}",
+            "[{}] the plugin failed and is stopped: {error}",
             self.slug()
         );
-        CallError::Trapped(message)
+        CallError::Failed(error)
     }
 
     /// Passes the action `name`, with `payload` as JSON text, to the plugin's `on-action`.
@@ -881,7 +1368,7 @@ impl Plugin {
                 .call_on_action(&mut instance.store, name, payload)
         });
         match outcome {
-            Ok(Ok(())) | Err(CallError::Trapped(_) | CallError::Deactivated) => {}
+            Ok(Ok(())) | Err(CallError::Failed(_) | CallError::Deactivated) => {}
             Ok(Err(message)) => log::error!(
                 target: LOG_TARGET,
                 "[{}] the handler of `{name}` failed: {}",
@@ -889,6 +1376,7 @@ impl Plugin {
                 shown(&message)
             ),
             Err(CallError::Nested) => self.warn_nested(name),
+            Err(CallError::TooDeep) => self.warn_too_deep(name),
         }
     }
 
@@ -931,12 +1419,25 @@ impl Plugin {
                 );
                 None
             }
-            Err(CallError::Trapped(_) | CallError::Deactivated) => None,
+            Err(CallError::Failed(_) | CallError::Deactivated) => None,
             Err(CallError::Nested) => {
                 self.warn_nested(name);
                 None
             }
+            Err(CallError::TooDeep) => {
+                self.warn_too_deep(name);
+                None
+            }
         }
+    }
+
+    fn warn_too_deep(&self, name: &str) {
+        log::warn!(
+            target: LOG_TARGET,
+            "[{}] `{name}` fired with {MAX_NESTED_PLUGIN_CALLS} plugin calls already running on \
+             this thread; the call is skipped",
+            self.slug()
+        );
     }
 
     fn warn_nested(&self, name: &str) {
@@ -957,6 +1458,22 @@ struct HostState {
     runtime: Option<Handle>,
     /// The plugin this store belongs to, set once it is loaded.
     plugin: Weak<Plugin>,
+    /// The host's limits.
+    limits: PluginLimits,
+    /// The store's limits on memories, tables and instances.
+    limiter: Limiter,
+    /// What the current call has written to the log.
+    log: LogBudget,
+}
+
+/// What a plugin's call has written to the site's log, against
+/// [`PluginLimits::log_lines_per_call`] and [`PluginLimits::log_bytes_per_call`].
+#[derive(Default)]
+struct LogBudget {
+    lines: usize,
+    bytes: usize,
+    /// Set once the budget is passed: the call's other lines are dropped.
+    dropping: bool,
 }
 
 /// Which kind of hook a subscription is on.
@@ -1103,13 +1620,27 @@ impl logging::Host for HostState {
             logging::Level::Debug => log::Level::Debug,
             logging::Level::Trace => log::Level::Trace,
         };
-        log::log!(
-            target: LOG_TARGET,
-            level,
-            "[{}] {}",
-            self.slug,
-            clean(&message, MAX_LOG_MESSAGE_CHARS)
-        );
+        if self.log.dropping {
+            return;
+        }
+        let message = clean(&message, MAX_LOG_MESSAGE_CHARS);
+        if self.log.lines >= self.limits.log_lines_per_call
+            || self.log.bytes.saturating_add(message.len()) > self.limits.log_bytes_per_call
+        {
+            self.log.dropping = true;
+            log::warn!(
+                target: LOG_TARGET,
+                "[{}] the plugin wrote more than {} lines or {} to the log in one call; the \
+                 call's other lines are dropped",
+                self.slug,
+                self.limits.log_lines_per_call,
+                size(self.limits.log_bytes_per_call)
+            );
+            return;
+        }
+        self.log.lines += 1;
+        self.log.bytes += message.len();
+        log::log!(target: LOG_TARGET, level, "[{}] {message}", self.slug);
     }
 }
 
