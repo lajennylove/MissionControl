@@ -47,6 +47,9 @@ orbit-orm.workspace = true
 propel_parser = "0.3.0"
 # Renders themes from disk, confined to the theme and its parent (MIT).
 propel_runtime = "0.3.0"
+# A plugin manifest's `version` and `requires` (the host API it needs), with Cargo's version and
+# requirement syntax (MIT OR Apache-2.0).
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 # SHA-256 for Gravatar addresses, as WordPress 6.8 hashes emails (MIT OR Apache-2.0). A version
 # already in the lock.

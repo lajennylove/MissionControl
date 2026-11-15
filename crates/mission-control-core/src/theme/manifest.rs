@@ -261,8 +261,8 @@ const MAX_ECHOED_NAME: usize = 64;
 
 /// What is wrong with a manifest and where, without echoing a value from the file: the text
 /// could be anything, and messages end up in logs. A key or `supports` value is named only when
-/// it is a short slug; a wrong type gives only the type expected.
-fn describe(error: &toml::de::Error, text: &str) -> String {
+/// it is a short slug; a wrong type gives only the type expected. The plugin manifest uses it too.
+pub(crate) fn describe(error: &toml::de::Error, text: &str) -> String {
     let message = error.message();
     let what = if let Some(key) = quoted_after(message, "unknown field `") {
         match echoable(key) {
