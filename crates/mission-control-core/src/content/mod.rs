@@ -35,7 +35,10 @@ pub use future::{
     PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
     schedule_future_post,
 };
-pub use kses::{PostFields, kses_data, kses_post, kses_post_fields, safecss_filter_attr};
+pub use kses::{
+    MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
+    safecss_filter_attr,
+};
 pub(crate) use meta::put_post_meta_in;
 pub use meta::{
     MetaError, delete_option, delete_post_meta, delete_term_meta, delete_user_meta, get_option,

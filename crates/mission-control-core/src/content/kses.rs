@@ -5,6 +5,8 @@
 //! content and the excerpt go through `wp_filter_post_kses` (the `$allowedposttags` list), and
 //! the title through `wp_filter_kses` (the smaller `$allowedtags` list). Administrators and
 //! editors hold `unfiltered_html` on a single site, so what they send is stored as sent.
+//! Mission Control departs from WordPress for titles (Ruling R39): a title is text, so
+//! [`kses_title`] strips every tag and decodes entities once, and themes escape it.
 //!
 //! **Every path that writes a post's title, content or excerpt for a user must pass the fields
 //! through [`kses_post_fields`] first** (the REST API's and the admin's create, update and
@@ -23,7 +25,7 @@
 //!   `hidden`, `id`, `lang`, `style`, `title`, `role`, `xml:lang`); `<object>` is left out,
 //!   because WordPress only keeps it for a PDF in the site's own uploads
 //!   (`_wp_kses_allow_pdf_objects`);
-//! - the tags and attributes of `$allowedtags`, without global attributes, for titles;
+//! - the tags and attributes of `$allowedtags`, without global attributes ([`kses_data`]);
 //! - the protocols of `wp_allowed_protocols` in every URL attribute (`href`, `src`, `cite`,
 //!   `longdesc`, `usemap`, `poster`); relative URLs are kept;
 //! - the `style` attribute through [`safecss_filter_attr`].
@@ -34,6 +36,10 @@
 //! `<!--nextpage-->`), so block-editor comments (`<!-- wp:paragraph -->`) do not survive; and
 //! the output is well-formed (tags closed, attributes quoted, entities written once: `&` as
 //! `&amp;`, `&eacute;` as `é`).
+//!
+//! Input nested deeper than [`MAX_NESTING`] elements is not parsed (the parser's time grows
+//! with length times depth); it is stored as escaped text. The input's size is bounded by the
+//! layer that receives it (the routes' request body limits), not by kses.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -415,13 +421,21 @@ const CSS_BANNED: &[&str] = &[
     "/*",
 ];
 
+/// The deepest nesting of elements kses parses, as browsers cap it (512). Past it, the input is
+/// not parsed: [`kses_post`] and [`kses_data`] store it as escaped text, [`kses_title`] as
+/// typed.
+pub const MAX_NESTING: usize = 512;
+
 /// The sanitiser for post content and excerpts.
 static POST_SANITIZER: LazyLock<Builder<'static>> =
     LazyLock::new(|| sanitizer(ALLOWED_POST_TAGS, GLOBAL_ATTRIBUTES, true));
 
-/// The sanitiser for titles.
+/// The sanitiser for `$allowedtags` ([`kses_data`]).
 static DATA_SANITIZER: LazyLock<Builder<'static>> =
     LazyLock::new(|| sanitizer(ALLOWED_TAGS, &[], false));
+
+/// The sanitiser for titles ([`kses_title`]): no tags at all.
+static TEXT_SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(&[], &[], false));
 
 /// A sanitiser that keeps `tags` with their attributes, `global` attributes on every tag (and
 /// `data-*` when `data_attributes`), URLs with an allowed protocol, and filtered styles.
@@ -490,8 +504,13 @@ fn allowed_url(url: &str) -> bool {
 /// protocol, `style` through [`safecss_filter_attr`], and the page markers `<!--more-->`,
 /// `<!--noteaser-->` and `<!--nextpage-->`. Everything else is removed: other tags are
 /// unwrapped (their text kept), `<script>` and `<style>` go with their content, and other
-/// comments go. See the [module documentation](self) for how it differs from WordPress.
+/// comments go. Unlike WordPress, the output is well-formed HTML (tags closed, attributes
+/// quoted, entities written once), and block-editor comments (`<!-- wp:… -->`) are removed.
+/// Input nested deeper than [`MAX_NESTING`] is stored as escaped text, unparsed.
 pub fn kses_post(html: &str) -> String {
+    if !nesting_within_cap(html) {
+        return escape_text(html);
+    }
     let (protected, token, markers) = protect_markers(html);
     let cleaned = POST_SANITIZER.clean(&protected).to_string();
     restore_markers(&cleaned, &token, &markers)
@@ -557,12 +576,373 @@ fn starts_tag(html: &str, name: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(['>', ' ', '/']))
 }
 
-/// `html` filtered for a title, as WordPress's `wp_filter_kses`: only the tags and attributes
-/// of `$allowedtags` (`a` with `href` and `title`, `abbr`, `acronym`, `b`, `blockquote`,
-/// `cite`, `code`, `del`, `em`, `i`, `q`, `s`, `strike`, `strong`), with URLs checked as in
-/// [`kses_post`]. Comments are removed.
+/// `html` filtered as WordPress's `wp_filter_kses` filters titles and comments: only the tags
+/// and attributes of `$allowedtags` (`a` with `href` and `title`, `abbr`, `acronym`, `b`,
+/// `blockquote`, `cite`, `code`, `del`, `em`, `i`, `q`, `s`, `strike`, `strong`), with URLs
+/// checked as in [`kses_post`]. Comments are removed. Mission Control's titles use
+/// [`kses_title`] instead (Ruling R39).
 pub fn kses_data(html: &str) -> String {
+    if !nesting_within_cap(html) {
+        return escape_text(html);
+    }
     DATA_SANITIZER.clean(html).to_string()
+}
+
+/// `title` as plain text, for a user without `unfiltered_html` (Ruling R39: a title is text,
+/// and themes escape it when they print it): every tag is stripped (`<script>` and `<style>`
+/// with their content, and comments), and entities are decoded once, so `A & <em>B</em>` and
+/// `A &amp; B` are both stored as `A & B`, and `&amp;lt;` as `&lt;`.
+///
+/// WordPress instead keeps the `$allowedtags` markup in titles ([`kses_data`]) and prints them
+/// raw; Ruling R39 departs from it.
+pub fn kses_title(title: &str) -> String {
+    if !nesting_within_cap(title) {
+        // Not parsed: kept as typed, which is text, as a title is.
+        return title.to_owned();
+    }
+    let text = TEXT_SANITIZER.clean(title).to_string();
+    decode_serialized_text(&text)
+}
+
+/// `html` as text, escaped as the sanitiser escapes text (`&`, `<`, `>` and the no-break
+/// space), so that it reads back as the same text and contains no markup. What kses stores for
+/// input nested past [`MAX_NESTING`].
+fn escape_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + html.len() / 4);
+    for c in html.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\u{a0}' => out.push_str("&nbsp;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The elements that never have content, so never stay open (HTML's void elements).
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "image", "img",
+    "input", "keygen", "link", "meta", "param", "source", "track", "wbr",
+];
+
+/// The elements [`nesting_within_cap`] does not count (outside SVG and MathML): the parser
+/// closes them itself when a sibling starts or their parent ends (`p`; table sections, rows and
+/// cells, which only open inside a counted `<table>` or `<template>`), or merges them into the
+/// document's own (`html`, `head`, `body`). None of them can nest inside itself without a
+/// counted element in between, so leaving them out at most doubles the depth the cap allows,
+/// and keeps unclosed `<p>` and table cells from adding up. (`li`, `dd`, `dt`, `option` and
+/// ruby text are counted: they close a sibling only in some contexts.)
+const UNCOUNTED_ELEMENTS: &[&str] = &[
+    "html", "head", "body", "p", "tr", "td", "th", "tbody", "thead", "tfoot", "caption", "colgroup",
+];
+
+/// The elements whose content the tokenizer reads as text up to their end tag (raw text and
+/// escapable raw text, with scripting on, as html5ever parses for ammonia).
+const RAW_TEXT_ELEMENTS: &[&str] = &[
+    "script", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "textarea", "title",
+];
+
+/// Whether `html` nests elements no deeper than [`MAX_NESTING`], found in one linear pass
+/// before html5ever parses it.
+///
+/// html5ever (as browsers' parsers) scans its stack of open elements for many tags, so its time
+/// grows with the input's length times its nesting: 100,000 nested `<div>` take seconds.
+/// Capping the nesting keeps kses linear in the input's length. **This guard is the only bound
+/// kses enforces; the size of the input is bounded by the layer that receives it** (the request
+/// body limit of the REST and admin routes, Rocket's data limits), not here.
+///
+/// The pass tokenizes as the HTML standard does (tags, quoted and unquoted attribute values,
+/// comments with all their endings, bogus comments, `DOCTYPE`, raw text elements, CDATA), and
+/// models the tree conservatively, so that it can count more open elements than the parser
+/// keeps, never fewer:
+///
+/// - every start tag of an element that is not void or [uncounted](UNCOUNTED_ELEMENTS) opens
+///   one (every start tag at all when the input has an `<svg` or `<math` tag, since in SVG and
+///   MathML those names are ordinary elements), `<li>` closing an open `<li>`, and `<dd>` or `<dt>` an open `<dd>` or `<dt>`, as the
+///   parser does;
+/// - an end tag closes only the element it names when that element is the last one open (and
+///   `</ul>`, `</ol>`, `</menu>` and `</dl>` their open items first); an end tag the parser
+///   would ignore, or one inside a comment, an attribute value, raw text or CDATA, closes
+///   nothing;
+/// - text that may be markup for the parser counts each `<` followed by a letter as an element
+///   that never closes: CDATA (a bogus comment outside SVG and MathML, which ends sooner), and,
+///   when the input has an `<svg` or `<math` tag anywhere, raw text and the rest of the input
+///   after `<plaintext>` (in SVG and MathML, `<style>`, `<title>` or `<plaintext>` hold
+///   markup); and after a
+///   `<script>` whose text holds `<!--` (where the parser's end of the script is hard to tell),
+///   no end tag closes anything.
+///
+/// Past the cap, the input is not parsed: [`kses_post`] and [`kses_data`] store it as escaped
+/// text (every `<` as `&lt;`), so nothing runs and nothing typed is lost, and [`kses_title`]
+/// keeps it as typed, as the text a title is.
+fn nesting_within_cap(html: &str) -> bool {
+    let bytes = html.as_bytes();
+    let length = bytes.len();
+    // The counted elements open, by name, last opened last.
+    let mut open: Vec<String> = Vec::new();
+    // Elements counted in text that may be markup; they never close.
+    let mut unclosable = 0usize;
+    // Once set, no end tag closes anything.
+    let mut no_closing = false;
+    // Whether the parser may be in SVG or MathML anywhere, where raw text is markup.
+    let foreign = contains_ignoring_case(bytes, b"<svg") || contains_ignoring_case(bytes, b"<math");
+    let mut i = 0;
+    while let Some(at) = bytes[i..].iter().position(|&b| b == b'<').map(|at| i + at) {
+        if open.len() + unclosable > MAX_NESTING {
+            return false;
+        }
+        i = at + 1;
+        let Some(&next) = bytes.get(i) else { break };
+        if next.is_ascii_alphabetic() {
+            let (name_end, after) = scan_tag(bytes, i);
+            let name = html[i..name_end].to_ascii_lowercase();
+            i = after;
+            // In SVG and MathML, these names are ordinary elements, which nest.
+            if !foreign
+                && (VOID_ELEMENTS.contains(&name.as_str())
+                    || UNCOUNTED_ELEMENTS.contains(&name.as_str()))
+            {
+                continue;
+            }
+            if name == "plaintext" {
+                // The rest is text for the parser, or markup in SVG and MathML.
+                if foreign {
+                    unclosable += 1 + count_tag_opens(&bytes[i..]);
+                }
+                break;
+            }
+            let top = open.last().map(String::as_str);
+            if (name == "li" && top == Some("li"))
+                || (matches!(name.as_str(), "dd" | "dt") && matches!(top, Some("dd" | "dt")))
+            {
+                open.pop();
+            }
+            if RAW_TEXT_ELEMENTS.contains(&name.as_str()) {
+                let close = find_raw_text_end(bytes, i, &name).unwrap_or(length);
+                let text = &bytes[i..close];
+                if foreign {
+                    unclosable += count_tag_opens(text);
+                }
+                if name == "script" && contains(text, b"<!--") {
+                    no_closing = true;
+                }
+                // The end tag is read as a tag on the next turn.
+                i = close;
+            }
+            open.push(name);
+        } else if next == b'/' {
+            match bytes.get(i + 1) {
+                Some(c) if c.is_ascii_alphabetic() => {
+                    let (name_end, after) = scan_tag(bytes, i + 1);
+                    let name = html[i + 1..name_end].to_ascii_lowercase();
+                    i = after;
+                    if !no_closing {
+                        close_element(&mut open, &name);
+                    }
+                }
+                Some(b'>') => i += 2,
+                // A bogus comment, up to the next `>`.
+                _ => i = skip_past(bytes, i, b">"),
+            }
+        } else if next == b'!' {
+            if bytes[i..].starts_with(b"!--") {
+                i = comment_end(bytes, i + 3);
+            } else if bytes[i..].starts_with(b"![CDATA[") {
+                // CDATA in SVG and MathML, a bogus comment elsewhere: read it as the longer one,
+                // counting what may be markup.
+                let end = find(bytes, i, b"]]>").map_or(length, |at| at + 3);
+                unclosable += count_tag_opens(&bytes[i..end]);
+                i = end;
+            } else {
+                // `DOCTYPE` or a bogus comment, up to the next `>`.
+                i = skip_past(bytes, i, b">");
+            }
+        } else if next == b'?' {
+            i = skip_past(bytes, i, b">");
+        }
+    }
+    open.len() + unclosable <= MAX_NESTING
+}
+
+/// Closes `name` in the model of [`nesting_within_cap`]: only when it is the last element open,
+/// after the open items of a list it ends.
+fn close_element(open: &mut Vec<String>, name: &str) {
+    let items: &[&str] = match name {
+        "ul" | "ol" | "menu" => &["li"],
+        "dl" => &["dd", "dt"],
+        _ => &[],
+    };
+    let below_items = open
+        .iter()
+        .rposition(|element| !items.contains(&element.as_str()));
+    if let Some(at) = below_items
+        && open[at] == name
+    {
+        open.truncate(at);
+    }
+}
+
+/// Whether `byte` is whitespace for the HTML tokenizer (with `\r`, which the parser turns into
+/// `\n` before tokenizing).
+fn is_html_space(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' ')
+}
+
+/// Reads a start or end tag whose name starts at `name_start`, as the HTML tokenizer reads it:
+/// the name, then attributes (a value is quoted only when `"` or `'` follows the `=`), up to
+/// the `>` outside any value. Returns the end of the name and the index after the `>` (the
+/// input's length when the tag does not end).
+fn scan_tag(bytes: &[u8], name_start: usize) -> (usize, usize) {
+    let length = bytes.len();
+    let mut i = name_start;
+    while i < length && !is_html_space(bytes[i]) && !matches!(bytes[i], b'/' | b'>') {
+        i += 1;
+    }
+    let name_end = i;
+    loop {
+        // Before an attribute name (a `/` not before `>` is read again here).
+        while i < length && (is_html_space(bytes[i]) || bytes[i] == b'/') {
+            i += 1;
+        }
+        if i >= length {
+            return (name_end, length);
+        }
+        if bytes[i] == b'>' {
+            return (name_end, i + 1);
+        }
+        // The attribute name: its first character may be anything, even `=`.
+        i += 1;
+        while i < length && !is_html_space(bytes[i]) && !matches!(bytes[i], b'/' | b'>' | b'=') {
+            i += 1;
+        }
+        while i < length && is_html_space(bytes[i]) {
+            i += 1;
+        }
+        if i < length && bytes[i] == b'=' {
+            i += 1;
+            while i < length && is_html_space(bytes[i]) {
+                i += 1;
+            }
+            match bytes.get(i) {
+                None => return (name_end, length),
+                Some(&quote @ (b'"' | b'\'')) => match find(bytes, i + 1, &[quote]) {
+                    Some(at) => i = at + 1,
+                    None => return (name_end, length),
+                },
+                Some(b'>') => return (name_end, i + 1),
+                Some(_) => {
+                    while i < length && !is_html_space(bytes[i]) && bytes[i] != b'>' {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The index after the comment whose text starts at `start` (after `<!--`), as the HTML
+/// tokenizer ends it: `<!-->`, `<!--->`, `-->` or `--!>`; the input's length when it does not
+/// end.
+fn comment_end(bytes: &[u8], start: usize) -> usize {
+    #[derive(Clone, Copy)]
+    enum State {
+        Start,
+        StartDash,
+        Text,
+        EndDash,
+        End,
+        Bang,
+    }
+    let mut state = State::Start;
+    for (offset, &byte) in bytes[start..].iter().enumerate() {
+        state = match (state, byte) {
+            (State::Start | State::StartDash | State::End | State::Bang, b'>') => {
+                return start + offset + 1;
+            }
+            (State::Start, b'-') => State::StartDash,
+            (State::StartDash | State::EndDash | State::End, b'-') => State::End,
+            (State::Text | State::Bang, b'-') => State::EndDash,
+            (State::End, b'!') => State::Bang,
+            _ => State::Text,
+        };
+    }
+    bytes.len()
+}
+
+/// The index of the end tag `</name` (any case, followed by whitespace, `/` or `>`) at or after
+/// `from`, where raw text of element `name` ends.
+fn find_raw_text_end(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
+    let mut i = from;
+    while let Some(at) = find(bytes, i, b"</") {
+        let after = at + 2 + name.len();
+        if bytes.len() > after
+            && bytes[at + 2..after].eq_ignore_ascii_case(name.as_bytes())
+            && (is_html_space(bytes[after]) || matches!(bytes[after], b'/' | b'>'))
+        {
+            return Some(at);
+        }
+        i = at + 2;
+    }
+    None
+}
+
+/// How many times `<` followed by an ASCII letter (what may open an element) occurs in `text`.
+fn count_tag_opens(text: &[u8]) -> usize {
+    text.windows(2)
+        .filter(|pair| pair[0] == b'<' && pair[1].is_ascii_alphabetic())
+        .count()
+}
+
+/// The index of the first `needle` at or after `from`.
+fn find(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    bytes
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|at| from + at)
+}
+
+/// Whether `needle` occurs in `bytes`.
+fn contains(bytes: &[u8], needle: &[u8]) -> bool {
+    find(bytes, 0, needle).is_some()
+}
+
+/// Whether `needle` (lower-case ASCII) occurs in `bytes` in any case.
+fn contains_ignoring_case(bytes: &[u8], needle: &[u8]) -> bool {
+    bytes
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// The index after the first `needle` at or after `from`, or the input's length.
+fn skip_past(bytes: &[u8], from: usize, needle: &[u8]) -> usize {
+    find(bytes, from, needle).map_or(bytes.len(), |at| at + needle.len())
+}
+
+/// `text`, a text node as the sanitiser writes it, with its four escapes (`&amp;`, `&lt;`,
+/// `&gt;`, `&nbsp;`) decoded in one pass, so `&amp;lt;` gives `&lt;`.
+fn decode_serialized_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let entity = &rest[at..];
+        let (decoded, length) = [
+            ("&amp;", '&'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+            ("&nbsp;", '\u{a0}'),
+        ]
+        .iter()
+        .find(|(name, _)| entity.starts_with(name))
+        .map_or(('&', 1), |(name, c)| (*c, name.len()));
+        out.push(decoded);
+        rest = &entity[length..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The fields of a post that kses filters on save: its title, content and excerpt.
@@ -578,11 +958,16 @@ pub struct PostFields {
 
 /// `fields` as they may be stored for `user`, as WordPress's `kses_init_filters` filters a
 /// save: when `user` lacks `unfiltered_html`, the content and the excerpt go through
-/// [`kses_post`] and the title through [`kses_data`]; otherwise (administrators and editors on
-/// a single site) they are returned as sent.
+/// [`kses_post`] and the title through [`kses_title`] (plain text, Ruling R39); otherwise
+/// (administrators and editors on a single site) they are returned as sent.
 ///
-/// Every path that saves a post's fields for a user calls this first; see the
-/// [module documentation](self).
+/// No `rel` is added to links with a `target`: WordPress 5.1 to 6.6 added `rel="noopener"` on
+/// save (`wp_targeted_link_rel`), but WordPress 6.7 deprecated it and no longer runs it.
+///
+/// Every path that saves a post's fields for a user calls this first (the REST API's and the
+/// admin's create, update and autosave routes, and imports that act for a user):
+/// [`Post::create`](super::Post::create), [`Post::save`](super::Post::save) and the revision
+/// and attachment writers store what they are given.
 ///
 /// ```ignore
 /// let fields = kses_post_fields(&user, PostFields { title, content, excerpt });
@@ -599,7 +984,7 @@ pub fn kses_post_fields(user: &UserCaps, fields: PostFields) -> PostFields {
         return fields;
     }
     PostFields {
-        title: kses_data(&fields.title),
+        title: kses_title(&fields.title),
         content: kses_post(&fields.content),
         excerpt: kses_post(&fields.excerpt),
     }
@@ -667,7 +1052,8 @@ fn more_text(text: &str) -> String {
 }
 
 /// The placeholder of marker `index`: the token, the index and an `x`, so that marker 1's
-/// placeholder is not the start of marker 10's.
+/// placeholder is not the start of marker 10's. The token (`mckses`, hex digits, `m`) never
+/// contains an `x`, so the first `x` after it ends the index.
 fn placeholder(token: &str, index: usize) -> String {
     format!("{token}{index}x")
 }

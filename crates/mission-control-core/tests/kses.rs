@@ -1,11 +1,15 @@
 //! Tests for kses, WordPress's HTML filter on save: `wp_kses_post` with `$allowedposttags`,
 //! `wp_filter_kses` with `$allowedtags`, `safecss_filter_attr` for the `style` attribute, and the
-//! save-path filter that runs them for a user without `unfiltered_html`. Pure logic: no database.
+//! save-path filter that runs them for a user without `unfiltered_html` (titles as plain text,
+//! Ruling R39), and the nesting cap that keeps parsing linear. Pure logic: no database.
+
+use std::time::{Duration, Instant};
 
 use std::collections::BTreeMap;
 
 use mission_control_core::content::{
-    PostFields, kses_data, kses_post, kses_post_fields, safecss_filter_attr,
+    MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
+    safecss_filter_attr,
 };
 use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, UserCaps};
 
@@ -147,10 +151,15 @@ fn kses_post_removes_unsafe_markup() {
             !output.to_lowercase().contains(banned),
             "{input:?} gave {output:?}, which contains {banned:?}"
         );
-        assert!(
-            output.contains(kept),
-            "{input:?} gave {output:?}, without {kept:?}"
-        );
+        if kept.is_empty() {
+            // Nothing of the input is left.
+            assert_eq!(output, "", "{input:?}");
+        } else {
+            assert!(
+                output.contains(kept),
+                "{input:?} gave {output:?}, without {kept:?}"
+            );
+        }
         // Filtering what was stored changes nothing more.
         assert_eq!(kses_post(&output), output, "{input:?}");
     }
@@ -300,6 +309,9 @@ fn safecss_follows_wordpress() {
             "width: calc(100% - var(--gap, 2px))",
         ),
         ("width: calc(100% - (2px)", ""),
+        // WordPress compares property names exactly (`in_array(..., true)`, no lower-casing).
+        ("COLOR: red", ""),
+        ("Color: red; color: blue", "color: blue"),
         ("color: red}body{color:blue", ""),
         ("color: red\nbackground: blue", "color: redbackground: blue"),
     ];
@@ -320,16 +332,149 @@ fn long_styles_are_filtered_in_linear_time() {
 }
 
 #[test]
+fn deep_nesting_is_refused_in_linear_time() {
+    // html5ever scans its stack of open elements, so 100,000 nested elements would take
+    // seconds; past the cap the input is not parsed but kept as escaped text.
+    let started = Instant::now();
+    let deep = "<div>".repeat(100_000);
+    let output = kses_post(&deep);
+    assert!(!output.contains('<'), "refused input is text");
+    assert!(output.starts_with("&lt;div&gt;&lt;div&gt;"));
+    assert_eq!(kses_data(&deep), output);
+    // A title past the cap is kept as typed: plain text, escaped when it is printed.
+    assert_eq!(
+        kses_title(&"<b>".repeat(MAX_NESTING + 1)),
+        "<b>".repeat(MAX_NESTING + 1)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // Up to the cap, nesting is parsed.
+    let at_cap = format!(
+        "{}x{}",
+        "<div>".repeat(MAX_NESTING),
+        "</div>".repeat(MAX_NESTING)
+    );
+    assert_eq!(kses_post(&at_cap), at_cap);
+    let past_cap = format!("<div>{at_cap}</div>");
+    assert!(kses_post(&past_cap).starts_with("&lt;div&gt;"));
+
+    // Closed elements do not count, nor do elements that close themselves or are void.
+    let siblings = "<div><span>x</span><img src=\"a.png\"><br></div>".repeat(5_000);
+    assert_eq!(kses_post(&siblings), siblings);
+    let lists = "<ul><li>a<li>b</ul><dl><dt>t<dd>d</dl><p>unclosed".repeat(1_000);
+    assert!(kses_post(&lists).starts_with("<ul><li>a</li><li>b</li></ul>"));
+    let tables = "<div><table><tr><td>x</table><p>y</div>".repeat(1_000);
+    assert!(kses_post(&tables).starts_with("<div><table>"));
+    let comments = "<div><!-- </span> --><p>x</div><script>if (a<b) {}</script>".repeat(1_000);
+    assert!(kses_post(&comments).starts_with("<div><p>x</p></div>"));
+    let attributes = "<a href=\"/x?a=1&b=2\" title='>' data-x=y>z</a><hr/>".repeat(1_000);
+    assert!(kses_post(&attributes).starts_with("<a href="));
+
+    // End tags the parser ignores do not close anything: in a comment, an attribute value, a
+    // script, a CDATA section, a bogus comment, or one that does not match the open element.
+    for unit in [
+        "<div><!--</div>-->",
+        "<div><!--x--!</div>-->",
+        "<div><!---</div>-->",
+        "<div title=\"</div>\">",
+        "<div title='</div>' a=b>",
+        "<div><script></div></script>",
+        "<div><textarea></div></textarea>",
+        "<div><![CDATA[</div>]]>",
+        "<div><?</div>",
+        "<div></span>",
+        "<x><div></x>",
+        "<rt>",
+        "<option><optgroup>",
+    ] {
+        let attack = unit.repeat(MAX_NESTING + 1);
+        let started = Instant::now();
+        let output = kses_post(&attack);
+        assert!(
+            output.starts_with("&lt;"),
+            "{unit:?} was parsed: {}",
+            &output[..output.len().min(80)]
+        );
+        assert!(started.elapsed() < Duration::from_secs(2), "{unit:?}");
+    }
+    // Markup inside raw text counts when the input has SVG or MathML, where the parser reads it
+    // as markup.
+    let svg = format!(
+        "<svg><style>{}</style></svg>",
+        "<div>".repeat(MAX_NESTING + 1)
+    );
+    assert!(kses_post(&svg).starts_with("&lt;"));
+    let math = format!("<MATH><title>{}</title>", "<div>".repeat(MAX_NESTING + 1));
+    assert!(kses_post(&math).starts_with("&lt;"));
+    let cdata = format!("<![CDATA[>{}]]>", "<div>".repeat(MAX_NESTING + 1));
+    assert!(kses_post(&cdata).starts_with("&lt;"));
+    // In SVG and MathML, void and self-closing HTML names are ordinary elements that nest.
+    for name in ["link", "image", "tr", "p", "html", "img"] {
+        let foreign = format!("<svg>{}", format!("<{name}>").repeat(MAX_NESTING + 1));
+        assert!(kses_post(&foreign).starts_with("&lt;"), "{name}");
+    }
+    let plaintext = format!("<svg><plaintext>{}", "<div>".repeat(MAX_NESTING + 1));
+    assert!(kses_post(&plaintext).starts_with("&lt;"));
+    let script_escape = format!(
+        "<script><!--<script>{}",
+        "</script><div>".repeat(MAX_NESTING + 1)
+    );
+    assert!(kses_post(&script_escape).starts_with("&lt;"));
+}
+
+#[test]
+fn titles_are_plain_text() {
+    // Ruling R39: a title is text, so tags are stripped and entities decoded once.
+    assert_eq!(kses_title("A & <em>B</em>"), "A & B");
+    assert_eq!(kses_title("Tom &amp; Jerry"), "Tom & Jerry");
+    assert_eq!(kses_title("&amp;lt;b&amp;gt;"), "&lt;b&gt;");
+    assert_eq!(kses_title("&lt;b&gt; is bold"), "<b> is bold");
+    assert_eq!(kses_title("a < b > c"), "a < b > c");
+    assert_eq!(
+        kses_title("Caf&eacute;&nbsp;\"x\" 'y'"),
+        "Caf\u{e9}\u{a0}\"x\" 'y'"
+    );
+    assert_eq!(
+        kses_title("Hi <script>alert(1)</script><!-- c -->there"),
+        "Hi there"
+    );
+    assert_eq!(kses_title("<a href=\"javascript:x\">link</a>"), "link");
+}
+
+#[test]
+fn targeted_links_get_no_rel_added() {
+    // WordPress 5.1 added `rel="noopener"` to links with a `target` on save
+    // (`wp_targeted_link_rel`); WordPress 6.7 deprecated it and no longer runs it.
+    let link = "<a href=\"https://example.com/\" target=\"_blank\">x</a>";
+    assert_eq!(kses_post(link), link);
+    let fields = PostFields {
+        content: link.to_owned(),
+        ..PostFields::default()
+    };
+    for role in [AUTHOR, EDITOR] {
+        assert_eq!(
+            kses_post_fields(&user(role), fields.clone()).content,
+            link,
+            "{role}"
+        );
+    }
+}
+
+#[test]
 fn authors_and_contributors_are_filtered_editors_and_administrators_are_not() {
     let sent = PostFields {
-        title: "Hi <script>alert(1)</script><b>there</b>".to_owned(),
+        title: "A & <em>B</em><script>alert(1)</script>".to_owned(),
         content: "<p onclick=\"x()\">Body</p><iframe src=\"https://e.example\"></iframe>"
             .to_owned(),
         excerpt: "<em>Short</em><img src=x onerror=alert(1)>".to_owned(),
     };
     for role in [AUTHOR, CONTRIBUTOR] {
         let saved = kses_post_fields(&user(role), sent.clone());
-        assert_eq!(saved.title, "Hi <b>there</b>", "{role}");
+        assert_eq!(saved.title, "A & B", "{role}");
         assert_eq!(saved.content, "<p>Body</p>", "{role}");
         assert_eq!(saved.excerpt, "<em>Short</em><img src=\"x\">", "{role}");
     }
