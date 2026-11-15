@@ -12,6 +12,11 @@
 //! The visitor is anonymous: only published content resolves. Private posts, drafts, pending
 //! and scheduled posts and the trash are not found.
 //!
+//! Values are compared exactly, whatever the database's collation: MySQL and MariaDB compare
+//! text without case and trailing spaces by default, so every fetched post, page, term and old
+//! slug is checked again here, and a variant such as `/Hello-World/` is not found (no canonical
+//! redirect to the lower-case slug).
+//!
 //! Input is bounded: a path longer than [`MAX_PATH_BYTES`] or with more than
 //! [`MAX_PATH_SEGMENTS`] segments is not found (WordPress pages rarely nest more than a few
 //! levels), and at most [`MAX_TYPE_KEYS`] query keys are tried as custom types, in one query.
@@ -43,7 +48,7 @@ use serde_json::Value;
 
 use crate::content::{
     MetaError, PermalinkContext, PermalinkStructure, Post, PostStatus, Segment, Tag, Taxonomy,
-    Term, get_option, permalink,
+    Term, get_option, get_post_meta_values, permalink,
 };
 
 /// A request's query string, parsed as PHP fills `$_GET`: `+` and `%XX` decoded, a key with no
@@ -359,7 +364,12 @@ impl Vars {
                 "attachment_id" => self.attachment_id = v.parse().ok(),
                 "name" => self.name = non_empty(v),
                 "pagename" => self.pagename = non_empty(v),
-                "post_type" => self.post_type = non_empty(v),
+                // A value that is not a public type's exact name is dropped, as WordPress drops
+                // an unknown type: no case or padding variant reaches the database.
+                "post_type" => {
+                    self.post_type =
+                        Some(v.to_owned()).filter(|t| is_type_name(t) && is_public_type(t));
+                }
                 "year" => self.year = v.parse().ok(),
                 "monthnum" => self.monthnum = v.parse().ok(),
                 "day" => self.day = v.parse().ok(),
@@ -682,7 +692,8 @@ impl Router<'_> {
             return self.category(vars, paged).await;
         }
         if let Some(slug) = &vars.tag {
-            let Some(tag) = Term::find_by_slug(self.db, &Taxonomy::POST_TAG, slug).await? else {
+            let tag = Term::find_by_slug(self.db, &Taxonomy::POST_TAG, slug).await?;
+            let Some(tag) = tag.filter(|t| t.slug == *slug) else {
                 return Ok(Resolved::NotFound);
             };
             let listing = Listing {
@@ -788,7 +799,11 @@ impl Router<'_> {
         };
         let mut found = None;
         for post in candidates {
-            if vars.p.is_none_or(|id| id == post.id)
+            // Exact matches only: MySQL's default collations compare without case and trailing
+            // spaces, so `/Hello/` or `hello%20` would otherwise find `hello`.
+            if post.post_type == post_type
+                && vars.name.as_ref().is_none_or(|name| post.slug == *name)
+                && vars.p.is_none_or(|id| id == post.id)
                 && self.dates_match(vars, &post)
                 && self.can_read(&post).await?
             {
@@ -821,6 +836,9 @@ impl Router<'_> {
     async fn not_found(&self, vars: &Vars, post_type: &str) -> Result<Resolved, Error> {
         if let Some(name) = &vars.name
             && let Some(post) = crate::content::find_by_old_slug(self.db, post_type, name).await?
+            && post.post_type == post_type
+            && is_public_type(&post.post_type)
+            && self.had_slug(&post, name).await?
             && self.dates_match(vars, &post)
             && self.can_link(&post)
             && self.can_read(&post).await?
@@ -1016,15 +1034,28 @@ impl Router<'_> {
             .first(self.db)
             .await?
         {
-            Some(post) if self.can_read(&post).await? => Ok(Some(post)),
+            Some(post) if post.post_type == post_type && self.can_read(&post).await? => {
+                Ok(Some(post))
+            }
             _ => Ok(None),
         }
     }
 
-    /// The page at `path` (`about/team`, decoded), as `get_page_by_path`: the page with the last slug
-    /// whose parents have the slugs before it, the first one a top-level page. A published
-    /// page wins over another status at the same path. Trashed pages and auto-drafts are left
-    /// out.
+    /// Whether `post` once had exactly `slug` as an old slug (`_wp_old_slug`), compared here, not
+    /// by the database's collation.
+    async fn had_slug(&self, post: &Post, slug: &str) -> Result<bool, Error> {
+        let values = match get_post_meta_values(self.db, post.id, "_wp_old_slug").await {
+            Ok(values) => values,
+            Err(MetaError::InvalidJson(_)) => return Ok(false),
+            Err(MetaError::Database(e)) => return Err(e),
+        };
+        Ok(values.iter().any(|v| v.as_str() == Some(slug)))
+    }
+
+    /// The page at `path` (`about/team`, decoded), as `get_page_by_path`: the page with the
+    /// last slug whose parents have the slugs before it, the first one a top-level page. A
+    /// published page wins over another status at the same path. Trashed pages and auto-drafts
+    /// are left out. Slugs are compared exactly, whatever the database's collation.
     async fn page_by_path(&self, path: &str) -> Result<Option<Post>, Error> {
         let parts: Vec<String> = path
             .split('/')
@@ -1045,7 +1076,10 @@ impl Router<'_> {
             .get(self.db)
             .await?
             .into_iter()
-            .filter(|p| !matches!(p.status, PostStatus::Trash | PostStatus::AutoDraft))
+            .filter(|p| {
+                p.post_type == "page"
+                    && !matches!(p.status, PostStatus::Trash | PostStatus::AutoDraft)
+            })
             .collect();
         let by_id: HashMap<i64, &Post> = pages.iter().map(|p| (p.id, p)).collect();
         let matches_path = |page: &Post| {

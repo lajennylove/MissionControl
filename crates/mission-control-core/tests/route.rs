@@ -909,3 +909,80 @@ async fn out_of_range_dates_and_pages_are_not_found() {
     assert_eq!(get(db, &s, "/page/4294967295/").await, Resolved::NotFound);
     assert_eq!(get(db, &s, "/?paged=4294967295").await, Resolved::NotFound);
 }
+
+#[tokio::test]
+async fn case_and_trailing_space_variants_do_not_match() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let template = published(db, author, "wp_template", "tpl", None).await;
+    let book = published(db, author, "book", "dune", None).await;
+    published(db, author, "page", "about", None).await;
+    term(db, &Taxonomy::POST_TAG, "Rust", None).await;
+    let mut post = published(db, author, "post", "old-name", None).await;
+    post.slug = "hello-world".into();
+    post.save(db).await.unwrap();
+    let home = |s| async move { get(db, s, "/").await };
+    for s in [
+        &PermalinkStructure::post_name(),
+        &PermalinkStructure::day_and_name(),
+        &PermalinkStructure::plain(),
+    ] {
+        // The post type variable: dropped unless it is a public type's exact name, so these look
+        // for a `post` named `tpl` or `dune`, and find none.
+        for url in [
+            "/?post_type=WP_Template&name=tpl",
+            "/?post_type=wp_template%20&name=tpl",
+            "/?post_type=%20wp_template&name=tpl",
+            "/?post_type=Book&name=dune",
+            "/?post_type=book%20&name=dune",
+            "/?name=Hello-World",
+            "/?name=hello-world%20",
+            "/?name=Old-Name",
+            "/?name=old-name%20",
+            "/?book=Dune",
+            "/?book=dune%20",
+        ] {
+            assert_eq!(get(db, s, url).await, Resolved::NotFound, "{s}: {url}");
+        }
+        assert_eq!(
+            get(db, s, &format!("/?p={}&post_type=WP_TEMPLATE", template.id)).await,
+            Resolved::NotFound
+        );
+        // Keys that are not a type's exact name are ignored: the home page.
+        for url in ["/?Book=dune", "/?post_type=BOOK", "/?post_type=book%20"] {
+            assert_eq!(get(db, s, url).await, home(s).await, "{s}: {url}");
+        }
+        assert_eq!(get(db, s, "/?book=dune").await, single(&book));
+        assert_eq!(
+            get(db, s, "/?post_type=book&name=dune").await,
+            single(&book)
+        );
+    }
+    let s = PermalinkStructure::post_name();
+    for url in [
+        "/Hello-World/",
+        "/hello-world%20/",
+        "/HELLO-WORLD",
+        "/Old-Name/",
+        "/old-name%20/",
+        "/About/",
+        "/about%20/",
+        "/book/Dune/",
+        "/book/dune%20/",
+        "/Book/dune/",
+        "/tag/RUST/",
+        "/tag/rust%20/",
+        "/WP_Template/tpl/",
+    ] {
+        assert_eq!(get(db, &s, url).await, Resolved::NotFound, "{url}");
+    }
+    let day = PermalinkStructure::day_and_name();
+    for url in ["/2026/03/07/Hello-World/", "/2026/03/07/hello-world%20/"] {
+        assert_eq!(get(db, &day, url).await, Resolved::NotFound, "{url}");
+    }
+    // The exact forms still resolve.
+    assert_eq!(get(db, &s, "/hello-world/").await, single(&post));
+    assert_eq!(get(db, &s, "/old-name/").await, redirect("/hello-world/"));
+    assert_eq!(get(db, &s, "/book/dune/").await, single(&book));
+}
