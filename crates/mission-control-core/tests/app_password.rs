@@ -103,7 +103,7 @@ async fn a_created_password_authenticates_by_basic_header() {
     setup(db).await;
     let (ann, email) = new_user(db, "ann").await;
 
-    let (plain, created) = app_password::create(db, ann, "Laptop").await.unwrap();
+    let (plain, created) = app_password::create(db, ann, "Laptop", None).await.unwrap();
     assert_eq!(plain.as_str().len(), 24);
     assert!(plain.as_str().chars().all(|c| c.is_ascii_alphanumeric()));
     assert_eq!(plain.chunked().len(), 29);
@@ -116,6 +116,7 @@ async fn a_created_password_authenticates_by_basic_header() {
     assert_eq!(created.uuid.len(), 36);
     assert_eq!(created.last_used_at, None);
     assert_eq!(created.last_ip, None);
+    assert_eq!(created.app_id, None);
 
     let header = basic(&email, plain.as_str());
     let found = app_password::authenticate_basic(db, &header, &ByEmail, Some("203.0.113.5"))
@@ -131,6 +132,25 @@ async fn a_created_password_authenticates_by_basic_header() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].last_ip.as_deref(), Some("203.0.113.5"));
     assert!(listed[0].last_used_at.is_some());
+
+    // The password is everything after the first `:`, kept whole: a `:` inside it reaches the
+    // password check (where, like spaces, it is dropped), not the user name.
+    let (head, tail) = plain.as_str().split_at(12);
+    let header = basic(&email, &format!("{head}:{tail}"));
+    assert!(
+        app_password::authenticate_basic(db, &header, &ByEmail, None)
+            .await
+            .is_ok(),
+        "a password with a colon passes through whole"
+    );
+    // Any number of spaces may separate the scheme from the credentials.
+    let header = basic(&email, plain.as_str()).replacen("Basic ", "Basic   ", 1);
+    assert!(
+        app_password::authenticate_basic(db, &header, &ByEmail, None)
+            .await
+            .is_ok(),
+        "extra spaces after Basic are accepted"
+    );
 
     // The chunked form, as shown to the user, authenticates too.
     let header = basic(&email, &plain.chunked());
@@ -148,8 +168,8 @@ async fn wrong_revoked_and_other_users_passwords_and_malformed_headers_are_refus
     setup(db).await;
     let (ann, ann_email) = new_user(db, "ann").await;
     let (bo, _) = new_user(db, "bo").await;
-    let (plain, item) = app_password::create(db, ann, "Laptop").await.unwrap();
-    let (bo_plain, _) = app_password::create(db, bo, "Phone").await.unwrap();
+    let (plain, item) = app_password::create(db, ann, "Laptop", None).await.unwrap();
+    let (bo_plain, _) = app_password::create(db, bo, "Phone", None).await.unwrap();
 
     let refused = async |header: &str| {
         app_password::authenticate_basic(db, header, &ByEmail, None)
@@ -222,7 +242,7 @@ async fn the_stored_value_is_a_hash_of_the_password() {
     let db = test.db();
     setup(db).await;
     let (ann, _) = new_user(db, "ann").await;
-    let (plain, item) = app_password::create(db, ann, "Laptop").await.unwrap();
+    let (plain, item) = app_password::create(db, ann, "Laptop", None).await.unwrap();
 
     let stored: String = raw::fetch_scalar(
         db,
@@ -246,7 +266,7 @@ async fn spaces_and_dashes_are_ignored_but_case_is_kept() {
     let db = test.db();
     setup(db).await;
     let (ann, _) = new_user(db, "ann").await;
-    let (plain, item) = app_password::create(db, ann, "Laptop").await.unwrap();
+    let (plain, item) = app_password::create(db, ann, "Laptop", None).await.unwrap();
 
     let spaced = plain.chunked();
     let dashed = spaced.replace(' ', "-");
@@ -288,7 +308,7 @@ async fn names_are_required_and_unique_per_user() {
     let (ann, _) = new_user(db, "ann").await;
     let (bo, _) = new_user(db, "bo").await;
 
-    let (_, item) = app_password::create(db, ann, "  My   Phone ")
+    let (_, item) = app_password::create(db, ann, "  My   Phone ", None)
         .await
         .unwrap();
     assert_eq!(
@@ -297,26 +317,61 @@ async fn names_are_required_and_unique_per_user() {
     );
     // WordPress compares names with `strtolower`.
     assert!(matches!(
-        app_password::create(db, ann, "my phone").await,
+        app_password::create(db, ann, "my phone", None).await,
         Err(AppPasswordError::DuplicateName)
     ));
     // Another user may use the same name.
-    assert!(app_password::create(db, bo, "My Phone").await.is_ok());
+    assert!(app_password::create(db, bo, "My Phone", None).await.is_ok());
     for empty in ["", "   ", "\t\n"] {
         assert!(matches!(
-            app_password::create(db, ann, empty).await,
+            app_password::create(db, ann, empty, None).await,
             Err(AppPasswordError::EmptyName)
         ));
     }
     assert!(matches!(
-        app_password::create(db, ann, &"x".repeat(256)).await,
+        app_password::create(db, ann, &"x".repeat(256), None).await,
         Err(AppPasswordError::NameTooLong)
     ));
     assert!(matches!(
-        app_password::create(db, i64::MAX, "Laptop").await,
+        app_password::create(db, i64::MAX, "Laptop", None).await,
         Err(AppPasswordError::UserNotFound)
     ));
     assert_eq!(count(db, ann).await, 1);
+}
+
+#[tokio::test]
+async fn an_app_id_is_stored_when_it_is_a_uuid() {
+    let test = database().await;
+    let db = test.db();
+    setup(db).await;
+    let (ann, _) = new_user(db, "ann").await;
+    let app_id = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+
+    let (_, item) = app_password::create(db, ann, "Client", Some(app_id))
+        .await
+        .unwrap();
+    assert_eq!(item.app_id.as_deref(), Some(app_id));
+    let stored = app_password::find(db, ann, &item.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.app_id.as_deref(), Some(app_id));
+    // An empty one is none, as WordPress stores `''`.
+    let (_, empty) = app_password::create(db, ann, "Other", Some(""))
+        .await
+        .unwrap();
+    assert_eq!(empty.app_id, None);
+    // Anything but a hyphenated UUID is refused.
+    for bad in [
+        "not-a-uuid",
+        "0f1e2d3c4b5a49688776a5b4c3d2e1f0",
+        "{0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0}",
+    ] {
+        assert!(matches!(
+            app_password::create(db, ann, "Bad", Some(bad)).await,
+            Err(AppPasswordError::InvalidAppId)
+        ));
+    }
 }
 
 #[tokio::test]
@@ -326,9 +381,9 @@ async fn list_revoke_all_and_deleting_the_user() {
     setup(db).await;
     let (ann, _) = new_user(db, "ann").await;
     let (bo, _) = new_user(db, "bo").await;
-    let (a, _) = app_password::create(db, ann, "One").await.unwrap();
-    let (b, _) = app_password::create(db, ann, "Two").await.unwrap();
-    app_password::create(db, bo, "One").await.unwrap();
+    let (a, _) = app_password::create(db, ann, "One", None).await.unwrap();
+    let (b, _) = app_password::create(db, ann, "Two", None).await.unwrap();
+    app_password::create(db, bo, "One", None).await.unwrap();
     assert!(a.as_str() != b.as_str(), "each password is new");
 
     let names: Vec<String> = app_password::list(db, ann)
@@ -354,7 +409,7 @@ async fn usage_is_recorded_at_most_once_a_day() {
     let db = test.db();
     setup(db).await;
     let (ann, _) = new_user(db, "ann").await;
-    let (plain, item) = app_password::create(db, ann, "Laptop").await.unwrap();
+    let (plain, item) = app_password::create(db, ann, "Laptop", None).await.unwrap();
 
     let first = app_password::authenticate(db, ann, plain.as_str(), Some("203.0.113.5"))
         .await

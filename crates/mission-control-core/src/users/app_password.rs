@@ -17,7 +17,7 @@
 //! ```ignore
 //! use mission_control_core::users::app_password::{self, ByEmail};
 //!
-//! let (plain, item) = app_password::create(&db, user_id, "Laptop").await?;
+//! let (plain, item) = app_password::create(&db, user_id, "Laptop", None).await?;
 //! show_once(&plain.chunked()); // "abcd efgh ijkl mnop qrst uvwx"
 //!
 //! // On a REST request:
@@ -36,6 +36,9 @@ use blake2::digest::{KeyInit, Mac};
 use chrono::{NaiveDateTime, SubsecRound, TimeDelta, Utc};
 use orbit_orm::{Database, Direction, Driver, Model, OrbitModel, Value, raw};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
+
+use crate::text::sanitize_text_field;
 
 /// The length of a new password: WordPress's `WP_Application_Passwords::PW_LENGTH`.
 pub const PASSWORD_LENGTH: usize = 24;
@@ -62,6 +65,10 @@ pub struct ApplicationPassword {
     /// The password's public id, a version 4 UUID: what the REST API and revoking name it by.
     #[orbit(fillable)]
     pub uuid: String,
+    /// The id of the application that asked for it, a UUID, when it was made through WordPress's
+    /// authorize-application flow; `None` otherwise (WordPress stores `''`).
+    #[orbit(fillable)]
+    pub app_id: Option<String>,
     /// The user it signs in as.
     #[orbit(fillable)]
     pub user_id: i64,
@@ -87,6 +94,7 @@ impl fmt::Debug for ApplicationPassword {
         f.debug_struct("ApplicationPassword")
             .field("id", &self.id)
             .field("uuid", &self.uuid)
+            .field("app_id", &self.app_id)
             .field("user_id", &self.user_id)
             .field("name", &self.name)
             .field("password", &"[hidden]")
@@ -99,9 +107,9 @@ impl fmt::Debug for ApplicationPassword {
 
 /// A new password in plain text, returned once by [`create`] to show the user. It is not stored
 /// and cannot be read again. `Debug` hides it and there is no `Display`, so it is not logged by
-/// accident.
-#[derive(Clone, PartialEq, Eq)]
-pub struct PlainPassword(String);
+/// accident, and its memory is zeroed when it is dropped.
+#[derive(Clone)]
+pub struct PlainPassword(Zeroizing<String>);
 
 impl PlainPassword {
     /// The password: 24 ASCII letters and digits.
@@ -110,8 +118,9 @@ impl PlainPassword {
     }
 
     /// The password in groups of four, as WordPress shows it: `abcd efgh ijkl mnop qrst uvwx`.
-    pub fn chunked(&self) -> String {
-        chunk_password(&self.0)
+    /// Zeroed when dropped, like the password.
+    pub fn chunked(&self) -> Zeroizing<String> {
+        Zeroizing::new(chunk_password(&self.0))
     }
 }
 
@@ -131,10 +140,13 @@ pub enum AppPasswordError {
     /// The user has a password with this name, ignoring case: WordPress's
     /// `application_password_duplicate_name`.
     DuplicateName,
+    /// The application id is not a UUID in its hyphenated form (`8-4-4-4-12` hex digits), as
+    /// WordPress's REST schema requires (`format: uuid`).
+    InvalidAppId,
     /// No user has this id.
     UserNotFound,
     /// The random number generator failed, so no password was made.
-    Random(getrandom::Error),
+    Random(RandomError),
     /// The database refused a query.
     Database(orbit_orm::Error),
 }
@@ -150,6 +162,7 @@ impl fmt::Display for AppPasswordError {
                 "an application name has at most {MAX_NAME_LENGTH} characters"
             ),
             Self::DuplicateName => f.write_str("each application name should be unique"),
+            Self::InvalidAppId => f.write_str("the application id is not a UUID"),
             Self::UserNotFound => f.write_str("the user does not exist"),
             Self::Random(e) => write!(f, "could not generate a password: {e}"),
             Self::Database(e) => e.fmt(f),
@@ -166,6 +179,18 @@ impl std::error::Error for AppPasswordError {
         }
     }
 }
+
+/// The operating system's random number generator failed. Its cause is in the message only.
+#[derive(Debug)]
+pub struct RandomError(String);
+
+impl fmt::Display for RandomError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RandomError {}
 
 impl From<orbit_orm::Error> for AppPasswordError {
     fn from(e: orbit_orm::Error) -> Self {
@@ -270,13 +295,18 @@ impl UserLookup for ByEmail {
 /// Creates an application password named `name` for the user, as WordPress's
 /// `create_new_application_password`, and returns the password, shown this once, with its row.
 ///
-/// The name is sanitized (runs of spaces, tabs and line breaks become one space, and the ends are
-/// trimmed) and must not be empty, nor the name of another of the user's passwords, ignoring
-/// ASCII case, as WordPress's `application_name_exists_for_user` compares with `strtolower`.
+/// The name is cleaned as WordPress's `sanitize_text_field` cleans it (tags and percent-encoded
+/// octets removed, whitespace collapsed, ends trimmed) and must not be empty, nor the name of
+/// another of the user's passwords, ignoring ASCII case, as WordPress's
+/// `application_name_exists_for_user` compares with `strtolower`.
+///
+/// `app_id` is the id of the application asking, from WordPress's authorize-application flow: a
+/// UUID in its hyphenated form, stored as given. `None` or an empty one stores none.
 ///
 /// # Errors
 ///
 /// [`AppPasswordError::EmptyName`], [`NameTooLong`](AppPasswordError::NameTooLong),
+/// [`InvalidAppId`](AppPasswordError::InvalidAppId),
 /// [`DuplicateName`](AppPasswordError::DuplicateName),
 /// [`UserNotFound`](AppPasswordError::UserNotFound), or the random number generator's or the
 /// database's error. Nothing is stored then.
@@ -284,18 +314,25 @@ pub async fn create(
     db: &Database,
     user_id: i64,
     name: &str,
+    app_id: Option<&str>,
 ) -> Result<(PlainPassword, ApplicationPassword), AppPasswordError> {
-    let name = sanitize_name(name);
+    let name = sanitize_text_field(name);
     if name.is_empty() {
         return Err(AppPasswordError::EmptyName);
     }
     if name.chars().count() > MAX_NAME_LENGTH {
         return Err(AppPasswordError::NameTooLong);
     }
+    let app_id = match app_id {
+        None | Some("") => None,
+        Some(id) if is_uuid(id) => Some(id.to_owned()),
+        Some(_) => return Err(AppPasswordError::InvalidAppId),
+    };
     let plain = generate_password()?;
     let mut item = ApplicationPassword {
         id: 0,
         uuid: uuid::Uuid::new_v4().to_string(),
+        app_id,
         user_id,
         name,
         password: hash_password(plain.as_str()),
@@ -509,30 +546,35 @@ pub fn chunk_password(password: &str) -> String {
 
 /// `password` with every character but ASCII letters and digits dropped, as WordPress's
 /// `preg_replace( '/[^a-z\d]/i', '', $password )`.
-fn normalize_password(password: &str) -> String {
-    password
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect()
+fn normalize_password(password: &str) -> Zeroizing<String> {
+    Zeroizing::new(
+        password
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect(),
+    )
 }
 
-/// The name as WordPress's `sanitize_text_field` leaves it for plain text: runs of spaces, tabs
-/// and line breaks become one space, and the ends are trimmed.
-fn sanitize_name(name: &str) -> String {
-    name.split([' ', '\t', '\r', '\n'])
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Whether `text` is a UUID in its hyphenated form, any version, any case, as WordPress's
+/// `wp_is_uuid` accepts it with no version given.
+fn is_uuid(text: &str) -> bool {
+    text.len() == 36
+        && text.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// A new random password of [`PASSWORD_LENGTH`] characters from [`ALPHABET`], each equally likely.
 fn generate_password() -> Result<PlainPassword, AppPasswordError> {
     // Bytes from 248 up are dropped, so `byte % 62` is uniform (248 = 4 × 62).
     const LIMIT: u8 = 248;
-    let mut password = String::with_capacity(PASSWORD_LENGTH);
-    let mut bytes = [0u8; 64];
+    // Both are zeroed when dropped, on every path out.
+    let mut password = Zeroizing::new(String::with_capacity(PASSWORD_LENGTH));
+    let mut bytes = Zeroizing::new([0u8; 64]);
     while password.len() < PASSWORD_LENGTH {
-        getrandom::fill(&mut bytes).map_err(AppPasswordError::Random)?;
+        getrandom::fill(&mut bytes[..])
+            .map_err(|e| AppPasswordError::Random(RandomError(e.to_string())))?;
         for &byte in bytes.iter().filter(|&&b| b < LIMIT) {
             if password.len() == PASSWORD_LENGTH {
                 break;
@@ -540,25 +582,25 @@ fn generate_password() -> Result<PlainPassword, AppPasswordError> {
             password.push(char::from(ALPHABET[usize::from(byte % 62)]));
         }
     }
-    bytes.fill(0);
     Ok(PlainPassword(password))
 }
 
 /// The user name and password of `Basic` credentials, or `None` when the header is not that. The
-/// scheme is matched without case (RFC 7617); the user name ends at the first `:` and must not be
-/// empty.
-fn parse_basic(authorization: &str) -> Option<(String, String)> {
+/// scheme is matched without case (RFC 7617) and may be followed by any number of spaces; the
+/// user name ends at the first `:` and must not be empty, and the password is the rest, whole,
+/// `:` included. The decoded credentials are zeroed when dropped.
+fn parse_basic(authorization: &str) -> Option<(String, Zeroizing<String>)> {
     let (scheme, credentials) = authorization.trim().split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("Basic") {
         return None;
     }
-    let decoded = STANDARD.decode(credentials.trim()).ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
+    let decoded = Zeroizing::new(STANDARD.decode(credentials.trim()).ok()?);
+    let decoded = std::str::from_utf8(&decoded).ok()?;
     let (username, password) = decoded.split_once(':')?;
     if username.is_empty() {
         return None;
     }
-    Some((username.to_owned(), password.to_owned()))
+    Some((username.to_owned(), Zeroizing::new(password.to_owned())))
 }
 
 /// Records that `item` was used now from `ip`, unless it was used less than a day ago.
@@ -593,9 +635,10 @@ async fn record_usage(
 
 impl ApplicationPassword {
     /// Every column but the id, to insert.
-    fn columns(&self) -> [(&'static str, Value); 7] {
+    fn columns(&self) -> [(&'static str, Value); 8] {
         [
             ("uuid", self.uuid.clone().into()),
+            ("app_id", self.app_id.clone().into()),
             ("user_id", self.user_id.into()),
             ("name", self.name.clone().into()),
             ("password", self.password.clone().into()),

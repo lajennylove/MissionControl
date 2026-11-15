@@ -41,6 +41,8 @@ sqlx = { version = "0.9", default-features = false }
 tokio = { workspace = true, features = ["time"] }
 # Version 4 UUIDs for application passwords, as `wp_generate_uuid4` (MIT OR Apache-2.0).
 uuid = { version = "1", features = ["v4"] }
+# Zeroes plain application passwords and their random bytes when dropped (Apache-2.0 OR MIT).
+zeroize = "1"
 
 [dev-dependencies]
 mission-control-testing = { path = "../mission-control-testing" }

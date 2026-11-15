@@ -18,7 +18,8 @@ pub mod capabilities;
 pub mod meta_cap;
 
 pub use app_password::{
-    AppPasswordError, ApplicationPassword, BasicAuthError, ByEmail, PlainPassword, UserLookup,
+    AppPasswordError, ApplicationPassword, BasicAuthError, ByEmail, PlainPassword, RandomError,
+    UserLookup,
 };
 pub use capabilities::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, EXIST, Role, SUBSCRIBER, UserCaps,
