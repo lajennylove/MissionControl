@@ -622,7 +622,7 @@ fn local(utc: NaiveDateTime, offset: FixedOffset) -> chrono::DateTime<FixedOffse
 /// An excerpt made from filtered content, as `wp_trim_excerpt`: the tags stripped and the first
 /// [`EXCERPT_WORDS`] words kept, with ` [&hellip;]` when words were cut. The text is HTML-safe
 /// (a stray `<` is `&lt;`).
-fn trim_excerpt(content: &str) -> String {
+pub(crate) fn trim_excerpt(content: &str) -> String {
     let text = strip_all_tags(content);
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() > EXCERPT_WORDS {

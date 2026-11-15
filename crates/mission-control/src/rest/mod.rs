@@ -1,8 +1,9 @@
-//! The REST API's routes. Discovery for now: `GET /wp-json/`, the namespace indexes and
-//! WordPress's `?rest_route=` form on the site root. Every route takes a guard from [`auth`], so
-//! refused credentials end any REST request with WordPress's error.
+//! The REST API's routes: discovery (`GET /wp-json/`, the namespace indexes and WordPress's
+//! `?rest_route=` form on the site root) and the posts controller ([`posts`]). Every route takes
+//! a guard from [`auth`], so refused credentials end any REST request with WordPress's error.
 
 pub mod auth;
+pub(crate) mod posts;
 
 use std::sync::Arc;
 
@@ -23,6 +24,8 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     for route in &mut routes {
         route.rank = rank;
     }
+    routes.extend(posts::no_route_routes(rank));
+    routes.extend(posts::routes());
     routes
 }
 

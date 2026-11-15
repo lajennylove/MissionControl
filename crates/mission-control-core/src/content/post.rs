@@ -8,11 +8,13 @@ use orbit_orm::{Database, Error, Model, OrbitModel, Query, Transaction, Value};
 use serde_json::json;
 use sqlx::error::BoxDynError;
 
-use super::meta::{MetaError, delete_post_meta_in, get_post_meta_in, put_post_meta_in};
+use super::meta::{
+    MetaError, delete_post_meta_in, get_option, get_post_meta_in, put_post_meta_in, set_option,
+};
 use super::slug::{
     DESIRED_SLUG_META, TRASHED_SUFFIX, record_old_slug, settle_slug, trashed_slug, wanted_slug,
 };
-use super::taxonomy::recount_post_terms;
+use super::taxonomy::{post_term_ids_in, recount_in, recount_post_terms};
 
 /// The post meta that holds a trashed post's previous status, as in WordPress.
 const TRASH_META_STATUS: &str = "_wp_trash_meta_status";
@@ -343,6 +345,55 @@ impl Post {
         Ok(())
     }
 
+    /// Deletes this post for good, as WordPress's `wp_delete_post` with `$force_delete` does, and
+    /// returns whether a row was deleted (`false` when it was gone already).
+    ///
+    /// In one transaction: the post's children of the same type and its attachments move up to
+    /// the post's own parent, its revisions and autosaves are deleted, the post row is deleted
+    /// (its meta and term relationships go with it, by foreign key), and the terms it had are
+    /// recounted, so a category's `count` stays right. Then, as WordPress does: a page that was
+    /// the static front page (`page_on_front`) sets `show_on_front` back to `posts` and
+    /// `page_on_front` to 0, a posts page (`page_for_posts`) sets that option to 0, the post
+    /// leaves `sticky_posts`, and its scheduled publication is removed. Comments do not exist
+    /// yet, so none are deleted.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the database's error; the transaction then leaves the post as it was.
+    pub async fn delete(&self, db: &Database) -> Result<bool, Error> {
+        let id = self.id;
+        let post_type = self.post_type.clone();
+        let parent = self.parent_id;
+        let deleted = db
+            .transaction(async |tx| {
+                let terms = post_term_ids_in(tx, id).await?;
+                Self::query()
+                    .where_eq("parent_id", id)
+                    .where_in("post_type", [post_type.clone(), "attachment".to_owned()])
+                    .update(&mut *tx, &[("parent_id", parent.into())])
+                    .await?;
+                Self::query()
+                    .where_eq("post_type", "revision")
+                    .where_eq("parent_id", id)
+                    .delete(&mut *tx)
+                    .await?;
+                let deleted = Self::query()
+                    .where_eq(Self::PRIMARY_KEY, id)
+                    .delete(&mut *tx)
+                    .await?;
+                for (taxonomy, ids) in terms {
+                    recount_in(tx, &taxonomy, &ids).await?;
+                }
+                Ok::<_, Error>(deleted > 0)
+            })
+            .await?;
+        if !deleted {
+            return Ok(false);
+        }
+        forget_deleted_post(db, self).await?;
+        Ok(true)
+    }
+
     /// The posts of one type, such as `post` or `page`, like a Laravel query scope. Attachments,
     /// revisions and menu items share the table, and this leaves them out unless asked for.
     pub fn of_type(post_type: &str) -> Query<Self> {
@@ -366,6 +417,65 @@ impl Post {
             ("password", self.password.clone().into()),
             ("mime_type", self.mime_type.clone().into()),
         ]
+    }
+}
+
+/// What `wp_delete_post` does outside the post's own rows once `post` is gone: the site's special
+/// pages and sticky posts forget it, and its scheduled publication is removed.
+async fn forget_deleted_post(db: &Database, post: &Post) -> Result<(), Error> {
+    let option_id = async |name: &str| -> Result<Option<i64>, Error> {
+        Ok(match get_option(db, name).await {
+            Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
+            Ok(Some(serde_json::Value::String(s))) => s.trim().parse().ok(),
+            Ok(_) | Err(MetaError::InvalidJson(_)) => None,
+            Err(MetaError::Database(e)) => return Err(e),
+        })
+    };
+    let set = async |name: &str, value: serde_json::Value| -> Result<(), Error> {
+        match set_option(db, name, &value).await {
+            Ok(()) => Ok(()),
+            Err(MetaError::Database(e)) => Err(e),
+            // The value is JSON already; only the database can refuse it.
+            Err(e @ MetaError::InvalidJson(_)) => {
+                log::error!("Could not set the {name} option: {e}");
+                Ok(())
+            }
+        }
+    };
+    if post.post_type == "page" {
+        if option_id("page_on_front").await? == Some(post.id) {
+            set("show_on_front", json!("posts")).await?;
+            set("page_on_front", json!(0)).await?;
+        }
+        if option_id("page_for_posts").await? == Some(post.id) {
+            set("page_for_posts", json!(0)).await?;
+        }
+    }
+    let sticky = match get_option(db, "sticky_posts").await {
+        Ok(Some(serde_json::Value::Array(sticky))) => Some(sticky),
+        // Unset, or not a list (nor JSON): nothing to unstick.
+        Ok(_) | Err(MetaError::InvalidJson(_)) => None,
+        Err(MetaError::Database(e)) => return Err(e),
+    };
+    if let Some(sticky) = sticky {
+        let is_post = |v: &serde_json::Value| match v {
+            serde_json::Value::Number(n) => n.as_i64() == Some(post.id),
+            serde_json::Value::String(s) => s.trim().parse::<i64>().ok() == Some(post.id),
+            _ => false,
+        };
+        let kept: Vec<serde_json::Value> = sticky.iter().filter(|v| !is_post(v)).cloned().collect();
+        if kept.len() != sticky.len() {
+            set("sticky_posts", serde_json::Value::Array(kept)).await?;
+        }
+    }
+    match crate::scheduler::unschedule(db, super::PUBLISH_FUTURE_POST, &post.id).await {
+        Ok(_) => Ok(()),
+        Err(crate::scheduler::Error::Database(e)) => Err(e),
+        // An id always serialises; nothing else can fail.
+        Err(e) => {
+            log::error!("Could not unschedule the deleted post {}: {e}", post.id);
+            Ok(())
+        }
     }
 }
 

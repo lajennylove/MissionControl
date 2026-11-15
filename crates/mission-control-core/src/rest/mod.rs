@@ -21,6 +21,7 @@
 
 pub mod auth;
 pub mod discovery;
+pub mod posts;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -42,6 +43,9 @@ pub struct RestError {
     pub message: Cow<'static, str>,
     /// The HTTP status, such as 401.
     pub status: u16,
+    /// What `data` holds besides `status`, such as `params` and `details` for
+    /// `rest_invalid_param`. Empty for most errors.
+    pub data: Map<String, Value>,
 }
 
 impl RestError {
@@ -55,7 +59,14 @@ impl RestError {
             code: code.into(),
             message: message.into(),
             status,
+            data: Map::new(),
         }
+    }
+
+    /// This error with `key` set to `value` in its `data`, beside `status`.
+    pub fn with_data(mut self, key: &str, value: Value) -> Self {
+        self.data.insert(key.to_owned(), value);
+        self
     }
 
     /// WordPress's answer when the site itself fails, such as a database error: status 500. The
@@ -68,12 +79,14 @@ impl RestError {
         )
     }
 
-    /// The JSON body: `code`, `message` and `data.status`.
+    /// The JSON body: `code`, `message` and `data` (`status` and the rest of [`data`](Self::data)).
     pub fn to_json(&self) -> Value {
+        let mut data = self.data.clone();
+        data.insert("status".to_owned(), json!(self.status));
         json!({
             "code": self.code,
             "message": self.message,
-            "data": {"status": self.status},
+            "data": data,
         })
     }
 }
@@ -85,6 +98,35 @@ impl fmt::Display for RestError {
 }
 
 impl std::error::Error for RestError {}
+
+/// A REST answer that is not an error, as WordPress's `WP_REST_Response`: a status, a JSON body
+/// and headers such as `X-WP-Total` or `Location`. A header may repeat (`Link`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestResponse {
+    /// The HTTP status, such as 200 or 201.
+    pub status: u16,
+    /// The JSON body.
+    pub body: Value,
+    /// The headers, in order; a name may repeat.
+    pub headers: Vec<(String, String)>,
+}
+
+impl RestResponse {
+    /// A 200 answer with `body` and no headers.
+    pub fn ok(body: Value) -> Self {
+        Self {
+            status: 200,
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    /// This answer with the header `name: value` added.
+    pub fn with_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_owned(), value.into()));
+        self
+    }
+}
 
 /// One way to call a route: the HTTP methods it takes and its arguments, as WordPress's
 /// `register_rest_route` endpoint (`methods` and `args`).

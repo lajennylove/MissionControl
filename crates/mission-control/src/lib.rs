@@ -19,11 +19,13 @@
 //!
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
 //! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
-//! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`) and the front end
+//! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
+//! REST API serves (`Arc<PostTypes>`), the kses limiter (`Arc<KsesLimiter>`) and the front end
 //! (`Arc<Frontend>`). The scheduler's loop starts
 //! at liftoff, once the server listens, and runs due events every minute.
 //!
-//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`. REST clients sign in with
+//! The REST API serves discovery at `/wp-json/` and `/?rest_route=/`, and posts, pages and every
+//! post type in [`PostTypes`] at `/wp-json/wp/v2/{rest_base}`. REST clients sign in with
 //! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
 //! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
 //! role). Not mounted yet: the admin (Ignite).
@@ -41,6 +43,7 @@ use mission_control_core::content::{Shortcodes, register_publish_future_post};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
 use mission_control_core::rest::RestRoutes;
+use mission_control_core::rest::posts::{KsesLimiter, PostTypes};
 use mission_control_core::scheduler::Scheduler;
 use mission_control_core::users::{NoUserRoles, UserRoles};
 use orbit_orm::Database;
@@ -73,6 +76,9 @@ pub struct AppOptions {
     /// ([`NoUserRoles`]), so a signed-in user can do nothing a visitor cannot, until Ignite's
     /// roles provide them (Task 8.2b).
     pub user_roles: Option<Arc<dyn UserRoles>>,
+    /// How many kses filters the REST API runs at once, each on a blocking thread. `None` is
+    /// [`KsesLimiter::DEFAULT_CONCURRENCY`].
+    pub kses_concurrency: Option<usize>,
 }
 
 /// The Mission Control app for `config`. The database at `config.database_url` is opened at
@@ -99,6 +105,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let AppOptions {
         database: db,
         user_roles,
+        kses_concurrency,
     } = options;
     // Design 5.7: theme templates are capped in size and render work. Propel's defaults: a
     // template of at most 1 MiB, and a budget of 100,000 loop iterations and template entries
@@ -109,6 +116,11 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let shortcodes = Arc::new(Shortcodes::new());
     shortcodes.register_the_content(&hooks);
     let rest_routes = Arc::new(RestRoutes::new());
+    let post_types = Arc::new(PostTypes::new());
+    post_types.register_routes(&rest_routes);
+    let kses = Arc::new(KsesLimiter::new(
+        kses_concurrency.unwrap_or(KsesLimiter::DEFAULT_CONCURRENCY),
+    ));
     let auth = rest::auth::AuthSettings {
         environment: config.environment,
         trusted_proxies: config.trusted_proxies.clone(),
@@ -119,6 +131,8 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(Arc::clone(&hooks))
         .manage(shortcodes)
         .manage(rest_routes)
+        .manage(post_types)
+        .manage(kses)
         .manage(auth)
         .mount("/", rest::routes(REST_RANK))
         .mount("/", rest::auth::refused_routes())

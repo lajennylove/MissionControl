@@ -531,8 +531,8 @@ impl Post {
 /// post call it already; call it after changing a post's status any other way.
 ///
 /// Deleting a post deletes its `term_relationships` rows through the foreign key, without a
-/// recount. A post delete (none exists yet) must read the post's terms first and recount them
-/// once the post is gone, as WordPress's `wp_delete_post` does.
+/// recount; [`Post::delete`] reads the post's terms first and recounts them once the post is
+/// gone, as WordPress's `wp_delete_post` does.
 ///
 /// # Errors
 ///
@@ -567,6 +567,39 @@ pub(crate) async fn recount_post_terms<C: Conn>(c: &mut C, post_id: i64) -> Resu
         }
     }
     Ok(())
+}
+
+/// The `term_taxonomy` ids of post `post_id`'s terms, by taxonomy, for the built-in taxonomies:
+/// what a post delete recounts once the post's relationships are gone.
+pub(crate) async fn post_term_ids_in<C: Conn>(
+    c: &mut C,
+    post_id: i64,
+) -> Result<Vec<(Taxonomy, Vec<i64>)>, Error> {
+    let rows: Vec<(i64, String)> = raw::fetch_all(
+        c.exec(),
+        "SELECT tt.id, tt.taxonomy FROM term_relationships r \
+         INNER JOIN term_taxonomy tt ON tt.id = r.term_taxonomy_id \
+         WHERE r.object_id = ?",
+        &[post_id.into()],
+    )
+    .await?;
+    let mut by_taxonomy: HashMap<String, Vec<i64>> = HashMap::new();
+    for (id, taxonomy) in rows {
+        by_taxonomy.entry(taxonomy).or_default().push(id);
+    }
+    Ok(by_taxonomy
+        .into_iter()
+        .filter_map(|(name, ids)| Taxonomy::builtin(&name).map(|taxonomy| (taxonomy, ids)))
+        .collect())
+}
+
+/// [`update_term_counts`] on a connection that is already in use.
+pub(crate) async fn recount_in<C: Conn>(
+    c: &mut C,
+    taxonomy: &Taxonomy,
+    term_taxonomy_ids: &[i64],
+) -> Result<(), Error> {
+    recount(c, taxonomy, term_taxonomy_ids).await
 }
 
 /// The terms of `taxonomy` with these `term_id`s, in no order, read in one query per 500 ids

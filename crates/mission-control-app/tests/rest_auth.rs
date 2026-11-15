@@ -176,6 +176,7 @@ async fn site_with(
     let options = AppOptions {
         database: Some(test.shared()),
         user_roles,
+        ..AppOptions::default()
     };
     let rocket = rocket_with_options(config(environment, trusted_proxies), options).mount(
         "/",

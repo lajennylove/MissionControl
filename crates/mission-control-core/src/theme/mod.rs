@@ -18,6 +18,7 @@ mod menus;
 mod request;
 mod widgets;
 
+pub(crate) use hierarchy::page_template_name;
 pub use hierarchy::templates_for;
 pub use loader::{LocatedTemplate, Theme, ThemeError, ThemeLoader, load_theme};
 pub use manifest::{

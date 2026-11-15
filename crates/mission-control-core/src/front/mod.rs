@@ -13,6 +13,7 @@
 mod render;
 mod route;
 
+pub(crate) use render::trim_excerpt;
 pub use render::{
     ActiveThemeError, DEFAULT_THEME, FrontError, Frontend, Response, THEME_ENTRIES,
     load_active_theme, site_address,
@@ -20,4 +21,6 @@ pub use render::{
 pub use route::{
     Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve, term_links,
 };
-pub(crate) use route::{NON_PUBLIC_TYPES, visitor_readable};
+pub(crate) use route::{
+    NON_PUBLIC_TYPES, SearchTerm, decode, escape_like, search_terms, visitor_readable,
+};

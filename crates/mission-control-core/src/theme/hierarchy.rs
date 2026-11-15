@@ -159,6 +159,13 @@ fn page_rules(names: &mut Vec<String>, post: &Post, custom: Option<&str>) {
     names.push("page".to_owned());
 }
 
+/// The template name a stored page template loads, without its file extension, when it is safe
+/// to look up (see [`templates_for`]); `None` for no template (empty or `default`) or a name that
+/// is not safe. The REST API checks a requested template with it.
+pub(crate) fn page_template_name(template: &str) -> Option<String> {
+    custom_template_name(template).filter(|name| is_safe_name(name, true))
+}
+
 /// The name of a stored page template, or `None` when it is empty or `default` (the "no
 /// template" choice). The file extension of the last segment is dropped, as for every name
 /// (`templates/wide.php` is `templates/wide`). Whether the result is safe is decided by

@@ -1,0 +1,1759 @@
+//! The posts controller (Task 10.2): `/wp-json/wp/v2/posts` and `/pages`, as WordPress's
+//! `WP_REST_Posts_Controller` answers them.
+//!
+//! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
+//! Users sign in with application passwords; their roles come from an in-memory provider.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::sync::Arc;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use chrono::{Duration, NaiveDateTime, SubsecRound};
+use mission_control::{AppOptions, rocket_with_options};
+use mission_control_core::config::{Config, Environment, TrustedProxies};
+use mission_control_core::content::{
+    MAX_FILTERED_BYTES, NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, get_post_meta,
+    get_post_revisions, set_option, set_post_meta,
+};
+use mission_control_core::migrations::migrator;
+use mission_control_core::rest::RestRoutes;
+use mission_control_core::rest::posts::{PostType, PostTypes, Supports};
+use mission_control_core::users::app_password::{self, PlainPassword};
+use mission_control_core::users::{
+    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, InMemoryUserRoles, RoleAssignment, UserRoles,
+};
+use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
+use orbit_orm::{Database, Driver, Model, raw};
+use rocket::http::{ContentType, Header, Status};
+use rocket::local::asynchronous::{Client, LocalResponse};
+use serde_json::{Value, json};
+
+/// The keys of a post in `context=view`, as WordPress 6.7's `wp/v2/posts` gives them.
+const POST_VIEW_KEYS: &[&str] = &[
+    "id",
+    "date",
+    "date_gmt",
+    "guid",
+    "modified",
+    "modified_gmt",
+    "slug",
+    "status",
+    "type",
+    "link",
+    "title",
+    "content",
+    "excerpt",
+    "author",
+    "featured_media",
+    "comment_status",
+    "ping_status",
+    "sticky",
+    "template",
+    "format",
+    "meta",
+    "categories",
+    "tags",
+    "class_list",
+    "_links",
+];
+
+/// The keys of a page in `context=view`, as WordPress 6.7's `wp/v2/pages` gives them: no
+/// `sticky`, `format` or taxonomies; `parent` and `menu_order`.
+const PAGE_VIEW_KEYS: &[&str] = &[
+    "id",
+    "date",
+    "date_gmt",
+    "guid",
+    "modified",
+    "modified_gmt",
+    "slug",
+    "status",
+    "type",
+    "link",
+    "title",
+    "content",
+    "excerpt",
+    "author",
+    "featured_media",
+    "parent",
+    "menu_order",
+    "comment_status",
+    "ping_status",
+    "template",
+    "meta",
+    "class_list",
+    "_links",
+];
+
+/// What `context=edit` adds to the view keys.
+const EDIT_EXTRA_KEYS: &[&str] = &["password", "permalink_template", "generated_slug"];
+
+/// The site address the tests set.
+const HOME: &str = "http://example.test";
+
+/// A signed-in test user.
+struct User {
+    id: i64,
+    email: String,
+    password: PlainPassword,
+}
+
+/// One test site: its database, its users by role, and a client.
+struct Site {
+    test: TestDatabase,
+    client: Client,
+    users: BTreeMap<&'static str, User>,
+}
+
+impl Site {
+    fn db(&self) -> &Database {
+        self.test.db()
+    }
+
+    fn user(&self, name: &str) -> &User {
+        &self.users[name]
+    }
+
+    fn auth(&self, name: &str) -> Header<'static> {
+        let user = self.user(name);
+        Header::new(
+            "Authorization",
+            format!(
+                "Basic {}",
+                STANDARD.encode(format!("{}:{}", user.email, user.password.as_str()))
+            ),
+        )
+    }
+
+    async fn get(&self, uri: &str, as_user: Option<&str>) -> LocalResponse<'_> {
+        let mut request = self.client.get(uri.to_owned());
+        if let Some(name) = as_user {
+            request = request.header(self.auth(name));
+        }
+        request.dispatch().await
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        uri: &str,
+        as_user: Option<&str>,
+        body: Option<Value>,
+        headers: &[(&'static str, String)],
+    ) -> LocalResponse<'_> {
+        let mut request = match method {
+            "POST" => self.client.post(uri.to_owned()),
+            "PUT" => self.client.put(uri.to_owned()),
+            "PATCH" => self.client.patch(uri.to_owned()),
+            "DELETE" => self.client.delete(uri.to_owned()),
+            other => panic!("unexpected method {other}"),
+        };
+        if let Some(name) = as_user {
+            request = request.header(self.auth(name));
+        }
+        for (name, value) in headers {
+            request = request.header(Header::new(*name, value.clone()));
+        }
+        if let Some(body) = body {
+            request = request.header(ContentType::JSON).body(body.to_string());
+        }
+        request.dispatch().await
+    }
+
+    async fn post(&self, uri: &str, as_user: Option<&str>, body: Value) -> LocalResponse<'_> {
+        self.send("POST", uri, as_user, Some(body), &[]).await
+    }
+
+    /// A post of `post_type` by `author`, stored directly.
+    async fn create(&self, author: &str, post_type: &str, new: NewPost) -> Post {
+        Post::create(
+            self.db(),
+            NewPost {
+                author_id: self.user(author).id,
+                post_type: post_type.to_owned(),
+                ..new
+            },
+        )
+        .await
+        .expect("creates the post")
+    }
+
+    async fn published(&self, author: &str, post_type: &str, title: &str) -> Post {
+        self.create(
+            author,
+            post_type,
+            NewPost {
+                status: PostStatus::Publish,
+                title: title.to_owned(),
+                content: format!("<p>The body of {title}.</p>"),
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, post_type)
+            },
+        )
+        .await
+    }
+
+    async fn reload(&self, id: i64) -> Option<Post> {
+        Post::query().find(self.db(), id).await.expect("reads")
+    }
+}
+
+/// Now, in UTC, to the second, as posts store it.
+fn mission_control_now() -> NaiveDateTime {
+    chrono::Utc::now().naive_utc().trunc_subsecs(0)
+}
+
+fn config() -> Config {
+    Config {
+        database_url: "unused: the database is passed in".to_owned(),
+        secret_key: "unused".to_owned(),
+        debug: false,
+        upload_max_bytes: 1024,
+        themes_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../themes")
+            .to_path_buf(),
+        environment: Environment::Local,
+        trusted_proxies: TrustedProxies::None,
+    }
+}
+
+/// Inserts a user named `name` and returns its id and email.
+async fn new_user(db: &Database, name: &str) -> (i64, String) {
+    let email = unique_email(name);
+    raw::execute(
+        db,
+        "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+        &[name.into(), email.clone().into(), "hash".into()],
+    )
+    .await
+    .expect("inserts the user");
+    let id = raw::fetch_scalar(
+        db,
+        "SELECT id FROM users WHERE email = ?",
+        &[email.clone().into()],
+    )
+    .await
+    .expect("reads the user id");
+    (id, email)
+}
+
+/// A site with an administrator, an editor, two authors and a contributor, pretty permalinks
+/// and the address [`HOME`].
+async fn site() -> Site {
+    let test = database().await;
+    let db = test.db();
+    create_users_table(db).await;
+    migrator()
+        .unwrap()
+        .run(db)
+        .await
+        .expect("runs the migrations");
+    for (name, value) in [
+        ("home", json!(HOME)),
+        ("siteurl", json!(HOME)),
+        ("permalink_structure", json!("/%postname%/")),
+        ("gmt_offset", json!("0")),
+    ] {
+        set_option(db, name, &value).await.expect("sets the option");
+    }
+    let roles = InMemoryUserRoles::new();
+    let mut users = BTreeMap::new();
+    for (name, role) in [
+        ("admin", ADMINISTRATOR),
+        ("editor", EDITOR),
+        ("author", AUTHOR),
+        ("author2", AUTHOR),
+        ("contributor", CONTRIBUTOR),
+    ] {
+        let (id, email) = new_user(db, name).await;
+        let (password, _) = app_password::create(db, id, "Tests", None)
+            .await
+            .expect("creates the application password");
+        roles.assign(id, RoleAssignment::new([role], BTreeMap::new()));
+        users.insert(
+            name,
+            User {
+                id,
+                email,
+                password,
+            },
+        );
+    }
+    let user_roles: Arc<dyn UserRoles> = Arc::new(roles);
+    let options = AppOptions {
+        database: Some(test.shared()),
+        user_roles: Some(user_roles),
+        ..AppOptions::default()
+    };
+    let client = Client::tracked(rocket_with_options(config(), options))
+        .await
+        .expect("the app ignites");
+    Site {
+        test,
+        client,
+        users,
+    }
+}
+
+async fn body(response: LocalResponse<'_>) -> (Status, Value) {
+    let status = response.status();
+    let text = response.into_string().await.unwrap_or_default();
+    let json = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{status}: {e}: {text}"));
+    (status, json)
+}
+
+/// Asserts that `response` is WordPress's error `code` with `status`, and returns the body.
+async fn assert_error(response: LocalResponse<'_>, status: Status, code: &str) -> Value {
+    assert_eq!(
+        response.headers().get_one("Content-Type"),
+        Some("application/json; charset=UTF-8")
+    );
+    let (got, json) = body(response).await;
+    assert_eq!((got, json["code"].as_str()), (status, Some(code)), "{json}");
+    assert_eq!(json["data"]["status"], json!(status.code));
+    json
+}
+
+fn keys(value: &Value) -> BTreeSet<String> {
+    value
+        .as_object()
+        .unwrap_or_else(|| panic!("an object: {value}"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn set(list: &[&str]) -> BTreeSet<String> {
+    list.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn header<'a>(response: &'a LocalResponse<'_>, name: &str) -> Option<&'a str> {
+    response.headers().get_one(name)
+}
+
+fn ids(list: &Value) -> Vec<i64> {
+    list.as_array()
+        .unwrap_or_else(|| panic!("an array: {list}"))
+        .iter()
+        .map(|item| item["id"].as_i64().expect("an id"))
+        .collect()
+}
+
+#[rocket::async_test]
+async fn a_post_has_wordpresss_keys() {
+    let site = site().await;
+    let news = Term::create(site.db(), &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .unwrap();
+    let post = site.published("author", "post", "Hello world").await;
+    post.sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+
+    let (status, json) = body(
+        site.get(&format!("/wp-json/wp/v2/posts/{}", post.id), None)
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(keys(&json), set(POST_VIEW_KEYS));
+    assert_eq!(json["id"], json!(post.id));
+    assert_eq!(json["type"], json!("post"));
+    assert_eq!(json["status"], json!("publish"));
+    assert_eq!(json["slug"], json!("hello-world"));
+    assert_eq!(json["link"], json!(format!("{HOME}/hello-world/")));
+    assert_eq!(json["title"], json!({"rendered": "Hello world"}));
+    assert_eq!(
+        json["content"],
+        json!({"rendered": "<p>The body of Hello world.</p>", "protected": false})
+    );
+    assert_eq!(json["excerpt"]["protected"], json!(false));
+    assert_eq!(json["author"], json!(site.user("author").id));
+    assert_eq!(json["categories"], json!([news.term_id]));
+    assert_eq!(json["tags"], json!([]));
+    assert_eq!(json["meta"], json!({}));
+    assert_eq!(json["sticky"], json!(false));
+    assert_eq!(json["format"], json!("standard"));
+    assert_eq!(json["featured_media"], json!(0));
+    assert_eq!(
+        json["guid"],
+        json!({"rendered": format!("{HOME}/?p={}", post.id)})
+    );
+    let date = post
+        .published_at
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    assert_eq!(
+        (json["date"].clone(), json["date_gmt"].clone()),
+        (json!(date), json!(date))
+    );
+    assert!(
+        json["class_list"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("category-news"))
+    );
+    let links = keys(&json["_links"]);
+    for rel in [
+        "self",
+        "collection",
+        "about",
+        "author",
+        "version-history",
+        "wp:attachment",
+        "wp:term",
+        "curies",
+    ] {
+        assert!(links.contains(rel), "{rel} in {links:?}");
+    }
+    assert_eq!(
+        json["_links"]["self"][0]["href"],
+        json!(format!("{HOME}/wp-json/wp/v2/posts/{}", post.id))
+    );
+    assert_eq!(
+        json["_links"]["self"][0]["targetHints"]["allow"],
+        json!(["GET"])
+    );
+
+    // The edit context adds the raw fields, for a user who may edit the post.
+    let (status, json) = body(
+        site.get(
+            &format!("/wp-json/wp/v2/posts/{}?context=edit", post.id),
+            Some("editor"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    let mut edit = set(POST_VIEW_KEYS);
+    edit.extend(set(EDIT_EXTRA_KEYS));
+    assert_eq!(keys(&json), edit);
+    assert_eq!(json["title"]["raw"], json!("Hello world"));
+    assert_eq!(
+        json["content"]["raw"],
+        json!("<p>The body of Hello world.</p>")
+    );
+    assert_eq!(json["content"]["block_version"], json!(0));
+    assert_eq!(
+        json["permalink_template"],
+        json!(format!("{HOME}/%postname%/"))
+    );
+    assert_eq!(json["generated_slug"], json!("hello-world"));
+    assert!(keys(&json["_links"]).contains("wp:action-publish"));
+
+    // Anonymous edit context is refused.
+    assert_error(
+        site.get(
+            &format!("/wp-json/wp/v2/posts/{}?context=edit", post.id),
+            None,
+        )
+        .await,
+        Status::Unauthorized,
+        "rest_forbidden_context",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn a_page_has_wordpresss_keys() {
+    let site = site().await;
+    let parent = site.published("editor", "page", "About").await;
+    let page = site
+        .create(
+            "editor",
+            "page",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "Team".into(),
+                parent_id: Some(parent.id),
+                menu_order: 3,
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, "page")
+            },
+        )
+        .await;
+    set_post_meta(
+        site.db(),
+        page.id,
+        "_wp_page_template",
+        &json!("templates/wide.php"),
+    )
+    .await
+    .unwrap();
+    let (status, json) = body(
+        site.get(&format!("/wp-json/wp/v2/pages/{}", page.id), None)
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(keys(&json), set(PAGE_VIEW_KEYS));
+    assert_eq!(json["parent"], json!(parent.id));
+    assert_eq!(json["menu_order"], json!(3));
+    assert_eq!(json["template"], json!("templates/wide.php"));
+    assert_eq!(json["link"], json!(format!("{HOME}/about/team/")));
+    assert_eq!(
+        json["guid"]["rendered"],
+        json!(format!("{HOME}/?page_id={}", page.id))
+    );
+
+    // A page is not a post, and a post is not a page.
+    assert_error(
+        site.get(&format!("/wp-json/wp/v2/posts/{}", page.id), None)
+            .await,
+        Status::NotFound,
+        "rest_post_invalid_id",
+    )
+    .await;
+
+    // The list of pages filters by parent and orders by menu_order.
+    let first = site
+        .create(
+            "editor",
+            "page",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "First".into(),
+                parent_id: Some(parent.id),
+                menu_order: 1,
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, "page")
+            },
+        )
+        .await;
+    let (status, json) = body(
+        site.get(
+            &format!(
+                "/wp-json/wp/v2/pages?parent={}&orderby=menu_order&order=asc",
+                parent.id
+            ),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(ids(&json), [first.id, page.id]);
+}
+
+#[rocket::async_test]
+async fn lists_have_pagination_headers() {
+    let site = site().await;
+    let mut posts = Vec::new();
+    for title in ["One", "Two", "Three"] {
+        posts.push(site.published("author", "post", title).await);
+    }
+    // Drafts, pages and other types are not listed.
+    site.create(
+        "author",
+        "post",
+        NewPost {
+            title: "Draft".into(),
+            ..NewPost::new(0, "post")
+        },
+    )
+    .await;
+    site.published("editor", "page", "A page").await;
+
+    let response = site.get("/wp-json/wp/v2/posts?per_page=2", None).await;
+    assert_eq!(header(&response, "X-WP-Total"), Some("3"));
+    assert_eq!(header(&response, "X-WP-TotalPages"), Some("2"));
+    let links: Vec<String> = response.headers().get("Link").map(str::to_owned).collect();
+    assert_eq!(
+        links,
+        [format!(
+            "<{HOME}/wp-json/wp/v2/posts?per_page=2&page=2>; rel=\"next\""
+        )]
+    );
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok);
+    // Newest first, the id breaking ties within a second.
+    assert_eq!(ids(&json), [posts[2].id, posts[1].id]);
+    for item in json.as_array().unwrap() {
+        assert_eq!(keys(item), set(POST_VIEW_KEYS));
+    }
+
+    let response = site
+        .get("/wp-json/wp/v2/posts?per_page=2&page=2", None)
+        .await;
+    let links: Vec<String> = response.headers().get("Link").map(str::to_owned).collect();
+    assert_eq!(
+        links,
+        [format!(
+            "<{HOME}/wp-json/wp/v2/posts?per_page=2&page=1>; rel=\"prev\""
+        )]
+    );
+    let (_, json) = body(response).await;
+    assert_eq!(ids(&json), [posts[0].id]);
+
+    assert_error(
+        site.get("/wp-json/wp/v2/posts?per_page=2&page=3", None)
+            .await,
+        Status::BadRequest,
+        "rest_post_invalid_page_number",
+    )
+    .await;
+    let json = assert_error(
+        site.get("/wp-json/wp/v2/posts?per_page=101", None).await,
+        Status::BadRequest,
+        "rest_invalid_param",
+    )
+    .await;
+    assert!(json["data"]["params"]["per_page"].is_string(), "{json}");
+
+    // include and orderby=include keep the order asked for.
+    let (_, json) = body(
+        site.get(
+            &format!(
+                "/wp-json/wp/v2/posts?include={},{}&orderby=include",
+                posts[0].id, posts[2].id
+            ),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(ids(&json), [posts[0].id, posts[2].id]);
+}
+
+#[rocket::async_test]
+async fn fields_filter_the_keys() {
+    let site = site().await;
+    let post = site.published("author", "post", "Fields").await;
+    let (_, json) = body(
+        site.get(
+            &format!(
+                "/wp-json/wp/v2/posts/{}?_fields=id,title.rendered,slug",
+                post.id
+            ),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        json,
+        json!({"id": post.id, "slug": "fields", "title": {"rendered": "Fields"}})
+    );
+    let (_, json) = body(site.get("/wp-json/wp/v2/posts?_fields=id", None).await).await;
+    assert_eq!(json, json!([{"id": post.id}]));
+}
+
+#[rocket::async_test]
+async fn search_finds_words_in_the_title_and_content() {
+    let site = site().await;
+    let a = site.published("author", "post", "Rockets").await;
+    let b = site
+        .create(
+            "author",
+            "post",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "Engines".into(),
+                content: "All about rockets and fuel.".into(),
+                published_at: Some(mission_control_now() - Duration::seconds(10)),
+                ..NewPost::new(0, "post")
+            },
+        )
+        .await;
+    site.published("author", "post", "Unrelated").await;
+    let (_, json) = body(site.get("/wp-json/wp/v2/posts?search=rocket", None).await).await;
+    assert_eq!(ids(&json), [a.id, b.id]);
+    let (_, json) = body(
+        site.get("/wp-json/wp/v2/posts?search=fuel&orderby=relevance", None)
+            .await,
+    )
+    .await;
+    assert_eq!(ids(&json), [b.id]);
+    assert_error(
+        site.get("/wp-json/wp/v2/posts?orderby=relevance", None)
+            .await,
+        Status::BadRequest,
+        "rest_no_search_term_defined",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn drafts_are_listed_only_for_editors() {
+    let site = site().await;
+    let draft = site
+        .create(
+            "author",
+            "post",
+            NewPost {
+                title: "Secret".into(),
+                ..NewPost::new(0, "post")
+            },
+        )
+        .await;
+    let json = assert_error(
+        site.get("/wp-json/wp/v2/posts?status=draft", None).await,
+        Status::BadRequest,
+        "rest_invalid_param",
+    )
+    .await;
+    assert_eq!(
+        json["data"]["details"]["status"]["code"],
+        json!("rest_forbidden_status"),
+        "{json}"
+    );
+    let (status, json) = body(
+        site.get("/wp-json/wp/v2/posts?status=draft", Some("editor"))
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(ids(&json), [draft.id]);
+    // A draft cannot be read by a visitor, nor by another author.
+    assert_error(
+        site.get(&format!("/wp-json/wp/v2/posts/{}", draft.id), None)
+            .await,
+        Status::Unauthorized,
+        "rest_forbidden",
+    )
+    .await;
+    assert_error(
+        site.get(
+            &format!("/wp-json/wp/v2/posts/{}", draft.id),
+            Some("author2"),
+        )
+        .await,
+        Status::Forbidden,
+        "rest_forbidden",
+    )
+    .await;
+    let (status, _) = body(
+        site.get(
+            &format!("/wp-json/wp/v2/posts/{}", draft.id),
+            Some("author"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+}
+
+#[rocket::async_test]
+async fn roles_decide_who_creates_publishes_and_edits() {
+    let site = site().await;
+
+    assert_error(
+        site.post("/wp-json/wp/v2/posts", None, json!({"title": "Nope"}))
+            .await,
+        Status::Unauthorized,
+        "rest_cannot_create",
+    )
+    .await;
+
+    // A contributor writes drafts and cannot publish.
+    let (status, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("contributor"),
+            json!({"title": "My draft", "content": "Words"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Created, "{json}");
+    assert_eq!(json["status"], json!("draft"));
+    assert_eq!(json["author"], json!(site.user("contributor").id));
+    assert_eq!(json["title"]["raw"], json!("My draft"));
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("contributor"),
+            json!({"title": "Published", "status": "publish"}),
+        )
+        .await,
+        Status::Forbidden,
+        "rest_cannot_publish",
+    )
+    .await;
+
+    // An author publishes, with a Location header.
+    let response = site
+        .post(
+            "/wp-json/wp/v2/posts",
+            Some("author"),
+            json!({"title": "Launch day", "content": "Go", "status": "publish"}),
+        )
+        .await;
+    let location = header(&response, "Location").map(str::to_owned);
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Created, "{json}");
+    let id = json["id"].as_i64().unwrap();
+    assert_eq!(location, Some(format!("{HOME}/wp-json/wp/v2/posts/{id}")));
+    assert_eq!(json["status"], json!("publish"));
+    assert_eq!(json["slug"], json!("launch-day"));
+
+    // An author cannot write as someone else.
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("author"),
+            json!({"title": "As editor", "author": site.user("editor").id}),
+        )
+        .await,
+        Status::Forbidden,
+        "rest_cannot_edit_others",
+    )
+    .await;
+
+    // The author edits their own post, but not another author's.
+    let (status, json) = body(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/posts/{id}"),
+            Some("author"),
+            Some(json!({"title": "Launch day, again"})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["title"]["raw"], json!("Launch day, again"));
+    // Every update records a revision.
+    assert_eq!(get_post_revisions(site.db(), id).await.unwrap().len(), 1);
+    assert_error(
+        site.send(
+            "PATCH",
+            &format!("/wp-json/wp/v2/posts/{id}"),
+            Some("author2"),
+            Some(json!({"title": "Mine now"})),
+            &[],
+        )
+        .await,
+        Status::Forbidden,
+        "rest_cannot_edit",
+    )
+    .await;
+    assert_error(
+        site.send(
+            "DELETE",
+            &format!("/wp-json/wp/v2/posts/{id}"),
+            Some("author2"),
+            None,
+            &[],
+        )
+        .await,
+        Status::Forbidden,
+        "rest_cannot_delete",
+    )
+    .await;
+    // The editor edits anyone's post; POST updates too, as in WordPress.
+    let (status, json) = body(
+        site.post(
+            &format!("/wp-json/wp/v2/posts/{id}"),
+            Some("editor"),
+            json!({"excerpt": "Short"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["excerpt"]["raw"], json!("Short"));
+    assert_eq!(json["title"]["raw"], json!("Launch day, again"));
+
+    // A form-encoded body works as JSON does.
+    let response = site
+        .client
+        .post(format!("/wp-json/wp/v2/posts/{id}"))
+        .header(site.auth("editor"))
+        .header(ContentType::Form)
+        .body("title=From+a+form&menu_order=2")
+        .dispatch()
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["title"]["raw"], json!("From a form"));
+}
+
+#[rocket::async_test]
+async fn an_updated_slug_is_settled_and_reported() {
+    let site = site().await;
+    site.published("author", "post", "Taken").await;
+    let post = site.published("author", "post", "Other").await;
+    let (status, json) = body(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/posts/{}", post.id),
+            Some("author"),
+            Some(json!({"slug": "taken"})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["slug"], json!("taken-2"));
+}
+
+#[rocket::async_test]
+async fn kses_filters_authors_and_not_editors() {
+    let site = site().await;
+    let html = "<p>Hi</p><script>alert(1)</script>";
+    let (_, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("author"),
+            json!({"title": "Filtered", "content": html}),
+        )
+        .await,
+    )
+    .await;
+    let raw = json["content"]["raw"].as_str().unwrap();
+    assert!(!raw.contains("<script"), "{raw}");
+    assert!(raw.contains("<p>Hi</p>"), "{raw}");
+    let id = json["id"].as_i64().unwrap();
+    assert!(!site.reload(id).await.unwrap().content.contains("<script"));
+
+    let (_, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "Unfiltered", "content": html}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(json["content"]["raw"], json!(html));
+}
+
+#[rocket::async_test]
+async fn an_oversized_field_is_refused_for_an_author() {
+    let site = site().await;
+    let big = "a".repeat(MAX_FILTERED_BYTES + 1);
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("author"),
+            json!({"title": "Big", "content": big}),
+        )
+        .await,
+        Status::PayloadTooLarge,
+        "rest_content_too_large",
+    )
+    .await;
+    assert_eq!(Post::of_type("post").count(site.db()).await.unwrap(), 0);
+    // An editor is not filtered, so the kses cap does not apply.
+    let (status, _) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "Big", "content": big}),
+        )
+        .await,
+    )
+    .await;
+    // Ruling R52: on MySQL and MariaDB the column is a `TEXT` (64 KB; WordPress uses `LONGTEXT`),
+    // so a larger field is refused with the same 413 before the database is touched, never a
+    // 500 or a cut value. The other databases store it.
+    match site.db().driver() {
+        Driver::MySql => assert_eq!(status, Status::PayloadTooLarge),
+        Driver::Postgres | Driver::Sqlite => assert_eq!(status, Status::Created),
+    }
+}
+
+#[rocket::async_test]
+async fn fields_over_mysqls_text_column_are_refused_there() {
+    let site = site().await;
+    // Under the kses cap for an author, over MySQL's 65,535-byte `TEXT`.
+    let html = format!("<p>{}</p>", "a".repeat(70_000));
+    let response = site
+        .post(
+            "/wp-json/wp/v2/posts",
+            Some("author"),
+            json!({"title": "Long", "content": html}),
+        )
+        .await;
+    match site.db().driver() {
+        Driver::MySql => {
+            let json =
+                assert_error(response, Status::PayloadTooLarge, "rest_content_too_large").await;
+            assert_eq!(json["data"]["field"], json!("content"));
+            assert_eq!(Post::of_type("post").count(site.db()).await.unwrap(), 0);
+        }
+        Driver::Postgres | Driver::Sqlite => {
+            let (status, json) = body(response).await;
+            assert_eq!(status, Status::Created, "{json}");
+            // An update that keeps the long content is not refused either.
+            let id = json["id"].as_i64().unwrap();
+            let (status, _) = body(
+                site.send(
+                    "PUT",
+                    &format!("/wp-json/wp/v2/posts/{id}"),
+                    Some("author"),
+                    Some(json!({"title": "Longer"})),
+                    &[],
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, Status::Ok);
+        }
+    }
+}
+
+#[rocket::async_test]
+async fn if_unmodified_since_refuses_a_stale_update() {
+    let site = site().await;
+    let post = site.published("author", "post", "Versioned").await;
+    let (_, json) = body(
+        site.get(&format!("/wp-json/wp/v2/posts/{}", post.id), None)
+            .await,
+    )
+    .await;
+    let modified =
+        NaiveDateTime::parse_from_str(json["modified_gmt"].as_str().unwrap(), "%Y-%m-%dT%H:%M:%S")
+            .unwrap();
+    let http_date = |date: NaiveDateTime| date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+
+    // A save the client has not seen.
+    let mut other = site.reload(post.id).await.unwrap();
+    other.title = "Changed elsewhere".into();
+    other.save(site.db()).await.unwrap();
+
+    assert_error(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/posts/{}", post.id),
+            Some("author"),
+            Some(json!({"title": "Mine"})),
+            &[("If-Unmodified-Since", http_date(modified))],
+        )
+        .await,
+        Status::PreconditionFailed,
+        "rest_post_conflict",
+    )
+    .await;
+    let stored = site.reload(post.id).await.unwrap();
+    assert_eq!(stored.title, "Changed elsewhere");
+
+    let (status, json) = body(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/posts/{}", post.id),
+            Some("author"),
+            Some(json!({"title": "Mine"})),
+            &[("If-Unmodified-Since", http_date(stored.modified_at))],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["title"]["raw"], json!("Mine"));
+
+    // Without the header the last write wins, as in WordPress.
+    let (status, _) = body(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/posts/{}", post.id),
+            Some("author"),
+            Some(json!({"title": "Last"})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+}
+
+#[rocket::async_test]
+async fn delete_trashes_and_force_deletes() {
+    let site = site().await;
+    let news = Term::create(site.db(), &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .unwrap();
+    let post = site.published("author", "post", "Short lived").await;
+    post.sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+
+    let (status, json) = body(site.send("DELETE", &uri, Some("author"), None, &[]).await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["status"], json!("trash"));
+    assert_eq!(json["id"], json!(post.id));
+    assert_error(
+        site.send("DELETE", &uri, Some("author"), None, &[]).await,
+        Status::Gone,
+        "rest_already_trashed",
+    )
+    .await;
+
+    let (status, json) = body(
+        site.send(
+            "DELETE",
+            &format!("{uri}?force=true"),
+            Some("author"),
+            None,
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["deleted"], json!(true));
+    assert_eq!(json["previous"]["id"], json!(post.id));
+    assert!(site.reload(post.id).await.is_none());
+    assert!(
+        get_post_revisions(site.db(), post.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_error(
+        site.get(&uri, Some("author")).await,
+        Status::NotFound,
+        "rest_post_invalid_id",
+    )
+    .await;
+
+    // A published post in the category, deleted at once: the count follows.
+    let second = site.published("author", "post", "Counted").await;
+    second
+        .sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    assert_eq!(
+        Term::find(site.db(), news.term_taxonomy_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .count,
+        1
+    );
+    let (status, _) = body(
+        site.send(
+            "DELETE",
+            &format!("/wp-json/wp/v2/posts/{}?force=true", second.id),
+            Some("editor"),
+            None,
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        Term::find(site.db(), news.term_taxonomy_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .count,
+        0
+    );
+}
+
+#[rocket::async_test]
+async fn the_front_page_needs_manage_options_to_delete() {
+    let site = site().await;
+    let front = site.published("editor", "page", "Home").await;
+    set_option(site.db(), "show_on_front", &json!("page"))
+        .await
+        .unwrap();
+    set_option(site.db(), "page_on_front", &json!(front.id))
+        .await
+        .unwrap();
+    let uri = format!("/wp-json/wp/v2/pages/{}", front.id);
+    assert_error(
+        site.send("DELETE", &uri, Some("editor"), None, &[]).await,
+        Status::Forbidden,
+        "rest_cannot_delete",
+    )
+    .await;
+    // The editor may still edit it.
+    let (status, _) = body(
+        site.send(
+            "PUT",
+            &uri,
+            Some("editor"),
+            Some(json!({"title": "Welcome"})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let (status, _) = body(
+        site.send(
+            "DELETE",
+            &format!("{uri}?force=true"),
+            Some("admin"),
+            None,
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    // WordPress forgets the deleted front page.
+    let (_, index) = body(site.get("/wp-json/", None).await).await;
+    assert_eq!(index["page_on_front"], json!(0));
+    assert_eq!(index["show_on_front"], json!("posts"));
+}
+
+#[rocket::async_test]
+async fn a_protected_post_hides_its_content() {
+    let site = site().await;
+    let post = site
+        .create(
+            "author",
+            "post",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "Locked".into(),
+                content: "Hidden words".into(),
+                password: Some("sesame".into()),
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, "post")
+            },
+        )
+        .await;
+    let uri = format!("/wp-json/wp/v2/posts/{}", post.id);
+    let (_, json) = body(site.get(&uri, None).await).await;
+    assert_eq!(json["content"], json!({"rendered": "", "protected": true}));
+    assert_eq!(json["excerpt"], json!({"rendered": "", "protected": true}));
+    assert_eq!(json["title"]["rendered"], json!("Locked"));
+    let (_, json) = body(site.get(&format!("{uri}?password=sesame"), None).await).await;
+    assert_eq!(json["content"]["rendered"], json!("Hidden words"));
+    assert_error(
+        site.get(&format!("{uri}?password=wrong"), None).await,
+        Status::Forbidden,
+        "rest_post_incorrect_password",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn only_types_shown_in_rest_have_routes() {
+    let site = site().await;
+    // A type that is not registered for the REST API (like `show_in_rest` false) has no route
+    // and is not listed, even with posts in the database.
+    site.published("author", "book", "A book").await;
+    assert_error(
+        site.get("/wp-json/wp/v2/books", None).await,
+        Status::NotFound,
+        "rest_no_route",
+    )
+    .await;
+    let (_, json) = body(site.get("/wp-json/wp/v2/posts", None).await).await;
+    assert_eq!(json, json!([]));
+    let (_, index) = body(site.get("/wp-json/wp/v2", None).await).await;
+    let routes = keys(&index["routes"]);
+    for route in [
+        "/wp/v2/posts",
+        "/wp/v2/posts/(?P<id>[\\d]+)",
+        "/wp/v2/pages",
+        "/wp/v2/pages/(?P<id>[\\d]+)",
+    ] {
+        assert!(routes.contains(route), "{route} in {routes:?}");
+    }
+    assert!(!routes.iter().any(|r| r.contains("book")), "{routes:?}");
+    assert_eq!(
+        index["routes"]["/wp/v2/posts"]["methods"],
+        json!(["GET", "POST"])
+    );
+    // A non-numeric id is no route.
+    assert_error(
+        site.get("/wp-json/wp/v2/posts/abc", None).await,
+        Status::NotFound,
+        "rest_no_route",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn embed_adds_the_author_and_terms() {
+    let site = site().await;
+    let news = Term::create(site.db(), &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .unwrap();
+    let post = site.published("author", "post", "Embedded").await;
+    post.sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    let (_, json) = body(
+        site.get(&format!("/wp-json/wp/v2/posts/{}?_embed", post.id), None)
+            .await,
+    )
+    .await;
+    let embedded = &json["_embedded"];
+    assert_eq!(embedded["author"][0]["id"], json!(site.user("author").id));
+    assert_eq!(embedded["author"][0]["name"], json!("author"));
+    assert_eq!(embedded["wp:term"][0][0]["slug"], json!("news"));
+    assert_eq!(embedded["wp:term"][0][0]["taxonomy"], json!("category"));
+    assert_eq!(embedded["wp:term"][1], json!([]));
+    // Only what was asked for.
+    let (_, json) = body(
+        site.get(
+            &format!("/wp-json/wp/v2/posts/{}?_embed=author", post.id),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(keys(&json["_embedded"]), set(&["author"]));
+}
+
+#[rocket::async_test]
+async fn featured_media_and_categories_are_written() {
+    let site = site().await;
+    let news = Term::create(site.db(), &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .unwrap();
+    let image = site
+        .create(
+            "editor",
+            "attachment",
+            NewPost {
+                status: PostStatus::Inherit,
+                title: "Photo".into(),
+                mime_type: "image/jpeg".into(),
+                ..NewPost::new(0, "attachment")
+            },
+        )
+        .await;
+    let (status, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({
+                "title": "With media",
+                "status": "publish",
+                "featured_media": image.id,
+                "categories": [news.term_id],
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Created, "{json}");
+    assert_eq!(json["featured_media"], json!(image.id));
+    assert_eq!(json["categories"], json!([news.term_id]));
+    let id = json["id"].as_i64().unwrap();
+    assert_eq!(
+        get_post_meta(site.db(), id, "_thumbnail_id").await.unwrap(),
+        Some(json!(image.id))
+    );
+    assert_eq!(
+        Term::find(site.db(), news.term_taxonomy_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .count,
+        1
+    );
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "Bad media", "featured_media": id}),
+        )
+        .await,
+        Status::BadRequest,
+        "rest_invalid_featured_media",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn a_visitors_search_never_matches_a_protected_post() {
+    let site = site().await;
+    let locked = site
+        .create(
+            "author",
+            "post",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "Vault".into(),
+                content: "The secret word is xylophonic.".into(),
+                password: Some("sesame".into()),
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, "post")
+            },
+        )
+        .await;
+    let open = site
+        .create(
+            "author",
+            "post",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "Open door".into(),
+                content: "Nothing hidden: xylophonic.".into(),
+                published_at: Some(mission_control_now() - Duration::seconds(5)),
+                ..NewPost::new(0, "post")
+            },
+        )
+        .await;
+    let response = site
+        .get("/wp-json/wp/v2/posts?search=xylophonic", None)
+        .await;
+    assert_eq!(header(&response, "X-WP-Total"), Some("1"));
+    let (_, json) = body(response).await;
+    assert_eq!(ids(&json), [open.id]);
+    // A signed-in user's search matches it, as WordPress's does.
+    let (_, json) = body(
+        site.get("/wp-json/wp/v2/posts?search=xylophonic", Some("author2"))
+            .await,
+    )
+    .await;
+    assert_eq!(ids(&json), [locked.id, open.id]);
+
+    // The front end's search is a visitor's too.
+    let response = site.client.get("/?s=xylophonic").dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
+    let page = response.into_string().await.unwrap();
+    assert!(page.contains("Open door"), "{page}");
+    assert!(!page.contains("Vault"), "{page}");
+}
+
+#[rocket::async_test]
+async fn force_delete_leaves_no_meta_or_relationships() {
+    let site = site().await;
+    let news = Term::create(site.db(), &Taxonomy::CATEGORY, NewTerm::new("News"))
+        .await
+        .unwrap();
+    let post = site.published("author", "post", "Gone").await;
+    post.sync_terms(site.db(), &Taxonomy::CATEGORY, &[news.term_taxonomy_id])
+        .await
+        .unwrap();
+    set_post_meta(site.db(), post.id, "subtitle", &json!("x"))
+        .await
+        .unwrap();
+    let (status, _) = body(
+        site.send(
+            "DELETE",
+            &format!("/wp-json/wp/v2/posts/{}?force=true", post.id),
+            Some("author"),
+            None,
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    for (table, column) in [
+        ("post_meta", "post_id"),
+        ("term_relationships", "object_id"),
+    ] {
+        let count: i64 = raw::fetch_scalar(
+            site.db(),
+            &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?"),
+            &[post.id.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
+
+#[rocket::async_test]
+async fn edit_context_lists_need_edit_posts() {
+    let site = site().await;
+    site.published("author", "post", "Listed").await;
+    // WordPress 6.7 lets anyone with the type's `edit_posts` list in the edit context (R51).
+    let (status, json) = body(
+        site.get("/wp-json/wp/v2/posts?context=edit", Some("contributor"))
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert!(json[0]["content"]["raw"].is_string());
+    assert_error(
+        site.get("/wp-json/wp/v2/posts?context=edit", None).await,
+        Status::Unauthorized,
+        "rest_forbidden_context",
+    )
+    .await;
+    // A status outside the enum is named before any permission check.
+    let json = assert_error(
+        site.get("/wp-json/wp/v2/posts?status=nonsense", None).await,
+        Status::BadRequest,
+        "rest_invalid_param",
+    )
+    .await;
+    assert_eq!(
+        json["data"]["details"]["status"]["code"],
+        json!("rest_not_in_enum")
+    );
+}
+
+#[rocket::async_test]
+async fn writes_check_sticky_parents_media_and_templates() {
+    let site = site().await;
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("contributor"),
+            json!({"title": "Pin me", "sticky": true}),
+        )
+        .await,
+        Status::Forbidden,
+        "rest_cannot_assign_sticky",
+    )
+    .await;
+
+    // A parent that would make a loop is dropped, as `wp_check_post_hierarchy_for_loops`.
+    let top = site.published("editor", "page", "Top").await;
+    let child = site
+        .create(
+            "editor",
+            "page",
+            NewPost {
+                status: PostStatus::Publish,
+                title: "Child".into(),
+                parent_id: Some(top.id),
+                published_at: Some(mission_control_now()),
+                ..NewPost::new(0, "page")
+            },
+        )
+        .await;
+    let (status, json) = body(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/pages/{}", top.id),
+            Some("editor"),
+            Some(json!({"parent": child.id})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["parent"], json!(0));
+    assert_error(
+        site.send(
+            "PUT",
+            &format!("/wp-json/wp/v2/pages/{}", top.id),
+            Some("editor"),
+            Some(json!({"parent": 999_999_999})),
+            &[],
+        )
+        .await,
+        Status::BadRequest,
+        "rest_post_invalid_id",
+    )
+    .await;
+
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("editor"),
+            json!({"title": "No such media", "featured_media": 999_999_999}),
+        )
+        .await,
+        Status::BadRequest,
+        "rest_invalid_featured_media",
+    )
+    .await;
+
+    let json = assert_error(
+        site.post(
+            "/wp-json/wp/v2/pages",
+            Some("editor"),
+            json!({"title": "Templated", "template": "templates/missing.php"}),
+        )
+        .await,
+        Status::BadRequest,
+        "rest_invalid_param",
+    )
+    .await;
+    assert!(json["data"]["params"]["template"].is_string(), "{json}");
+    assert_error(
+        site.post(
+            "/wp-json/wp/v2/pages",
+            Some("editor"),
+            json!({"title": "Escaping", "template": "../../etc/passwd"}),
+        )
+        .await,
+        Status::BadRequest,
+        "rest_invalid_param",
+    )
+    .await;
+}
+
+#[rocket::async_test]
+async fn a_publish_dated_ahead_is_scheduled() {
+    let site = site().await;
+    let date = (mission_control_now() + Duration::hours(3)).format("%Y-%m-%dT%H:%M:%S");
+    let (status, json) = body(
+        site.post(
+            "/wp-json/wp/v2/posts",
+            Some("author"),
+            json!({"title": "Tomorrow", "status": "publish", "date_gmt": date.to_string()}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Created, "{json}");
+    assert_eq!(json["status"], json!("future"));
+    assert_eq!(json["date_gmt"], json!(date.to_string()));
+    let id = json["id"].as_i64().unwrap();
+    let scheduled: i64 = raw::fetch_scalar(
+        site.db(),
+        "SELECT COUNT(*) FROM scheduled_events WHERE hook = ? AND payload = ?",
+        &["publish_future_post".into(), id.to_string().into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(scheduled, 1);
+    // Trashing it removes the event.
+    site.send(
+        "DELETE",
+        &format!("/wp-json/wp/v2/posts/{id}"),
+        Some("author"),
+        None,
+        &[],
+    )
+    .await;
+    let scheduled: i64 = raw::fetch_scalar(
+        site.db(),
+        "SELECT COUNT(*) FROM scheduled_events WHERE hook = ?",
+        &["publish_future_post".into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(scheduled, 0);
+}
+
+#[rocket::async_test]
+async fn a_trailing_slash_serves_the_same_route() {
+    let site = site().await;
+    let post = site.published("author", "post", "Slashed").await;
+    let (status, json) = body(site.get("/wp-json/wp/v2/posts/", None).await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(ids(&json), [post.id]);
+    let (status, json) = body(
+        site.get(&format!("/wp-json/wp/v2/posts/{}/", post.id), None)
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["id"], json!(post.id));
+}
+
+#[rocket::async_test]
+async fn a_type_registered_on_the_app_is_served_only_when_shown() {
+    let site = site().await;
+    let types = site
+        .client
+        .rocket()
+        .state::<Arc<PostTypes>>()
+        .expect("the app manages its post types");
+    let routes = site
+        .client
+        .rocket()
+        .state::<Arc<RestRoutes>>()
+        .expect("the app manages its routes");
+    let book = PostType {
+        name: "book".into(),
+        rest_base: "books".into(),
+        hierarchical: false,
+        show_in_rest: false,
+        supports: Supports::ALL,
+        taxonomies: Vec::new(),
+    };
+    types.register(book.clone());
+    types.register_routes(routes);
+    let novel = site.published("author", "book", "A novel").await;
+    assert_error(
+        site.get("/wp-json/wp/v2/books", None).await,
+        Status::NotFound,
+        "rest_no_route",
+    )
+    .await;
+    let (_, index) = body(site.get("/wp-json/wp/v2", None).await).await;
+    assert!(!keys(&index["routes"]).iter().any(|r| r.contains("books")));
+
+    // Shown, it is served and listed.
+    types.register(PostType {
+        show_in_rest: true,
+        ..book
+    });
+    types.register_routes(routes);
+    let (status, json) = body(site.get("/wp-json/wp/v2/books", None).await).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(ids(&json), [novel.id]);
+    let (_, index) = body(site.get("/wp-json/wp/v2", None).await).await;
+    assert!(keys(&index["routes"]).contains("/wp/v2/books"));
+}
+
+#[rocket::async_test]
+async fn every_id_list_is_bounded() {
+    let site = site().await;
+    let many: Vec<String> = (1..=501).map(|n| n.to_string()).collect();
+    for param in ["author_exclude", "categories", "tags_exclude"] {
+        let json = assert_error(
+            site.get(
+                &format!("/wp-json/wp/v2/posts?{param}={}", many.join(",")),
+                None,
+            )
+            .await,
+            Status::BadRequest,
+            "rest_invalid_param",
+        )
+        .await;
+        assert!(json["data"]["params"][param].is_string(), "{param}: {json}");
+    }
+    let json = assert_error(
+        site.get(
+            &format!("/wp-json/wp/v2/pages?parent={}", many.join(",")),
+            None,
+        )
+        .await,
+        Status::BadRequest,
+        "rest_invalid_param",
+    )
+    .await;
+    assert!(json["data"]["params"]["parent"].is_string(), "{json}");
+}
+
+#[rocket::async_test]
+async fn an_attachment_like_inherit_post_reads_as_its_parent() {
+    // Exercised through a page whose type is served: an `inherit` page under a draft parent is
+    // not readable by a visitor, under a published one it is.
+    let site = site().await;
+    let draft = site
+        .create(
+            "editor",
+            "page",
+            NewPost {
+                title: "Draft parent".into(),
+                ..NewPost::new(0, "page")
+            },
+        )
+        .await;
+    let published = site.published("editor", "page", "Published parent").await;
+    let under = |parent: i64, title: &'static str| NewPost {
+        status: PostStatus::Inherit,
+        title: title.into(),
+        parent_id: Some(parent),
+        ..NewPost::new(0, "page")
+    };
+    let hidden = site
+        .create("editor", "page", under(draft.id, "Hidden"))
+        .await;
+    let shown = site
+        .create("editor", "page", under(published.id, "Shown"))
+        .await;
+    assert_error(
+        site.get(&format!("/wp-json/wp/v2/pages/{}", hidden.id), None)
+            .await,
+        Status::Unauthorized,
+        "rest_forbidden",
+    )
+    .await;
+    let (status, _) = body(
+        site.get(&format!("/wp-json/wp/v2/pages/{}", shown.id), None)
+            .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+}

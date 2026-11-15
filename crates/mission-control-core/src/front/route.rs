@@ -1656,6 +1656,11 @@ impl Listing<'_> {
             sql.push_str(columns);
             binds.extend(std::iter::repeat_n(Sql::from(like), 3));
         }
+        // `WP_Query::parse_search`: the visitor is never logged in here, so a search never
+        // matches a password-protected post, whose hidden words could otherwise be probed.
+        if !self.search.is_empty() {
+            sql.push_str(" AND (p.password IS NULL OR p.password = '')");
+        }
         Some((sql, binds))
     }
 
@@ -1715,7 +1720,7 @@ fn storable(date: NaiveDateTime) -> NaiveDateTime {
 
 /// `text` with `!`, `%` and `_` escaped by `!`, for `LIKE ... ESCAPE '!'`, which reads alike on
 /// every database (a backslash does not).
-fn escape_like(text: &str) -> String {
+pub(crate) fn escape_like(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         if matches!(c, '!' | '%' | '_') {
@@ -1728,10 +1733,11 @@ fn escape_like(text: &str) -> String {
 
 /// One term of a search.
 #[derive(Debug, PartialEq, Eq)]
-struct SearchTerm {
-    text: String,
+pub(crate) struct SearchTerm {
+    /// The words to match.
+    pub(crate) text: String,
     /// A term that starts with `-`: posts must not match it.
-    exclude: bool,
+    pub(crate) exclude: bool,
 }
 
 /// WordPress's stop words for search (`wp_search_stopwords`, in English).
@@ -1744,7 +1750,7 @@ const STOPWORDS: [&str; 28] = [
 /// The terms of search `s`, as `WP_Query::parse_search` splits them: quoted phrases and words
 /// split on spaces, tabs, commas and `+`; stop words and single letters dropped; the whole
 /// string as one term when nothing is left or there are more than nine.
-fn search_terms(s: &str) -> Vec<SearchTerm> {
+pub(crate) fn search_terms(s: &str) -> Vec<SearchTerm> {
     let s = s.trim();
     if s.is_empty() {
         return Vec::new();
@@ -1906,7 +1912,7 @@ fn complete(tag: Tag, value: &str) -> bool {
 
 /// `text` with `%XX` decoded, and `+` as a space when `plus` (query strings and search
 /// paths). Bytes that are not UTF-8 become U+FFFD.
-fn decode(text: &str, plus: bool) -> String {
+pub(crate) fn decode(text: &str, plus: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
