@@ -961,7 +961,8 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "orbit-macros"
 version = "0.1.0"
-source = "git+https://github.com/lajennylove/Orbit?rev=c2ee11f#c2ee11fc4a60b4fc3690b7bc36f0a114666fa45a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64a978c7d570259712d39e76d20169d01d2ffb3790942162917cf702637f2f03"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -970,8 +971,9 @@ dependencies = [
 
 [[package]]
 name = "orbit-orm"
-version = "0.1.0"
-source = "git+https://github.com/lajennylove/Orbit?rev=c2ee11f#c2ee11fc4a60b4fc3690b7bc36f0a114666fa45a"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afc84e90f4bd2d39bb4c15a4c7960175714eec9e80403c8402e0238420f6cdcd"
 dependencies = [
  "chrono",
  "orbit-macros",
