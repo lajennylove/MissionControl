@@ -70,8 +70,8 @@ impl PostScreen {
     }
 }
 
-/// Why a request on the post type screens is refused, with WordPress's message for it. Every
-/// refusal is a 403.
+/// Why a request on an admin screen (the post type screens, the media library, the settings
+/// screens and the menus) is refused, with WordPress's message for it. Every refusal is a 403.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The user lacks the type's capability set (`edit.php`'s refusal).
@@ -92,6 +92,15 @@ pub enum Refusal {
     /// The media library's upload page (`<mount>/attachment/new`, WordPress's `media-new.php`)
     /// is refused: the user lacks the screen's capabilities or `upload_files`.
     UploadFiles,
+    /// A settings screen needs `manage_options` (`options-general.php` and the others).
+    ManageOptions,
+    /// The Privacy settings need `manage_privacy_options` (`options-privacy.php`).
+    ManagePrivacyOptions,
+    /// The Menus screen needs `edit_theme_options` (`nav-menus.php`).
+    EditThemeOptions,
+    /// A page the admin does not have, such as New or Delete on a settings screen: WordPress's
+    /// answer for an admin page it does not know.
+    NoSuchPage,
 }
 
 impl Refusal {
@@ -103,13 +112,18 @@ impl Refusal {
     /// The heading WordPress's error page shows, if any.
     pub fn heading(self) -> Option<&'static str> {
         match self {
-            Self::Screen | Self::NewScreen => Some("You need a higher level of permission."),
+            Self::Screen | Self::NewScreen | Self::EditThemeOptions => {
+                Some("You need a higher level of permission.")
+            }
             Self::Create
             | Self::EditPost
             | Self::TrashPost
             | Self::DeletePost
             | Self::RestorePost
-            | Self::UploadFiles => None,
+            | Self::UploadFiles
+            | Self::ManageOptions
+            | Self::ManagePrivacyOptions
+            | Self::NoSuchPage => None,
         }
     }
 
@@ -124,6 +138,14 @@ impl Refusal {
             Self::DeletePost => "Sorry, you are not allowed to delete this item.",
             Self::RestorePost => "Sorry, you are not allowed to restore this item from the Trash.",
             Self::UploadFiles => "Sorry, you are not allowed to upload files.",
+            Self::ManageOptions => "Sorry, you are not allowed to manage options for this site.",
+            Self::ManagePrivacyOptions => {
+                "Sorry, you are not allowed to manage privacy options on this site."
+            }
+            Self::EditThemeOptions => {
+                "Sorry, you are not allowed to edit theme options on this site."
+            }
+            Self::NoSuchPage => "Sorry, you are not allowed to access this page.",
         }
     }
 }

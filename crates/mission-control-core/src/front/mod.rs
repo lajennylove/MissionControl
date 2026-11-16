@@ -19,7 +19,8 @@ pub use render::{
     load_active_theme, site_address,
 };
 pub use route::{
-    Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve, term_links,
+    Archive, MAX_POSTS_PER_PAGE, MainQuery, Query, Resolved, post_links, query_posts, resolve,
+    term_links,
 };
 pub(crate) use route::{
     NON_PUBLIC_TYPES, SearchTerm, decode, escape_like, search_terms, visitor_readable,

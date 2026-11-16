@@ -26,6 +26,7 @@ mod caption;
 mod future;
 mod kses;
 mod meta;
+mod options;
 mod permalink;
 mod post;
 mod revision;
@@ -53,7 +54,9 @@ pub use meta::{
     set_user_meta_raw,
 };
 pub(crate) use meta::{MetaTable, delete_meta, meta_rows, set_meta, set_meta_values};
-pub(crate) use meta::{gmt_offset, put_post_meta_in};
+pub(crate) use meta::{get_option_in, gmt_offset, put_option_in, put_post_meta_in};
+pub use options::{OptionError, sanitize_option};
+pub(crate) use options::{esc_url_raw, is_email, is_timezone, utc_offset};
 pub use permalink::{
     PermalinkContext, PermalinkError, PermalinkStructure, Segment, Tag, page_ancestors, permalink,
 };
@@ -70,4 +73,4 @@ pub use taxonomy::{
     MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermChanges, TermError, default_term_ids,
     update_term_counts,
 };
-pub(crate) use taxonomy::{set_terms_in, terms_by_term_id};
+pub(crate) use taxonomy::{recount_in, set_terms_in, terms_by_term_id};

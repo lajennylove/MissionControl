@@ -27,9 +27,11 @@ pub use manifest::{
     PageTemplate, Sidebar, Support,
 };
 pub use menus::{
-    MAX_MENU_DEPTH, MenuError, MenuItemObject, NAV_MENU_ITEM, NAV_MENU_LOCATIONS, NavMenu,
-    NavMenuItem, NewMenuItem, add_menu_item, create_nav_menu, menu_locations, nav_menu,
-    set_menu_location, theme_menus, theme_mods_option,
+    MAX_MENU_DEPTH, MAX_MENU_ITEMS, MenuError, MenuItemInput, MenuItemObject, MenuLocationChanges,
+    NAV_MENU_ITEM, NAV_MENU_LOCATIONS, NavMenu, NavMenuItem, NewMenuItem, StoredMenuItem,
+    add_menu_item, create_nav_menu, delete_nav_menu, get_nav_menu, menu_items, menu_locations,
+    nav_menu, rename_nav_menu, save_menu_items, save_nav_menu, set_menu_location, theme_menus,
+    theme_mods_option,
 };
 pub use request::PageRequest;
 pub use widgets::{

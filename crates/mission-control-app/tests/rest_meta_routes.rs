@@ -924,25 +924,18 @@ async fn timezones_are_checked_against_the_iana_list() {
         .await)
     .await;
     assert_eq!(kept["timezone"], "US/Eastern");
-    // `UTC+N`, as WordPress's settings screen saves it: an offset, and no timezone.
-    let offset = ok(site
-        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC+5.5"))
-        .await)
-    .await;
-    assert_eq!(offset["timezone"], "");
-    assert_eq!(site.option("gmt_offset").await, Some(json!("5.5")));
-    ok(site
-        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC-3"))
-        .await)
-    .await;
-    assert_eq!(site.option("gmt_offset").await, Some(json!("-3")));
-    // An offset WordPress's menu does not offer is refused, and nothing changes.
-    let refused = ok(site
-        .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC+5.3"))
-        .await)
-    .await;
-    assert_eq!(refused["timezone"], "");
-    assert_eq!(site.option("gmt_offset").await, Some(json!("-3")));
+    // G22: `UTC+N` is no timezone name. As WordPress's REST API (`sanitize_option` refuses it),
+    // the stored timezone is kept and `gmt_offset` is not touched; only the General Settings
+    // screen turns it into an offset.
+    let before = site.option("gmt_offset").await;
+    for zone in ["UTC+5.5", "UTC-3", "UTC+5.3"] {
+        let kept = ok(site
+            .send("POST", "/mc-json/mc/v2/settings", "admin", set(zone))
+            .await)
+        .await;
+        assert_eq!(kept["timezone"], "US/Eastern", "{zone}");
+        assert_eq!(site.option("gmt_offset").await, before, "{zone}");
+    }
     let utc = ok(site
         .send("POST", "/mc-json/mc/v2/settings", "admin", set("UTC"))
         .await)

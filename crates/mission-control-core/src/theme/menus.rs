@@ -55,8 +55,9 @@ use serde_json::{Map, Value, json};
 
 use super::{PageRequest, Theme};
 use crate::content::{
-    MetaError, NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermError, get_option, now,
-    put_post_meta_in, set_option, set_terms_in, terms_by_term_id,
+    MetaError, NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, TermChanges, TermError,
+    get_option, get_option_in, now, put_option_in, put_post_meta_in, recount_in, set_option,
+    set_terms_in, terms_by_term_id,
 };
 use crate::front::{Archive, NON_PUBLIC_TYPES, Resolved, post_links, term_links, visitor_readable};
 use crate::text::html_class;
@@ -411,6 +412,470 @@ pub async fn menu_locations(
         .iter()
         .filter_map(|(location, menu)| Some((location.clone(), id_of(menu)?)))
         .collect())
+}
+
+/// The most items one menu holds, read or saved through [`menu_items`] and [`save_menu_items`],
+/// so a menu cannot grow without bound. WordPress has no limit; PHP's `max_input_vars` (1000)
+/// caps a menu at about 80 items in its admin.
+pub const MAX_MENU_ITEMS: usize = 500;
+
+/// The menu with `term_id`, the id WordPress gives a menu, if it is a menu.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn get_nav_menu(db: &Database, term_id: i64) -> Result<Option<Term>, Error> {
+    Ok(terms_by_term_id(db, &Taxonomy::NAV_MENU, &[term_id])
+        .await?
+        .into_iter()
+        .next())
+}
+
+/// The menu named `name`, compared without case as MySQL compares it (WordPress's
+/// `get_term_by( 'name' )`, which `wp_update_nav_menu_object` checks names with).
+async fn menu_named(db: &Database, name: &str) -> Result<Option<i64>, Error> {
+    let rows: Vec<(i64, String)> = raw::fetch_all(
+        db,
+        "SELECT t.id, t.name FROM terms t INNER JOIN term_taxonomy tt ON tt.term_id = t.id \
+         WHERE tt.taxonomy = ? AND LOWER(t.name) = LOWER(?)",
+        &[(&*Taxonomy::NAV_MENU.name).into(), name.trim().into()],
+    )
+    .await?;
+    let wanted = name.trim().to_lowercase();
+    Ok(rows
+        .into_iter()
+        .find(|(_, stored)| stored.to_lowercase() == wanted)
+        .map(|(id, _)| id))
+}
+
+/// Renames `menu` to `name`, as `wp_update_nav_menu_object` does: the name must not be another
+/// menu's. The slug is kept.
+///
+/// # Errors
+///
+/// [`MenuError::Term`] with [`TermError::Exists`] when another menu has the name (WordPress's
+/// "The menu name … conflicts with another menu name."), or [`TermError::EmptyName`] and the
+/// other refusals of [`Term::update`]; [`MenuError::NotAMenu`] when `menu` is not a menu.
+pub async fn rename_nav_menu(db: &Database, menu: &Term, name: &str) -> Result<Term, MenuError> {
+    if menu.taxonomy != Taxonomy::NAV_MENU.name {
+        return Err(MenuError::NotAMenu);
+    }
+    if let Some(other) = menu_named(db, name).await?
+        && other != menu.term_id
+    {
+        return Err(MenuError::Term(TermError::Exists {
+            term_taxonomy_id: other,
+        }));
+    }
+    menu.update(
+        db,
+        &Taxonomy::NAV_MENU,
+        TermChanges {
+            name: Some(name.to_owned()),
+            ..TermChanges::default()
+        },
+    )
+    .await
+    .map_err(MenuError::Term)
+}
+
+/// Deletes `menu` as `wp_delete_nav_menu` does, in one transaction: its items (their meta and
+/// relationships with them), the term (its `terms` row too when no other taxonomy shares it),
+/// and the menu in the locations of the theme `stylesheet`. Returns `false` when it was already
+/// gone.
+///
+/// # Errors
+///
+/// Fails with [`MenuError::NotAMenu`] when `menu` is not a menu, or with the database's error.
+pub async fn delete_nav_menu(
+    db: &Database,
+    stylesheet: &str,
+    menu: &Term,
+) -> Result<bool, MenuError> {
+    if menu.taxonomy != Taxonomy::NAV_MENU.name {
+        return Err(MenuError::NotAMenu);
+    }
+    let menu_tt = menu.term_taxonomy_id;
+    let term_id = menu.term_id;
+    let mods_name = theme_mods_option(stylesheet);
+    db.transaction(async |tx| {
+        let found: i64 = raw::fetch_scalar(
+            &mut *tx,
+            "SELECT COUNT(*) FROM term_taxonomy WHERE id = ? AND taxonomy = ?",
+            &[menu_tt.into(), (&*Taxonomy::NAV_MENU.name).into()],
+        )
+        .await?;
+        if found == 0 {
+            return Ok(false);
+        }
+        let items: Vec<(i64,)> = raw::fetch_all(
+            &mut *tx,
+            "SELECT p.id FROM term_relationships r INNER JOIN posts p ON p.id = r.object_id \
+             WHERE r.term_taxonomy_id = ? AND p.post_type = ?",
+            &[menu_tt.into(), NAV_MENU_ITEM.into()],
+        )
+        .await?;
+        for (id,) in items {
+            // The foreign keys remove the item's meta and relationships.
+            raw::execute(&mut *tx, "DELETE FROM posts WHERE id = ?", &[id.into()]).await?;
+        }
+        // The foreign key removes the term's other relationships.
+        raw::execute(
+            &mut *tx,
+            "DELETE FROM term_taxonomy WHERE id = ?",
+            &[menu_tt.into()],
+        )
+        .await?;
+        let shared: i64 = raw::fetch_scalar(
+            &mut *tx,
+            "SELECT COUNT(*) FROM term_taxonomy WHERE term_id = ?",
+            &[term_id.into()],
+        )
+        .await?;
+        if shared == 0 {
+            raw::execute(
+                &mut *tx,
+                "DELETE FROM terms WHERE id = ?",
+                &[term_id.into()],
+            )
+            .await?;
+        }
+        let mods = match get_option_in(tx, &mods_name).await {
+            Ok(mods) => mods,
+            Err(MetaError::InvalidJson(_)) => None,
+            Err(MetaError::Database(e)) => return Err(MenuError::Database(e)),
+        };
+        if let Some(Value::Object(mut mods)) = mods
+            && let Some(Value::Object(locations)) = mods.get_mut(NAV_MENU_LOCATIONS)
+        {
+            let before = locations.len();
+            locations.retain(|_, assigned| id_of(assigned) != Some(term_id));
+            if locations.len() != before {
+                put_option_in(tx, &mods_name, &Value::Object(mods)).await?;
+            }
+        }
+        Ok(true)
+    })
+    .await
+}
+
+/// A menu item as it is stored, for the admin's menu screen: its post and `_menu_item_*` meta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMenuItem {
+    /// The item's post id (`menu-item-db-id`).
+    pub id: i64,
+    /// What the item links to. An item of a kind Mission Control does not know (`post_type`
+    /// with no object id, for one) reads as a custom link to its stored URL.
+    pub object: MenuItemObject,
+    /// The item's own label; empty shows the linked object's title.
+    pub title: String,
+    /// The parent item's id, or `None` at the top level.
+    pub parent: Option<i64>,
+    /// The position (`menu_order`).
+    pub position: i32,
+    /// The link's `target`: empty, or `_blank`.
+    pub target: String,
+    /// The CSS classes.
+    pub classes: Vec<String>,
+}
+
+/// The items of `menu`, in `menu_order`, at most [`MAX_MENU_ITEMS`]: every `nav_menu_item` of
+/// the menu but those in the trash, as the menu screen lists them.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn menu_items(db: &Database, menu: &Term) -> Result<Vec<StoredMenuItem>, Error> {
+    let rows: Vec<(i64,)> = raw::fetch_all(
+        db,
+        &format!(
+            "SELECT p.id FROM term_relationships r INNER JOIN posts p ON p.id = r.object_id \
+             WHERE r.term_taxonomy_id = ? AND p.post_type = ? AND p.status <> ? \
+             ORDER BY p.menu_order, p.id LIMIT {MAX_MENU_ITEMS}"
+        ),
+        &[
+            menu.term_taxonomy_id.into(),
+            NAV_MENU_ITEM.into(),
+            PostStatus::Trash.as_str().into(),
+        ],
+    )
+    .await?;
+    let ids: Vec<i64> = rows.into_iter().map(|(id,)| id).collect();
+    let mut posts = posts_by_id(db, &ids).await?;
+    posts.retain(|p| p.post_type == NAV_MENU_ITEM);
+    posts.sort_by_key(|p| (p.menu_order, p.id));
+    let mut meta = item_meta(db, &ids).await?;
+    Ok(posts
+        .into_iter()
+        .map(|post| {
+            let mut meta = meta.remove(&post.id).unwrap_or_default();
+            let mut text = |key: &str| meta.remove(key).as_ref().map(text_of).unwrap_or_default();
+            let item_type = text("_menu_item_type");
+            let object = text("_menu_item_object");
+            let url = text("_menu_item_url");
+            let target = text("_menu_item_target");
+            let object_id = meta.get("_menu_item_object_id").and_then(id_of);
+            let object = match (item_type.as_str(), object_id) {
+                ("post_type", Some(id)) => MenuItemObject::Post {
+                    post_type: object,
+                    id,
+                },
+                ("taxonomy", Some(term_id)) => MenuItemObject::Term {
+                    taxonomy: object,
+                    term_id,
+                },
+                _ => MenuItemObject::Custom { url },
+            };
+            StoredMenuItem {
+                id: post.id,
+                object,
+                title: post.title.clone(),
+                parent: meta
+                    .get("_menu_item_menu_item_parent")
+                    .and_then(id_of)
+                    .filter(|&parent| parent != post.id),
+                position: post.menu_order,
+                target: sanitize_key(&target),
+                classes: match meta.get("_menu_item_classes") {
+                    Some(Value::Array(list)) => {
+                        clean_classes(&list.iter().map(text_of).collect::<Vec<_>>())
+                    }
+                    Some(other) => clean_classes(&[text_of(other)]),
+                    None => Vec::new(),
+                },
+            }
+        })
+        .collect())
+}
+
+/// One item of a menu saved with [`save_menu_items`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItemInput {
+    /// The item's post id, to update an item of the menu; `None` (or an id that is not an item
+    /// of this menu) adds a new one.
+    pub id: Option<i64>,
+    /// What the item links to.
+    pub object: MenuItemObject,
+    /// The label; empty shows the linked object's title.
+    pub title: String,
+    /// The parent: the index of another item in the same list, or `None` at the top level.
+    pub parent: Option<usize>,
+    /// The link's `target`: empty, or `_blank`.
+    pub target: String,
+    /// CSS classes; each entry may hold several, separated by spaces.
+    pub classes: Vec<String>,
+}
+
+/// Saves the items of `menu` as WordPress's menu screen does (`wp_nav_menu_update_menu_items`
+/// and `wp_update_nav_menu_item` for each item), in one transaction:
+///
+/// - the items are given positions 1, 2, … in the order of `items`;
+/// - an item whose `id` is an item of the menu is updated in place (its link title attribute,
+///   description and XFN are kept); any other is added, by `author_id`, published;
+/// - a parent is the item at that index; one that is the item itself, or that would make a loop,
+///   puts the item at the top level;
+/// - the menu's items that are not in `items` are deleted.
+///
+/// Values are cleaned as [`add_menu_item`] cleans them. At most [`MAX_MENU_ITEMS`] items are
+/// saved; the rest are left out. Returns the saved items' ids, in order.
+///
+/// # Errors
+///
+/// [`MenuError::NotAMenu`] when `menu` is not a menu (any more), or the database's error.
+pub async fn save_menu_items(
+    db: &Database,
+    menu: &Term,
+    author_id: i64,
+    items: &[MenuItemInput],
+) -> Result<Vec<i64>, MenuError> {
+    save_nav_menu(db, menu, author_id, Some(items), None).await
+}
+
+/// The theme locations to show (`true`) or stop showing (`false`) a menu in, for
+/// [`save_nav_menu`]: the theme, and (location, show) pairs.
+pub type MenuLocationChanges<'a> = (&'a Theme, &'a [(String, bool)]);
+
+/// Saves the items of `menu` ([`save_menu_items`], when `items` is given) and its theme
+/// locations, in one transaction, as the menu screen saves a menu. A location set to `true`
+/// shows the menu; one set to `false` is cleared when it showed this menu.
+///
+/// # Errors
+///
+/// [`MenuError::NotAMenu`] when `menu` is not a menu (any more),
+/// [`MenuError::UnknownLocation`] for a location the theme does not declare (nothing is saved),
+/// or the database's error.
+pub async fn save_nav_menu(
+    db: &Database,
+    menu: &Term,
+    author_id: i64,
+    items: Option<&[MenuItemInput]>,
+    locations: Option<MenuLocationChanges<'_>>,
+) -> Result<Vec<i64>, MenuError> {
+    if menu.taxonomy != Taxonomy::NAV_MENU.name {
+        return Err(MenuError::NotAMenu);
+    }
+    if let Some((theme, changes)) = locations {
+        let declared = theme.menu_locations();
+        if let Some((location, _)) = changes
+            .iter()
+            .find(|(l, _)| !declared.iter().any(|d| d.location == *l))
+        {
+            return Err(MenuError::UnknownLocation {
+                location: location.clone(),
+            });
+        }
+    }
+    let items = items.map(|items| &items[..items.len().min(MAX_MENU_ITEMS)]);
+    let parents = items.map(loop_free_parents).unwrap_or_default();
+    let menu_tt = menu.term_taxonomy_id;
+    let term_id = menu.term_id;
+    db.transaction(async |tx| {
+        let is_menu: i64 = raw::fetch_scalar(
+            &mut *tx,
+            "SELECT COUNT(*) FROM term_taxonomy WHERE id = ? AND taxonomy = ?",
+            &[menu_tt.into(), (&*Taxonomy::NAV_MENU.name).into()],
+        )
+        .await?;
+        if is_menu == 0 {
+            return Err(MenuError::NotAMenu);
+        }
+        if let Some((theme, changes)) = locations {
+            let name = theme_mods_option(theme.slug());
+            let mut mods = match get_option_in(tx, &name).await {
+                Ok(Some(Value::Object(mods))) => mods,
+                Ok(_) | Err(MetaError::InvalidJson(_)) => Map::new(),
+                Err(MetaError::Database(e)) => return Err(MenuError::Database(e)),
+            };
+            let mut assigned = match mods.remove(NAV_MENU_LOCATIONS) {
+                Some(Value::Object(assigned)) => assigned,
+                _ => Map::new(),
+            };
+            for (location, show) in changes {
+                if *show {
+                    assigned.insert(location.clone(), json!(term_id));
+                } else if assigned.get(location).and_then(id_of) == Some(term_id) {
+                    assigned.remove(location);
+                }
+            }
+            mods.insert(NAV_MENU_LOCATIONS.to_owned(), Value::Object(assigned));
+            put_option_in(tx, &name, &Value::Object(mods)).await?;
+        }
+        let Some(items) = items else {
+            return Ok(Vec::new());
+        };
+        let existing: Vec<(i64,)> = raw::fetch_all(
+            &mut *tx,
+            "SELECT p.id FROM term_relationships r INNER JOIN posts p ON p.id = r.object_id \
+             WHERE r.term_taxonomy_id = ? AND p.post_type = ?",
+            &[menu_tt.into(), NAV_MENU_ITEM.into()],
+        )
+        .await?;
+        let existing: HashSet<i64> = existing.into_iter().map(|(id,)| id).collect();
+        let stamp = now();
+        let mut ids: Vec<i64> = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let position = i32::try_from(index + 1).unwrap_or(i32::MAX);
+            let id = match item
+                .id
+                .filter(|id| existing.contains(id) && !ids.contains(id))
+            {
+                Some(id) => {
+                    raw::execute(
+                        &mut *tx,
+                        "UPDATE posts SET title = ?, menu_order = ?, modified_at = ? WHERE id = ?",
+                        &[
+                            item.title.clone().into(),
+                            position.into(),
+                            stamp.into(),
+                            id.into(),
+                        ],
+                    )
+                    .await?;
+                    id
+                }
+                None => {
+                    let post = Post::create_in(
+                        tx,
+                        NewPost {
+                            status: PostStatus::Publish,
+                            title: item.title.clone(),
+                            menu_order: position,
+                            published_at: Some(stamp),
+                            ..NewPost::new(author_id, NAV_MENU_ITEM)
+                        },
+                    )
+                    .await?;
+                    for (key, value) in
+                        [("_menu_item_xfn", json!("")), ("_menu_item_url", json!(""))]
+                    {
+                        put_post_meta_in(tx, post.id, key, &value).await?;
+                    }
+                    set_terms_in(tx, post.id, &Taxonomy::NAV_MENU, &[menu_tt], true).await?;
+                    post.id
+                }
+            };
+            ids.push(id);
+        }
+        for (index, item) in items.iter().enumerate() {
+            let id = ids[index];
+            let (item_type, object, object_id, url) = match &item.object {
+                MenuItemObject::Custom { url } => ("custom", "custom", id, safe_url(url)),
+                MenuItemObject::Post { post_type, id } => {
+                    ("post_type", post_type.as_str(), *id, String::new())
+                }
+                MenuItemObject::Term { taxonomy, term_id } => {
+                    ("taxonomy", taxonomy.as_str(), *term_id, String::new())
+                }
+            };
+            let parent = parents[index].map_or(0, |at| ids[at]);
+            let meta = [
+                ("_menu_item_type", json!(item_type)),
+                ("_menu_item_menu_item_parent", json!(parent.to_string())),
+                ("_menu_item_object_id", json!(object_id.to_string())),
+                ("_menu_item_object", json!(object)),
+                ("_menu_item_target", json!(sanitize_key(&item.target))),
+                ("_menu_item_classes", json!(clean_classes(&item.classes))),
+                ("_menu_item_url", json!(url)),
+            ];
+            for (key, value) in &meta {
+                put_post_meta_in(tx, id, key, value).await?;
+            }
+        }
+        for gone in existing.iter().filter(|id| !ids.contains(id)) {
+            // The foreign keys remove the item's meta and relationships.
+            raw::execute(
+                &mut *tx,
+                "DELETE FROM posts WHERE id = ?",
+                &[(*gone).into()],
+            )
+            .await?;
+        }
+        recount_in(tx, &Taxonomy::NAV_MENU, &[menu_tt]).await?;
+        Ok(ids)
+    })
+    .await
+}
+
+/// Each item's parent index, with a parent that is the item itself, out of range, or on a loop
+/// cleared (the item goes to the top level).
+fn loop_free_parents(items: &[MenuItemInput]) -> Vec<Option<usize>> {
+    let mut parents: Vec<Option<usize>> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| item.parent.filter(|&p| p != index && p < items.len()))
+        .collect();
+    for start in 0..parents.len() {
+        let mut seen = HashSet::from([start]);
+        let mut at = parents[start];
+        while let Some(next) = at {
+            if !seen.insert(next) {
+                parents[start] = None;
+                break;
+            }
+            at = parents[next];
+        }
+    }
+    parents
 }
 
 /// A menu as templates see it: `menus.{location}`.

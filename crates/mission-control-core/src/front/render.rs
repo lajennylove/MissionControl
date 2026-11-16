@@ -24,7 +24,7 @@
 //!
 //! | Variable | What it holds | WordPress |
 //! | --- | --- | --- |
-//! | `site.name`, `site.description`, `site.url`, `site.language` | the site's title, tagline, address and language | `bloginfo` |
+//! | `site.name`, `site.description`, `site.url`, `site.language` | the site's title, tagline, address and language, as plain text: escape them (`{{ }}`), never output them raw. The title and tagline are stored escaped (`sanitize_option`'s `esc_html`) and decoded here, so `{{ }}` escapes them once, as WordPress's `bloginfo` does | `bloginfo` |
 //! | `head` | the tags that load the theme's built CSS and JavaScript; output raw | `wp_head` |
 //! | `document_title` | the `<title>` text | `wp_get_document_title` |
 //! | `body_class` | the classes for `<body>` | `body_class` |
@@ -904,8 +904,9 @@ impl Options {
         Ok(Self {
             structure,
             home: site_address(&text_option("home").await?),
-            name: text_option("blogname").await?,
-            description: text_option("blogdescription").await?,
+            // Stored through `esc_html`: decoded, so the template escapes them once.
+            name: crate::text::decode_entities(&text_option("blogname").await?),
+            description: crate::text::decode_entities(&text_option("blogdescription").await?),
             offset,
         })
     }

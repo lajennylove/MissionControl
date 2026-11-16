@@ -58,8 +58,10 @@
 //! environment (and `.env`), so they must be the configuration's. The media library is the
 //! `attachment` screen at `/mc-admin/attachment`, with an upload page, and the editor's Add Media
 //! picker uploads and lists through `/mc-admin/async-upload.php` and `/mc-admin/admin-ajax.php`
-//! with the admin session. See the `admin` module's documentation in the source for what is
-//! mounted and who may use it.
+//! with the admin session. WordPress's settings screens are at `/mc-admin/options-general` and
+//! the others, and the menus at `/mc-admin/nav-menus` (administrators only). The Media settings'
+//! image sizes are read into the size registry at ignition, on every database. See the `admin`
+//! module's documentation in the source for what is mounted and who may use it.
 //!
 //! The admin's rich text fields, the post content included, use WordPress's classic editor:
 //! TinyMCE 7 (GPL-2.0-or-later), with the Visual and Text tabs and the Add Media button. Its
@@ -81,6 +83,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use admin::AdminMode;
+use mission_control_core::admin::apply_media_sizes;
 use mission_control_core::config::Config;
 use mission_control_core::content::{
     Shortcodes, register_delete_auto_drafts, register_publish_future_post,
@@ -339,13 +342,21 @@ async fn ignite(
     };
     // The admin, with the stored and the plugins' post types. Ignite registers its own 401 and
     // 500 catchers at `/`; without the panel, the REST catchers take those too.
+    // The Media settings' sizes (Task 6.5), on every database: uploads are resized to them.
+    let image_sizes = rocket.state::<Arc<ImageSizes>>().cloned();
+    if let Some(sizes) = &image_sizes
+        && let Err(e) = apply_media_sizes(&db, sizes).await
+    {
+        log::error!("The Media settings' image sizes could not be read: {e}");
+    }
     let rocket = match admin::admin_mode(&config, &db) {
         AdminMode::Panel => {
             admin::mount_panel(
                 rocket,
                 &db,
                 Arc::clone(&types.registry),
-                theme.page_templates(),
+                &theme,
+                image_sizes,
             )
             .await
         }

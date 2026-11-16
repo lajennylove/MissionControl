@@ -432,6 +432,8 @@ pub fn map_meta_cap(cap: &str, user: &UserCaps, object: Option<&Object>) -> Vec<
         "manage_post_tags" | "edit_categories" | "edit_post_tags" | "delete_categories"
         | "delete_post_tags" => vec!["manage_categories".to_owned()],
         "assign_categories" | "assign_post_tags" => vec!["edit_posts".to_owned()],
+        // A single site: the Privacy settings need `manage_options`.
+        "manage_privacy_options" => vec![MANAGE_OPTIONS.to_owned()],
         "edit_term" | "delete_term" | "assign_term" => match object {
             Some(Object::Term(term)) => {
                 if cap == "delete_term" && term.default_terms.contains(&term.term_id) {

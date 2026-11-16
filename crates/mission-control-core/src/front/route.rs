@@ -51,6 +51,21 @@ use crate::content::{
     Term, get_option, get_post_meta_values, permalink,
 };
 
+/// The most posts a list page shows, whatever `posts_per_page` says (Ruling R136); the
+/// Reading Settings screen accepts at most this many.
+pub const MAX_POSTS_PER_PAGE: i64 = 1000;
+
+/// How many posts a list page shows for the `posts_per_page` option `value` (Ruling R136): 10
+/// when unset, the option when it is 1 or more, and never more than [`MAX_POSTS_PER_PAGE`];
+/// WordPress's -1 ("every post on one page") reads as that bound too, so a list stays bounded.
+fn posts_per_page(value: Option<f64>) -> Option<i64> {
+    Some(match value {
+        None => 10,
+        Some(n) if n >= 1.0 => n.min(MAX_POSTS_PER_PAGE as f64) as i64,
+        Some(_) => MAX_POSTS_PER_PAGE,
+    })
+}
+
 /// A request's query string, parsed as PHP fills `$_GET`: `+` and `%XX` decoded, a key with no
 /// `=` given the empty value, and the last of repeated keys winning.
 ///
@@ -218,8 +233,8 @@ pub struct MainQuery {
 }
 
 /// The posts `resolved` shows, as WordPress's main query fetches them: the post of a singular
-/// request, or page `paged` of a list, `posts_per_page` to a page (every post on one page when
-/// the option is below 1). Lists hold published posts only, newest first, as [`resolve`] counts
+/// request, or page `paged` of a list, `posts_per_page` to a page (at most
+/// [`MAX_POSTS_PER_PAGE`]; WordPress's -1 for every post reads as that bound, Ruling R136). Lists hold published posts only, newest first, as [`resolve`] counts
 /// them: the latest posts for the front page and the posts page, a category with its children,
 /// a tag, an author, a date in the site's time zone, a custom type, and posts and pages
 /// matching a search. A redirect and a 404 show no posts.
@@ -479,15 +494,12 @@ impl Site {
         };
         let front_page = page("page_on_front").await?;
         let posts_page = page("page_for_posts").await?;
-        let per_page = match option(db, "posts_per_page")
-            .await?
-            .as_ref()
-            .and_then(number)
-        {
-            None => Some(10),
-            Some(n) if n >= 1.0 => Some(n as i64),
-            Some(_) => None,
-        };
+        let per_page = posts_per_page(
+            option(db, "posts_per_page")
+                .await?
+                .as_ref()
+                .and_then(number),
+        );
         let offset = crate::content::gmt_offset(db).await?;
         let base = async |name| -> Result<String, Error> {
             Ok(option(db, name)
@@ -2013,6 +2025,16 @@ mod tests {
         assert_eq!(decode("a+b", false), "a+b");
         assert_eq!(decode("100%", true), "100%");
         assert_eq!(decode("%zz", true), "%zz");
+    }
+
+    #[test]
+    fn posts_per_page_is_bounded() {
+        assert_eq!(posts_per_page(None), Some(10));
+        assert_eq!(posts_per_page(Some(12.0)), Some(12));
+        assert_eq!(posts_per_page(Some(-1.0)), Some(MAX_POSTS_PER_PAGE));
+        assert_eq!(posts_per_page(Some(0.0)), Some(MAX_POSTS_PER_PAGE));
+        assert_eq!(posts_per_page(Some(5000.0)), Some(MAX_POSTS_PER_PAGE));
+        assert_eq!(posts_per_page(Some(9.0e18)), Some(MAX_POSTS_PER_PAGE));
     }
 
     #[test]

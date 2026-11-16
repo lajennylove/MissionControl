@@ -40,10 +40,20 @@
 //!   picker's endpoints `/mc-admin/async-upload.php` and `/mc-admin/admin-ajax.php`; and the
 //!   media library of Ignite's Image, File and Gallery fields.
 //!
+//! - The settings screens (Task 6.5, Ruling R132): General, Writing, Reading, Discussion, Media,
+//!   Permalinks and Privacy at `/mc-admin/options-general` and the others, each an Ignite runtime
+//!   resource with one record ([`SettingsScreen`]). The list address answers with a redirect
+//!   (303) to the record's edit form, `/mc-admin/<screen>/1/edit`. The fairing checks
+//!   `manage_options` (`manage_privacy_options` for Privacy) and refuses New, Ignite's create
+//!   and Delete with WordPress's message for a page it does not have.
+//! - The Menus screen (Task 6.5, Ruling R133) at `/mc-admin/nav-menus`: the `nav_menu` terms,
+//!   their theme locations and their items; the fairing checks `edit_theme_options`.
+//!
 //! At start the five WordPress roles are made sure to exist as Ignite roles, and each post type
 //! resource's five abilities are registered and granted to `administrator` and `editor`
-//! (Ruling R121), so Ignite's own coarse checks let them in. Errors are logged, and the site
-//! starts anyway.
+//! (Ruling R121), so Ignite's own coarse checks let them in. The settings screens' `viewAny`,
+//! `view` and `update` and the Menus screen's five abilities are granted to `administrator`
+//! only (Ruling R132). Errors are logged, and the site starts anyway.
 //!
 //! The post types are read once, at start: a post type, taxonomy or field group saved or removed
 //! later (by the admin or a plugin) reaches the admin's screens at the next start.
@@ -52,11 +62,16 @@ use std::sync::{Arc, OnceLock};
 
 use ignite_panel::authz::{self, AuthzError};
 use ignite_panel::{AdminUser, Ignite, ignite_core};
+use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
 use mission_control_core::admin::{
-    PostScreen, Refusal, attachment_post_type, authorize_post_screen,
+    NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
+    attachment_post_type, authorize_menus_screen, authorize_post_screen, authorize_settings_screen,
+    register_nav_menus_resource, register_settings_resources,
 };
 use mission_control_core::config::Config;
-use mission_control_core::theme::PageTemplate;
+use mission_control_core::media::ImageSizes;
+use mission_control_core::rest::KsesLimiter;
+use mission_control_core::theme::Theme;
 use mission_control_core::types::{PostTypeDef, PostTypeResources, Registry, create_auto_draft};
 use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, SUBSCRIBER};
 use orbit_orm::{Database, Driver};
@@ -105,6 +120,20 @@ const GRANTED_ROLES: [&str; 2] = [ADMINISTRATOR, EDITOR];
 
 /// The suffixes of a resource's five Ignite abilities (`post.viewAny`, ...).
 const ABILITIES: [&str; 5] = ["viewAny", "view", "create", "update", "delete"];
+
+/// The abilities of a settings screen granted to `administrator`: no create or delete, as a
+/// screen has one record (Ruling R132).
+const SETTINGS_ABILITIES: [&str; 3] = ["viewAny", "view", "update"];
+
+/// The settings screens and the Menus screen this app registered with Ignite, so the fairing
+/// refuses (fails closed) those another registration holds.
+#[derive(Debug, Default)]
+pub(crate) struct AdminScreens {
+    /// The slugs of the settings screens registered.
+    settings: Vec<&'static str>,
+    /// Whether the Menus screen is registered.
+    menus: bool,
+}
 
 /// Whether the admin can be mounted for this site, and why not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +209,8 @@ pub(crate) async fn mount_panel(
     rocket: Rocket<Build>,
     db: &Database,
     registry: Arc<Registry>,
-    page_templates: Vec<PageTemplate>,
+    theme: &Theme,
+    image_sizes: Option<Arc<ImageSizes>>,
 ) -> Rocket<Build> {
     // Ignite first: it reserves its own pages' slugs (`login`, `profile`, ...) before a post type
     // can take one; such a type is then refused below instead of stopping the panel.
@@ -189,7 +219,26 @@ pub(crate) async fn mount_panel(
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {
         log::error!("The admin could not reserve `{INSTALL_SLUG}`: {e}");
     }
-    let resources = PostTypeResources::new(registry).with_page_templates(page_templates);
+    // The settings screens and the Menus screen (Task 6.5), before the post types, so a post type
+    // cannot take their slugs.
+    // `sanitize_option`'s kses work runs under the app's limiter, as the REST API's does.
+    let kses = rocket
+        .state::<Arc<KsesLimiter>>()
+        .map(|kses| KsesLimiter::clone(kses));
+    let (settings, refused_settings) =
+        register_settings_resources(SettingsServices { image_sizes, kses });
+    for e in refused_settings {
+        log::error!("A settings screen is not served by this app: {e}");
+    }
+    let resources =
+        PostTypeResources::new(Arc::clone(&registry)).with_page_templates(theme.page_templates());
+    let menus = match register_nav_menus_resource(theme, menu_object_types(&resources, &registry)) {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!("The Menus screen is not served by this app: {e}");
+            false
+        }
+    };
     let refused = resources.sync();
     for refused in &refused {
         log::warn!("{refused}");
@@ -216,13 +265,48 @@ pub(crate) async fn mount_panel(
     if media_screen.registered {
         slugs.push(media::ATTACHMENT.to_owned());
     }
-    provision(db, &slugs).await;
+    let mut administrator_only: Vec<(String, &[&str])> = settings
+        .iter()
+        .map(|slug| ((*slug).to_owned(), &SETTINGS_ABILITIES[..]))
+        .collect();
+    if menus {
+        administrator_only.push((NAV_MENUS.to_owned(), &ABILITIES[..]));
+    }
+    provision(db, &slugs, &administrator_only).await;
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
         .mount(ADMIN_PATH, new_routes())
+        .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))
+        .manage(AdminScreens { settings, menus })
+}
+
+/// What a menu item can link to (Ruling R133): a custom link, a page, a post, a category and a
+/// tag, then the other post types the admin shows and the taxonomies, each when it can be added
+/// to menus (`show_in_nav_menus`, which defaults to `public`).
+fn menu_object_types(
+    resources: &PostTypeResources,
+    registry: &Registry,
+) -> Vec<(MenuObjectType, String)> {
+    let mut types = default_menu_object_types();
+    let taken = |types: &Vec<(MenuObjectType, String)>, name: &str| {
+        types.iter().any(|(t, _)| t.value() == name)
+    };
+    for def in resources.post_types() {
+        if def.show_in_nav_menus.unwrap_or(def.public) && !taken(&types, &def.slug) {
+            let label = def.labels.singular_name.clone();
+            types.push((MenuObjectType::PostType(def.slug.clone()), label));
+        }
+    }
+    for def in registry.all_taxonomies() {
+        if def.show_in_nav_menus.unwrap_or(def.public) && !taken(&types, &def.slug) {
+            let label = def.labels.singular_name.clone();
+            types.push((MenuObjectType::Taxonomy(def.slug.clone()), label));
+        }
+    }
+    types
 }
 
 /// The routes that answer the admin path with a 503 page when the panel is not mounted:
@@ -249,21 +333,31 @@ pub(crate) fn unavailable_routes(reason: Unavailable) -> Vec<Route> {
 }
 
 /// Ruling R121: the five WordPress roles as Ignite roles, and each post type resource's
-/// abilities registered and granted to `administrator` and `editor`. Logs what fails.
-async fn provision(db: &Database, slugs: &[String]) {
+/// abilities registered and granted to `administrator` and `editor`; Ruling R132: the
+/// `administrator_only` resources' abilities registered and the ones listed granted to
+/// `administrator` only. Logs what fails.
+async fn provision(db: &Database, slugs: &[String], administrator_only: &[(String, &[&str])]) {
     for role in WORDPRESS_ROLES {
         match authz::create_role(db, role).await {
             Ok(()) | Err(AuthzError::Exists(_)) => {}
             Err(e) => log::error!("The admin could not create the role `{role}`: {e}"),
         }
     }
-    for slug in slugs {
+    let grants = slugs
+        .iter()
+        .map(|slug| (slug.as_str(), &GRANTED_ROLES[..], &ABILITIES[..]))
+        .chain(
+            administrator_only
+                .iter()
+                .map(|(slug, abilities)| (slug.as_str(), &[ADMINISTRATOR][..], *abilities)),
+        );
+    for (slug, roles, abilities) in grants {
         if let Err(e) = ignite_panel::register_runtime_permissions(db, slug).await {
             log::error!("The admin could not register the permissions of `{slug}`: {e}");
             continue;
         }
-        for role in GRANTED_ROLES {
-            for ability in ABILITIES {
+        for role in roles {
+            for ability in abilities {
                 let permission = format!("{slug}.{ability}");
                 if let Err(e) = authz::grant_permission(db, role, &permission).await {
                     log::error!("The admin could not grant `{permission}` to `{role}`: {e}");
@@ -361,6 +455,9 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
     // A screen has at most two segments after the post type; more is no screen (404).
     let rest: Vec<&str> = segments.take(3).collect();
     let rocket = request.rocket();
+    if let Some(refusal) = theme_or_settings_refusal(request, slug, &rest).await {
+        return refusal;
+    }
     let resources = rocket.state::<Arc<PostTypeResources>>()?;
     let def = if slug == media::ATTACHMENT {
         // The media library's screen (Ruling R127), when this app registered it; otherwise,
@@ -389,27 +486,14 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         }
         return None;
     };
-    let Outcome::Success(user) = request.guard::<AdminUser>().await else {
-        return None;
-    };
-    let (Some(db), Some(settings)) = (
-        rocket.state::<Arc<Database>>(),
-        rocket.state::<AuthSettings>(),
-    ) else {
-        log::error!("The admin's authorization ran before the app was ready");
-        return Some(AdminRefusal::Failed);
-    };
-    let caps = match settings.user_roles.roles(db, user.user_id()).await {
-        Ok(assignment) => assignment.user_caps(user.user_id()),
-        Err(e) => {
-            log::error!("Could not read the roles of user {}: {e}", user.user_id());
-            return Some(AdminRefusal::Failed);
-        }
+    let (db, caps) = match signed_in_caps(request).await? {
+        Ok(found) => found,
+        Err(failed) => return Some(failed),
     };
     let screen = PostScreen::parse(request.method().as_str(), &rest);
     // The media library's upload page is `media-new.php`: its refusal is WordPress's for it.
     let upload_page = slug == media::ATTACHMENT && rest == ["new"];
-    match authorize_post_screen(db, &caps, &def, screen).await {
+    match authorize_post_screen(&db, &caps, &def, screen).await {
         Ok(Some(_)) if upload_page => Some(AdminRefusal::Refused(Refusal::UploadFiles)),
         Ok(refused) => refused.map(AdminRefusal::Refused),
         Err(e) => {
@@ -417,6 +501,72 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
             Some(AdminRefusal::Failed)
         }
     }
+}
+
+/// The signed-in user's database and capabilities: `None` for a visitor (Ignite sends them to
+/// its sign-in page), or the refusal when they cannot be read.
+async fn signed_in_caps(
+    request: &Request<'_>,
+) -> Option<Result<(Arc<Database>, mission_control_core::users::UserCaps), AdminRefusal>> {
+    let Outcome::Success(user) = request.guard::<AdminUser>().await else {
+        return None;
+    };
+    let rocket = request.rocket();
+    let (Some(db), Some(settings)) = (
+        rocket.state::<Arc<Database>>(),
+        rocket.state::<AuthSettings>(),
+    ) else {
+        log::error!("The admin's authorization ran before the app was ready");
+        return Some(Err(AdminRefusal::Failed));
+    };
+    Some(match settings.user_roles.roles(db, user.user_id()).await {
+        Ok(assignment) => Ok((Arc::clone(db), assignment.user_caps(user.user_id()))),
+        Err(e) => {
+            log::error!("Could not read the roles of user {}: {e}", user.user_id());
+            Err(AdminRefusal::Failed)
+        }
+    })
+}
+
+/// The fairing's answer for the settings screens and the Menus screen (Rulings R132 and R133):
+/// `None` when `slug` is neither (the post type screens' rules decide), `Some(None)` when the
+/// request may go on, and `Some(Some(refusal))` when it is refused. A screen this app did not
+/// register while Ignite has a resource at its slug answers 503 (fail closed).
+async fn theme_or_settings_refusal(
+    request: &Request<'_>,
+    slug: &str,
+    rest: &[&str],
+) -> Option<Option<AdminRefusal>> {
+    let settings = SettingsScreen::from_slug(slug);
+    if settings.is_none() && slug != NAV_MENUS {
+        return None;
+    }
+    let screens = request.rocket().state::<AdminScreens>();
+    let ours = screens.is_some_and(|screens| match settings {
+        Some(screen) => screens.settings.contains(&screen.slug()),
+        None => screens.menus,
+    });
+    if !ours {
+        if ignite_core::runtime_resource(slug).is_some() {
+            log::error!(
+                "Refused `{}`: Ignite's resource `{slug}` was not registered by this app.",
+                request.uri().path()
+            );
+            return Some(Some(AdminRefusal::NotServed));
+        }
+        return Some(None);
+    }
+    let caps = match signed_in_caps(request).await {
+        None => return Some(None),
+        Some(Err(failed)) => return Some(Some(failed)),
+        Some(Ok((_, caps))) => caps,
+    };
+    let screen = PostScreen::parse(request.method().as_str(), rest);
+    let refusal = match settings {
+        Some(settings) => authorize_settings_screen(&caps, settings, screen),
+        None => authorize_menus_screen(&caps, screen),
+    };
+    Some(refusal.map(AdminRefusal::Refused))
 }
 
 #[rocket::async_trait]
@@ -529,4 +679,50 @@ async fn new_post(
 #[rocket::head("/<_>/new")]
 fn new_post_head(_screen: PostTypeScreen, _user: AdminUser) -> Status {
     Status::Ok
+}
+
+/// The settings screen a request is for: the first segment after the admin path, when it is a
+/// settings screen this app registered. Any other slug forwards, to Ignite's own routes.
+struct SettingsSlug(SettingsScreen);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for SettingsSlug {
+    type Error = ();
+
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, ()> {
+        let screen = request
+            .routed_segment(0)
+            .and_then(SettingsScreen::from_slug)
+            .filter(|screen| {
+                request
+                    .rocket()
+                    .state::<AdminScreens>()
+                    .is_some_and(|screens| screens.settings.contains(&screen.slug()))
+            });
+        match screen {
+            Some(screen) => Outcome::Success(Self(screen)),
+            None => Outcome::Forward(Status::NotFound),
+        }
+    }
+}
+
+/// The settings screens' list address, at [`NEW_RANK`], before Ignite's list.
+fn settings_routes() -> Vec<Route> {
+    let mut routes = rocket::routes![settings_list];
+    for route in &mut routes {
+        route.rank = NEW_RANK;
+    }
+    routes
+}
+
+/// A settings screen's list address (Ruling R132): a redirect (303) to its one record's edit
+/// form, as WordPress's Settings menu opens the screen. Ignite's save lands here too, so its
+/// "Changes saved." message shows on the form. The fairing has checked the user's capability;
+/// a visitor fails [`AdminUser`] with 401, which Ignite sends to its sign-in page.
+#[rocket::get("/<_>")]
+fn settings_list(screen: SettingsSlug, _user: AdminUser) -> Redirect {
+    Redirect::to(format!(
+        "{ADMIN_PATH}/{}/{SETTINGS_RECORD}/edit",
+        screen.0.slug()
+    ))
 }

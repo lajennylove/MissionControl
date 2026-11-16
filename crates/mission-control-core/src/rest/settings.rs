@@ -31,10 +31,12 @@
 //!   timezone, a language that is not installed) keeps the stored value, as WordPress keeps it
 //!   and reports the problem on the settings screen only.
 //!
+//! - The sanitizing is WordPress's `sanitize_option`, shared with the admin's settings screens
+//!   ([`sanitize_option`]).
 //! - A timezone is an IANA name (`chrono-tz`'s list, legacy names such as `US/Eastern` and `UTC`
-//!   included), or empty. `UTC+N` and `UTC-N` with one of the offsets WordPress's timezone menu
-//!   offers set `gmt_offset` to `N` and empty the timezone, as WordPress's settings screen saves
-//!   them.
+//!   included), or empty. `UTC+N` and `UTC-N` are no timezone names: as WordPress's REST API,
+//!   the stored timezone is kept. Only the General Settings screen turns them into a `gmt_offset`,
+//!   as WordPress's `options.php` does.
 //! - A setting is shown in the REST API only when it asks for it (`show_in_rest`, or a REST
 //!   name), as `register_setting` defaults `show_in_rest` to false; one that is not shown is
 //!   neither listed nor written.
@@ -53,7 +55,9 @@ use serde_json::{Map, Number, Value, json};
 use super::params::{Invalid, Params, as_boolean, as_integer, as_list, list_sentence, parse_form};
 use super::shared::{Fields, authorization_status, database_error, option, read_envelope};
 use super::{Endpoint, KsesLimiter, RestError, RestResponse, RestRoutes, RouteSpec};
-use crate::content::{MetaError, delete_option, kses_data, set_option};
+use crate::content::{
+    MetaError, delete_option, esc_url_raw, is_email, sanitize_option, set_option,
+};
 use crate::users::{UserCaps, can};
 
 /// A setting's type, as `register_setting`'s `type`.
@@ -398,55 +402,48 @@ impl Settings {
 /// WordPress's core settings, in the order `register_initial_settings` registers them.
 fn core_settings() -> Vec<Setting> {
     use SettingType::{Boolean, Integer, String as Text};
-    let absint = |value: Value| as_integer(&value).map(|n| Value::from(n.unsigned_abs()));
+    // `sanitize_option`, shared with the settings screens: a value it refuses keeps the stored
+    // one.
+    let wp = |option: &'static str| move |value: Value| sanitize_option(option, value).ok();
     vec![
         Setting::new("blogname", Text)
             .rest_name("title")
             .title("Title")
             .description("Site title.")
-            .sanitize(|value| text(&value).map(|t| Value::String(esc_html(&t)))),
+            .sanitize(wp("blogname")),
         Setting::new("blogdescription", Text)
             .rest_name("description")
             .title("Tagline")
             .description("Site tagline.")
-            .sanitize(|value| text(&value).map(|t| Value::String(esc_html(&t)))),
+            .sanitize(wp("blogdescription")),
         Setting::new("siteurl", Text)
             .rest_name("url")
             .description("Site URL.")
             .format(SettingFormat::Uri)
-            .sanitize(|value| {
-                let url = text(&value)?;
-                is_http_url(&url).then(|| Value::String(esc_url_raw(&url)))
-            }),
+            .sanitize(wp("siteurl")),
         Setting::new("admin_email", Text)
             .rest_name("email")
             .description(
                 "This address is used for admin purposes, like new user notification.",
             )
             .format(SettingFormat::Email)
-            .sanitize(|value| {
-                let email = text(&value)?;
-                is_email(&email).then(|| Value::String(email.trim().to_owned()))
-            }),
+            .sanitize(wp("admin_email")),
         Setting::new("timezone_string", Text)
             .rest_name("timezone")
             .description("A city in the same timezone as you.")
-            .sanitize(|value| {
-                let zone = text(&value)?;
-                (zone.is_empty() || is_timezone(&zone)).then_some(Value::String(zone))
-            }),
+            .sanitize(wp("timezone_string")),
         Setting::new("date_format", Text)
             .show_in_rest()
             .description("A date format for all date strings.")
-            .sanitize(|value| text(&value).map(|t| Value::String(kses_data(&strip_tags(&t))))),
+            .sanitize(wp("date_format")),
         Setting::new("time_format", Text)
             .show_in_rest()
             .description("A time format for all time strings.")
-            .sanitize(|value| text(&value).map(|t| Value::String(kses_data(&strip_tags(&t))))),
+            .sanitize(wp("time_format")),
         Setting::new("start_of_week", Integer)
             .show_in_rest()
             .description("A day number of the week that the week should start on.")
-            .sanitize(absint),
+            .sanitize(wp("start_of_week")),
         Setting::new("WPLANG", Text)
             .rest_name("language")
             .description("WordPress locale code.")
@@ -462,7 +459,7 @@ fn core_settings() -> Vec<Setting> {
         Setting::new("default_category", Integer)
             .show_in_rest()
             .description("Default post category.")
-            .sanitize(absint),
+            .sanitize(wp("default_category")),
         Setting::new("default_post_format", Text)
             .show_in_rest().description("Default post format."),
         Setting::new("posts_per_page", Integer)
@@ -470,14 +467,7 @@ fn core_settings() -> Vec<Setting> {
             .title("Maximum posts per page")
             .description("Blog pages show at most.")
             .default(json!(10))
-            .sanitize(|value| {
-                let n = as_integer(&value)?;
-                Some(Value::from(match n {
-                    0 => 1,
-                    n if n < -1 => n.saturating_abs(),
-                    n => n,
-                }))
-            }),
+            .sanitize(wp("posts_per_page")),
         Setting::new("show_on_front", Text)
             .show_in_rest()
             .title("Show on front")
@@ -486,11 +476,11 @@ fn core_settings() -> Vec<Setting> {
             .show_in_rest()
             .title("Page on front")
             .description("The ID of the page that should be displayed on the front page")
-            .sanitize(absint),
+            .sanitize(wp("page_on_front")),
         Setting::new("page_for_posts", Integer)
             .show_in_rest()
             .description("The ID of the page that should display the latest posts")
-            .sanitize(absint),
+            .sanitize(wp("page_for_posts")),
         Setting::new("default_ping_status", Text)
             .show_in_rest()
             .description(
@@ -510,7 +500,7 @@ fn core_settings() -> Vec<Setting> {
             .show_in_rest()
             .title("Icon")
             .description("Site icon.")
-            .sanitize(absint),
+            .sanitize(wp("site_icon")),
     ]
 }
 
@@ -562,8 +552,6 @@ impl SettingsController<'_> {
         // As `WP_REST_Server`: the arguments are checked before the permission.
         let mut invalid = Invalid::default();
         let mut writes: Vec<(Setting, Option<Value>)> = Vec::new();
-        // Options written beside the settings: `gmt_offset` for a `UTC+N` timezone.
-        let mut extra: Vec<(&str, Value)> = Vec::new();
         for setting in settings {
             let Some(value) = params.get(&setting.rest_name) else {
                 continue;
@@ -573,15 +561,6 @@ impl SettingsController<'_> {
                 continue;
             }
             match setting.check(value) {
-                // As WordPress's settings screen: `UTC+N` is no timezone but an offset, so it
-                // sets `gmt_offset` and empties `timezone_string`.
-                Ok(Value::String(zone))
-                    if setting.option_name == "timezone_string" && utc_offset(&zone).is_some() =>
-                {
-                    let offset = utc_offset(&zone).unwrap_or_default();
-                    extra.push(("gmt_offset", Value::String(offset)));
-                    writes.push((setting, Some(Value::String(String::new()))));
-                }
                 Ok(value) => writes.push((setting, Some(value))),
                 Err((code, message)) => {
                     let param = setting.rest_name.clone();
@@ -635,11 +614,6 @@ impl SettingsController<'_> {
                     .map_err(|e| meta_error(&e))?,
             }
         }
-        for (name, value) in extra {
-            set_option(self.db, name, &value)
-                .await
-                .map_err(|e| meta_error(&e))?;
-        }
         self.read_all(&read_envelope(params).0).await
     }
 
@@ -681,166 +655,6 @@ fn meta_error(error: &MetaError) -> RestError {
 /// A string value's text.
 fn text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned)
-}
-
-/// `esc_html`: `&`, `<`, `>`, `"` and `'` escaped, without encoding an entity again (`&amp;`
-/// stays `&amp;`), so a value read and saved back does not change.
-fn esc_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (i, c) in text.char_indices() {
-        match c {
-            '&' if starts_entity(&text[i..]) => out.push('&'),
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#039;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Whether `text` starts with an entity: `&name;`, `&#123;` or `&#x1F;`.
-fn starts_entity(text: &str) -> bool {
-    let Some(end) = text.get(1..).and_then(|rest| rest.find(';')) else {
-        return false;
-    };
-    let body = &text[1..=end];
-    if let Some(number) = body.strip_prefix('#') {
-        match number.strip_prefix(['x', 'X']) {
-            Some(hex) => {
-                !hex.is_empty() && hex.len() <= 6 && hex.chars().all(|c| c.is_ascii_hexdigit())
-            }
-            None => {
-                !number.is_empty()
-                    && number.len() <= 7
-                    && number.chars().all(|c| c.is_ascii_digit())
-            }
-        }
-    } else {
-        body.len() <= 32
-            && body.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && body.chars().all(|c| c.is_ascii_alphanumeric())
-    }
-}
-
-/// PHP's `strip_tags`, as `sanitize_option` runs it on the date and time formats.
-fn strip_tags(text: &str) -> String {
-    crate::text::strip_all_tags(text)
-}
-
-/// The protocols `esc_url` keeps, as `wp_allowed_protocols` lists them.
-const ALLOWED_PROTOCOLS: &[&str] = &[
-    "http", "https", "ftp", "ftps", "mailto", "news", "irc", "irc6", "ircs", "gopher", "nntp",
-    "feed", "telnet", "mms", "rtsp", "sms", "svn", "tel", "fax", "xmpp", "webcal", "urn",
-];
-
-/// `esc_url_raw`: spaces encoded, characters a URL cannot hold removed, `http://` added to an
-/// address with no scheme, and empty for a protocol that is not allowed.
-fn esc_url_raw(url: &str) -> String {
-    let url = url.trim().replace(' ', "%20");
-    let mut url: String = url
-        .chars()
-        .filter(|c| {
-            c.is_ascii_alphanumeric() || !c.is_ascii() || "-~+_.?#=!&;,/:%@$|*'()[]".contains(*c)
-        })
-        .collect();
-    for encoded in ["%0d", "%0a", "%0D", "%0A"] {
-        while url.contains(encoded) {
-            url = url.replace(encoded, "");
-        }
-    }
-    if url.is_empty() {
-        return url;
-    }
-    let looks_like_php = {
-        let name: String = url
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-            .collect();
-        !name.is_empty() && url[name.len()..].to_ascii_lowercase().starts_with(".php")
-    };
-    if !url.contains(':') && !url.starts_with(['/', '#', '?']) && !looks_like_php {
-        url = format!("http://{url}");
-    }
-    if let Some((scheme, _)) = url.split_once(':') {
-        let scheme_like = !scheme.is_empty()
-            && !scheme.contains(['/', '?', '#'])
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
-        if scheme_like && !ALLOWED_PROTOCOLS.contains(&scheme.to_ascii_lowercase().as_str()) {
-            return String::new();
-        }
-    }
-    url
-}
-
-/// Whether `url` holds `http://` or `https://` and an address after it, as `sanitize_option`
-/// checks `siteurl` and `home`.
-fn is_http_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    ["http://", "https://"].iter().any(|scheme| {
-        lower
-            .find(scheme)
-            .is_some_and(|at| at + scheme.len() < lower.len())
-    })
-}
-
-/// WordPress's `is_email`: a local part of the allowed characters, an `@`, and a domain of at
-/// least two dot-separated labels of letters, digits and inner hyphens.
-fn is_email(email: &str) -> bool {
-    if email.len() < 6 {
-        return false;
-    }
-    let Some(at) = email.find('@').filter(|at| *at > 0) else {
-        return false;
-    };
-    let (local, domain) = (&email[..at], &email[at + 1..]);
-    let local_ok = local
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+/=?^_`{|}~.-".contains(c));
-    if !local_ok || domain.contains("..") {
-        return false;
-    }
-    let domain = domain.trim_matches(|c: char| c == '.' || c.is_whitespace() || c == '\0');
-    let labels: Vec<&str> = domain.split('.').collect();
-    labels.len() >= 2
-        && labels.iter().all(|label| {
-            let label = label.trim_matches(|c: char| c == '-' || c.is_whitespace());
-            !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        })
-}
-
-/// Whether `zone` is a timezone identifier PHP's `timezone_identifiers_list( ALL_WITH_BC )`
-/// lists: an IANA name, such as `America/Toronto`, `UTC` or a legacy `US/Eastern`.
-fn is_timezone(zone: &str) -> bool {
-    zone.parse::<chrono_tz::Tz>().is_ok()
-}
-
-/// The offsets WordPress's timezone menu offers as `UTC+N` and `UTC-N`, in hours.
-fn is_menu_offset(hours: f64) -> bool {
-    (-12.0..=14.0).contains(&hours)
-        && ((hours * 2.0).fract() == 0.0 || [5.75, 8.75, 12.75, 13.75].contains(&hours))
-}
-
-/// The `gmt_offset` a `UTC+N` or `UTC-N` timezone choice sets, as WordPress's settings screen
-/// (`options-general.php`) turns it into one: `UTC+5.5` is `5.5`, `UTC-3` is `-3`. `None` for
-/// any other value.
-fn utc_offset(zone: &str) -> Option<String> {
-    let rest = zone.strip_prefix("UTC")?;
-    let (negative, number) = match rest.as_bytes().first()? {
-        b'+' => (false, &rest[1..]),
-        b'-' => (true, &rest[1..]),
-        _ => return None,
-    };
-    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return None;
-    }
-    let hours: f64 = number.parse().ok()?;
-    let hours = if negative { -hours } else { hours };
-    is_menu_offset(hours).then(|| format!("{}{number}", if negative { "-" } else { "" }))
 }
 
 #[cfg(test)]
@@ -911,44 +725,5 @@ mod tests {
         );
         let flag = Setting::new("use_smilies", SettingType::Boolean);
         assert_eq!(flag.check(&json!("0")), Ok(json!(false)));
-    }
-
-    #[test]
-    fn titles_are_escaped_once() {
-        assert_eq!(esc_html("Tom & Jerry <b>"), "Tom &amp; Jerry &lt;b&gt;");
-        assert_eq!(
-            esc_html("Tom &amp; Jerry &#8217;"),
-            "Tom &amp; Jerry &#8217;"
-        );
-        assert_eq!(esc_html("a &b c"), "a &amp;b c");
-    }
-
-    #[test]
-    fn urls_are_cleaned_as_esc_url_raw_cleans_them() {
-        assert_eq!(esc_url_raw(" example.com/a b "), "http://example.com/a%20b");
-        assert_eq!(esc_url_raw("https://x.test/<p>"), "https://x.test/p");
-        assert_eq!(esc_url_raw("javascript:alert(1)"), "");
-        assert!(is_http_url("https://x.test"));
-        assert!(!is_http_url("ftp://x.test"));
-    }
-
-    #[test]
-    fn emails_and_timezones_are_checked() {
-        assert!(is_email("admin@example.com"));
-        assert!(!is_email("admin@localhost"));
-        assert!(!is_email("@example.com"));
-        assert!(is_timezone("America/Toronto"));
-        assert!(is_timezone("America/Argentina/Buenos_Aires"));
-        assert!(is_timezone("UTC"));
-        assert!(is_timezone("US/Eastern"));
-        assert!(!is_timezone("Mars/Olympus"));
-        assert!(!is_timezone("Europe/Narnia"));
-        assert!(!is_timezone("UTC+5"));
-        assert_eq!(utc_offset("UTC+5.5").as_deref(), Some("5.5"));
-        assert_eq!(utc_offset("UTC-3").as_deref(), Some("-3"));
-        assert_eq!(utc_offset("UTC+13.75").as_deref(), Some("13.75"));
-        assert_eq!(utc_offset("UTC+5.3"), None);
-        assert_eq!(utc_offset("UTC+15"), None);
-        assert_eq!(utc_offset("UTC5"), None);
     }
 }

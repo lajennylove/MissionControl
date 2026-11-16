@@ -412,6 +412,23 @@ pub(crate) async fn delete_meta(
     Ok(table.store().delete(&mut &*db, owner, key).await?)
 }
 
+/// Option `name` read on a connection that is already in use (the steps of a transaction).
+pub(crate) async fn get_option_in<C: Conn>(
+    c: &mut C,
+    name: &str,
+) -> Result<Option<Value>, MetaError> {
+    OPTIONS.get(c, 0, name).await
+}
+
+/// Option `name` set on a connection that is already in use (the steps of a transaction).
+pub(crate) async fn put_option_in<C: Conn>(
+    c: &mut C,
+    name: &str,
+    value: &Value,
+) -> Result<(), Error> {
+    OPTIONS.put(c, 0, name, &value.to_string()).await
+}
+
 /// Post meta, set and read on a connection that is already in use (the steps of a transaction),
 /// for the trash meta `Post::trash` keeps.
 pub(crate) async fn put_post_meta_in<C: Conn>(
