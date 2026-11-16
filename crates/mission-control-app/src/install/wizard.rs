@@ -35,8 +35,8 @@
 //! a random id that the site form carries, so a finish installs only on the database its own
 //! step 1 chose; if someone submits step 1 again in between, the finish is refused. While a
 //! finish runs, other requests are told an installation is in progress instead of waiting. Every form
-//! carries a random token made when the process starts (`_wpnonce`, as WordPress names its
-//! nonce field); a `POST` without it, or with another one, is refused. Every value echoed back
+//! carries a random token made when the process starts (`mc_nonce`); a `POST` without it, or with
+//! another one, is refused. Every value echoed back
 //! into a form is escaped by the view, and no error message carries the password or the
 //! database URL.
 
@@ -72,7 +72,7 @@ use crate::setup::{INSTALL_PATH, SetupState};
 pub const SQLITE_FILE_NAME: &str = "database.sqlite";
 
 /// The name of the token field every wizard form carries, WordPress's nonce field.
-pub const TOKEN_FIELD: &str = "_wpnonce";
+pub const TOKEN_FIELD: &str = "mc_nonce";
 
 /// The characters kept as they are in a URL's user name, password and database name: RFC 3986's
 /// unreserved characters. Everything else is percent-encoded.
@@ -526,7 +526,7 @@ fn finished_page(home: &str, database: &str) -> Reply {
 /// The database form a step-1 `POST` carries.
 #[derive(FromForm)]
 struct DatabaseForm {
-    #[field(name = "_wpnonce")]
+    #[field(name = "mc_nonce")]
     token: Option<String>,
     driver: Option<String>,
     dbname: Option<String>,
@@ -930,7 +930,7 @@ fn connection_error(
 /// yet (Ruling R71), so the password is never kept.
 #[derive(FromForm)]
 struct SiteForm {
-    #[field(name = "_wpnonce")]
+    #[field(name = "mc_nonce")]
     token: Option<String>,
     /// The id of the database choice this form was opened for.
     database_choice: Option<String>,

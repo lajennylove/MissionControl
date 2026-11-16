@@ -18,7 +18,7 @@
 <h2>Information needed</h2>
 <p>Please provide the following information. Do not worry, you can always change these settings later.</p>
 <form method="post" action="/mc-admin/install.php?step=2" novalidate>
-<input type="hidden" name="_wpnonce" value="{{ $token }}">
+<input type="hidden" name="mc_nonce" value="{{ $token }}">
 <input type="hidden" name="database_choice" value="{{ $choice }}">
 <table class="form-table" role="presentation">
 <tr>
