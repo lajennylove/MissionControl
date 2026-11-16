@@ -1,0 +1,1737 @@
+//! The admin screens of post types: each post type, built-in or custom, as an Ignite runtime
+//! resource (design 4.3) whose slug, fields, columns and queries come from its definition.
+//!
+//! [`post_type_resource`] turns a [`PostTypeDef`] into a [`RuntimeResource`]: its form has the
+//! fields of the type's `supports` (as WordPress's edit screen has their boxes), its taxonomies,
+//! and the fields of the field groups whose location rules show on the type (design 5.4). Its
+//! rows are the type's posts, read and written through [`PostTypeData`], which reuses the core
+//! write rules: the slug (`wp_unique_post_slug`), `future` and `publish` settled by the date as
+//! `wp_insert_post` settles them, `_wp_old_slug`, term counts, sticky posts, the featured image
+//! (`_thumbnail_id`), revisions as `wp_save_post_revision`, the trash as `wp_trash_post` and
+//! `wp_untrash_post`, and deleting as `wp_delete_post`.
+//!
+//! [`PostTypeResources`] registers the resource of every post type the admin shows
+//! (`show_ui`) on Ignite, and registers them again when a type is saved or removed, in the admin
+//! or by a plugin.
+//!
+//! # The form
+//!
+//! The resource's slug is the post type's slug, so `post` is served at `/admin/post` and `book`
+//! at `/admin/book`; its title and singular are the labels `name` and `singular_name`. Its
+//! fields, in WordPress's names where the REST API has one:
+//!
+//! | `supports`        | field            | kind                                         |
+//! |-------------------|------------------|----------------------------------------------|
+//! | `title`           | `title`          | text                                         |
+//! | always            | `slug`           | text: WordPress's Slug box, through the save's slug rules |
+//! | `editor`          | `content`        | rich text                                    |
+//! | `excerpt`         | `excerpt`        | textarea                                     |
+//! | `author`          | `author`         | user: who may edit the type's posts (`post_author_meta_box`), read from Ignite's roles |
+//! | `page-attributes` | `parent`         | post object (a hierarchical type only)       |
+//! | `page-attributes` | `menu_order`     | number                                       |
+//! | `thumbnail`       | `featured_media` | image (`_thumbnail_id`)                      |
+//! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash |
+//! | always            | `date`           | date and time, in the site's time zone; blank is "Publish immediately" |
+//! | always            | `password`       | text (stored as written, as `post_password`) |
+//! | `post` only       | `sticky`         | checkbox                                     |
+//!
+//! Each taxonomy the type uses (its `taxonomies`, and those whose `object_type` names it,
+//! `category` and `post_tag` for `post`) whose `show_ui` is on is a relationship field
+//! `tax_<taxonomy>` (`-` written `_`) holding its terms' ids. Then come the fields of the field
+//! groups that show on the type, in ACF's order of groups; see [`custom_field_name`] for their
+//! names. A field that cannot be mapped is left out with a logged reason.
+//!
+//! The list's columns are the title (sortable, searchable), the author, the status, the terms
+//! of `category`, `post_tag` and each custom taxonomy with `show_admin_column`, and the date
+//! (sortable). Their keys start with `col_`, which no field name does, so a column is never read
+//! as a field's stored value.
+//!
+//! # Trust
+//!
+//! [`RuntimeData`]'s methods receive the database and never the signed-in user, so this data
+//! layer applies no per-user rule: it writes HTML as sent (no kses), any author and any status,
+//! as WordPress lets a user with every capability of the type and `unfiltered_html` (an
+//! administrator or editor) write. It must only be served behind the admin authorization that
+//! lets only such users reach the post type screens and checks `edit_post` and `delete_post` on
+//! the post in the URL (Ruling R115, Task 6.1).
+//!
+//! # Creating, saving and deleting
+//!
+//! - A new post is created as an `auto-draft` when the admin opens the New screen, as
+//!   `post-new.php` does, with [`create_auto_draft`]; the form then only updates it. So
+//!   [`RuntimeData::create`] refuses (Ruling R116). An `auto-draft` reads as `draft` on the form
+//!   and is left out of the list.
+//! - A save is the last write (WordPress's classic editor without post locks). One that changes
+//!   the title, content or excerpt of a type that supports `revisions` records a revision, as
+//!   `wp_save_post_revision` does (Ruling R118).
+//! - Saving a trashed post with another status takes it out of the trash first (`draft`, as
+//!   WordPress 5.6 and later restore), then applies the form. Choosing Trash moves it to the
+//!   trash after the save.
+//! - Delete moves a post to the trash; on a trashed post it deletes it permanently, with its
+//!   meta, term relationships and revisions (Ruling R117). The list shows every status but
+//!   `auto-draft`, with a Status column, so trashed posts can be found and restored.
+//!
+//! Every query is bounded: a list page has at most [`MAX_PER_PAGE`] rows and a field at most
+//! [`MAX_OPTIONS`] choices. Values are always bound, never written into the SQL.
+//!
+//! A stored reference the bounded choices leave out (a term past the limit, a trashed parent)
+//! shows unselected on the form and comes back blank; a save keeps it (Ruling R123, as
+//! WordPress's dropdowns add the selected value). Ignite's `options` cannot see the post being
+//! edited, so the form cannot show it (owner item O9).
+//!
+//! Not on the form yet: the page template (Task 6.2, it needs the active theme), comment and
+//! ping status (comments, phase 2), the post format, and the field group rules that depend on
+//! the post (page template, status, user role) and ACF's `hide_on_screen`.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use chrono::{Duration, FixedOffset, NaiveDate, NaiveDateTime};
+use ignite_core::{
+    ColumnDef, Direction, FieldDef as IgniteFieldDef, ListQuery, Page, Row, RuntimeData,
+    RuntimeError, RuntimeFuture, RuntimeResource, register_runtime, unregister_runtime,
+};
+use orbit_orm::{Database, Error, Model, Value as Sql, raw};
+use serde_json::{Value, json};
+
+use super::definition::{CapabilityType, FieldDef, FieldKindDef, Origin, PostTypeDef, Support};
+use super::location::ScreenContext;
+use super::registry::Registry;
+use crate::content::{
+    MetaError, NewPost, Post, PostStatus, SaveError, Taxonomy, delete_post_meta, get_option,
+    save_revision, set_post_meta,
+};
+use crate::front::{escape_like, search_terms};
+use crate::rest::id_of;
+use crate::rest::posts::{
+    loop_free_parent, set_post_terms, set_sticky, settle_status, sync_publication,
+};
+use crate::users::users_with_cap;
+
+/// The most rows one list page holds, whatever the list asks for.
+pub const MAX_PER_PAGE: i64 = 100;
+
+/// The most choices a field loads: users, parent posts or terms. A choice past the limit cannot
+/// be picked, and a stored value past it fails the form's check.
+pub const MAX_OPTIONS: usize = 1000;
+
+/// The most term names a list cell shows per taxonomy.
+const MAX_TERMS_SHOWN: i64 = 20;
+
+/// The most terms of one post the form reads, across its taxonomies.
+const MAX_POST_TERMS: i64 = 10_000;
+
+/// The longest search text the list matches, in bytes; longer text is cut.
+const MAX_SEARCH_BYTES: usize = 1000;
+
+/// How many times a save is tried again when another save lands between its read and its write.
+const MAX_ATTEMPTS: usize = 5;
+
+/// How many field keys one meta read binds.
+const KEYS_CHUNK: usize = 200;
+
+// The core fields' names.
+const TITLE: &str = "title";
+const SLUG: &str = "slug";
+const CONTENT: &str = "content";
+const EXCERPT: &str = "excerpt";
+const AUTHOR: &str = "author";
+const PARENT: &str = "parent";
+const MENU_ORDER: &str = "menu_order";
+const FEATURED_MEDIA: &str = "featured_media";
+const STATUS: &str = "status";
+const DATE: &str = "date";
+const PASSWORD: &str = "password";
+const STICKY: &str = "sticky";
+
+// The columns' keys.
+const COL_TITLE: &str = "col_title";
+const COL_AUTHOR: &str = "col_author";
+const COL_STATUS: &str = "col_status";
+const COL_DATE: &str = "col_date";
+
+/// The post meta that holds a post's featured image.
+const THUMBNAIL_META: &str = "_thumbnail_id";
+
+/// The statuses the form offers, with the names WordPress's status objects give them. `trash`
+/// is offered so a trashed post's form shows its status, and so it can be restored.
+const STATUSES: [(PostStatus, &str); 6] = [
+    (PostStatus::Draft, "Draft"),
+    (PostStatus::Pending, "Pending"),
+    (PostStatus::Private, "Private"),
+    (PostStatus::Publish, "Published"),
+    (PostStatus::Future, "Scheduled"),
+    (PostStatus::Trash, "Trash"),
+];
+
+/// The title WordPress gives an auto-draft (`get_default_post_to_edit`).
+const AUTO_DRAFT_TITLE: &str = "Auto Draft";
+
+/// WordPress's built-in `post` and `page`, as definitions: their labels and supports as
+/// `create_initial_post_types` registers them. They are not in the [`Registry`], which refuses
+/// their reserved names; [`PostTypeResources`] adds them.
+pub fn builtin_post_types() -> [PostTypeDef; 2] {
+    let builtin = |slug: &str, name: &str, singular: &str| PostTypeDef {
+        public: true,
+        show_in_rest: true,
+        origin: Origin::Code,
+        ..PostTypeDef::new(slug, name, singular)
+    };
+    [
+        PostTypeDef {
+            rest_base: Some("posts".to_owned()),
+            supports: vec![
+                Support::Title,
+                Support::Editor,
+                Support::Author,
+                Support::Thumbnail,
+                Support::Excerpt,
+                Support::Trackbacks,
+                Support::CustomFields,
+                Support::Comments,
+                Support::Revisions,
+                Support::PostFormats,
+            ],
+            taxonomies: vec!["category".to_owned(), "post_tag".to_owned()],
+            ..builtin("post", "Posts", "Post")
+        },
+        PostTypeDef {
+            rest_base: Some("pages".to_owned()),
+            hierarchical: true,
+            capability_type: CapabilityType::new("page"),
+            supports: vec![
+                Support::Title,
+                Support::Editor,
+                Support::Author,
+                Support::Thumbnail,
+                Support::PageAttributes,
+                Support::CustomFields,
+                Support::Comments,
+                Support::Revisions,
+            ],
+            ..builtin("page", "Pages", "Page")
+        },
+    ]
+}
+
+/// The Ignite field name of the field group field with `key`: the key in lowercase, with `-`
+/// written `_` (`field_65a1B-2` is `field_65a1b_2`), or `None` when that is not a name Ignite
+/// accepts (lowercase letters, digits and `_`, starting with a letter, at most 64 bytes). ACF's
+/// keys (`field_` and letters, digits, `_` or `-`) always map, and no core field name starts
+/// with `field_`, so a custom field never takes a core field's name. Two keys that differ only in
+/// case or in `-` and `_` map to one name: the second field is left out, logged.
+///
+/// The value is stored in post meta as ACF stores it: under the field's `name`, with `_<name>`
+/// holding its key, so [`get_field`](super::get_field) reads it.
+pub fn custom_field_name(key: &str) -> Option<String> {
+    let name: String = key
+        .chars()
+        .map(|c| {
+            if c == '-' {
+                '_'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    let valid = name.len() <= ignite_core::MAX_FIELD_NAME
+        && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    valid.then_some(name)
+}
+
+/// The Ignite field name of the taxonomy named `taxonomy`: `tax_` and the name, `-` written `_`.
+fn taxonomy_field_name(taxonomy: &str) -> String {
+    format!("tax_{}", taxonomy.replace('-', "_"))
+}
+
+/// One taxonomy field of a resource.
+#[derive(Debug, Clone)]
+struct TaxonomyField {
+    /// The Ignite field name, `tax_<taxonomy>`.
+    field: String,
+    /// The column key, `col_tax_<taxonomy>`, when the list shows the taxonomy.
+    column: Option<String>,
+    /// The taxonomy.
+    taxonomy: Taxonomy,
+}
+
+/// One field group field of a resource.
+#[derive(Debug, Clone)]
+struct CustomField {
+    /// The Ignite field name, from the field's key.
+    field: String,
+    /// The field as its group defines it: its `name` is the meta key.
+    def: FieldDef,
+}
+
+/// The rows of one post type: its posts in `posts`, their meta and terms. The
+/// [`RuntimeData`] of the resource [`post_type_resource`] builds; see the
+/// [module](self) for what it reads and writes, and why it must only be served behind the
+/// admin's authorization.
+#[derive(Debug, Clone)]
+pub struct PostTypeData {
+    post_type: String,
+    hierarchical: bool,
+    title: bool,
+    editor: bool,
+    excerpt: bool,
+    author: bool,
+    page_attributes: bool,
+    thumbnail: bool,
+    revisions: bool,
+    sticky: bool,
+    /// The type's `edit_posts` capability: who may be the author of its posts.
+    edit_posts: String,
+    taxonomies: Vec<TaxonomyField>,
+    custom: Vec<CustomField>,
+}
+
+impl PostTypeData {
+    /// Whether the type has `parent`: a hierarchical type with `page-attributes`.
+    fn has_parent(&self) -> bool {
+        self.hierarchical && self.page_attributes
+    }
+}
+
+/// The resource of the post type `def`: its form, list and rows, as the [module](self)
+/// describes. `registry` gives the custom taxonomies attached to the type and the field groups
+/// that show on it. The resource is a snapshot: build and register it again when a definition
+/// changes ([`PostTypeResources::sync`]).
+pub fn post_type_resource(def: &PostTypeDef, registry: &Registry) -> RuntimeResource {
+    let slug = def.slug.as_str();
+    let supports = |s: Support| def.supports(s);
+    let mut data = PostTypeData {
+        post_type: def.slug.clone(),
+        hierarchical: def.hierarchical,
+        title: supports(Support::Title),
+        editor: supports(Support::Editor),
+        excerpt: supports(Support::Excerpt),
+        author: supports(Support::Author),
+        page_attributes: supports(Support::PageAttributes),
+        thumbnail: supports(Support::Thumbnail),
+        revisions: supports(Support::Revisions),
+        sticky: slug == "post",
+        edit_posts: def.caps().edit_posts,
+        taxonomies: Vec::new(),
+        custom: Vec::new(),
+    };
+    let field = |name: &str, label: &str, kind: FieldKindDef, required: bool| IgniteFieldDef {
+        name: name.to_owned(),
+        label: label.to_owned(),
+        kind,
+        required,
+    };
+    let mut fields = Vec::new();
+    if data.title {
+        fields.push(field(TITLE, "Title", FieldKindDef::Text, false));
+    }
+    fields.push(field(SLUG, "Slug", FieldKindDef::Text, false));
+    if data.editor {
+        fields.push(field(CONTENT, "Content", FieldKindDef::Wysiwyg, false));
+    }
+    if data.excerpt {
+        fields.push(field(EXCERPT, "Excerpt", FieldKindDef::Textarea, false));
+    }
+    if data.author {
+        fields.push(field(AUTHOR, "Author", FieldKindDef::User, false));
+    }
+    if data.has_parent() {
+        fields.push(field(PARENT, "Parent", FieldKindDef::PostObject, false));
+    }
+    if data.page_attributes {
+        fields.push(field(MENU_ORDER, "Order", FieldKindDef::Number, false));
+    }
+    if data.thumbnail {
+        let label = def
+            .labels
+            .featured_image
+            .as_deref()
+            .unwrap_or("Featured image");
+        fields.push(field(FEATURED_MEDIA, label, FieldKindDef::Image, false));
+    }
+    let statuses = STATUSES
+        .iter()
+        .map(|(status, label)| (status.as_str().to_owned(), (*label).to_owned()))
+        .collect();
+    fields.push(field(
+        STATUS,
+        "Status",
+        FieldKindDef::Select(statuses),
+        true,
+    ));
+    fields.push(field(DATE, "Date", FieldKindDef::DateTime, false));
+    fields.push(field(PASSWORD, "Password", FieldKindDef::Text, false));
+    if data.sticky {
+        fields.push(field(
+            STICKY,
+            "Stick to the top of the blog",
+            FieldKindDef::Checkbox,
+            false,
+        ));
+    }
+
+    let mut names: HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
+    for (taxonomy, label, column) in taxonomies_of(def, registry) {
+        let name = taxonomy_field_name(&taxonomy.name);
+        if !names.insert(name.clone()) {
+            log::warn!(
+                "The taxonomy `{}` is left out of the `{slug}` screens: its field name `{name}` \
+                 is taken by another taxonomy.",
+                taxonomy.name
+            );
+            continue;
+        }
+        fields.push(field(&name, &label, FieldKindDef::Relationship, false));
+        data.taxonomies.push(TaxonomyField {
+            column: column.then(|| format!("col_{name}")),
+            field: name,
+            taxonomy,
+        });
+    }
+
+    for group in registry.groups_for(&ScreenContext::post(slug)) {
+        for def in group.fields {
+            let skip = |reason: &str| {
+                log::warn!(
+                    "The field `{}` ({}) of the field group `{}` is left out of the `{slug}` \
+                     screens: {reason}.",
+                    def.name,
+                    def.key,
+                    group.key
+                );
+            };
+            match def.kind {
+                FieldKindDef::Clone(_) => {
+                    skip("a clone field's values are stored as its cloned fields, not yet mapped");
+                    continue;
+                }
+                FieldKindDef::Password => {
+                    skip(
+                        "ACF stores a password field as text and Ignite's password kind stores \
+                         a hash",
+                    );
+                    continue;
+                }
+                FieldKindDef::Lookup => {
+                    skip("ACF has no lookup field");
+                    continue;
+                }
+                _ => {}
+            }
+            let Some(name) = custom_field_name(&def.key) else {
+                skip("its key is not a name Ignite accepts");
+                continue;
+            };
+            if !names.insert(name.clone()) {
+                skip(&format!("another field's key also maps to `{name}`"));
+                continue;
+            }
+            let mut ignite = def.to_ignite();
+            ignite.name = name.clone();
+            fields.push(ignite);
+            data.custom.push(CustomField { field: name, def });
+        }
+    }
+
+    let column = |key: &str, label: &str, sortable: bool, searchable: bool| ColumnDef {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        sortable,
+        searchable,
+    };
+    let mut columns = vec![column(COL_TITLE, "Title", true, true)];
+    if data.author {
+        columns.push(column(COL_AUTHOR, "Author", false, false));
+    }
+    columns.push(column(COL_STATUS, "Status", false, false));
+    for taxonomy in &data.taxonomies {
+        if let Some(key) = &taxonomy.column {
+            let label = fields
+                .iter()
+                .find(|f| f.name == taxonomy.field)
+                .map_or_else(|| taxonomy.taxonomy.name.to_string(), |f| f.label.clone());
+            columns.push(column(key, &label, false, false));
+        }
+    }
+    columns.push(column(COL_DATE, "Date", true, false));
+
+    let title = if def.labels.name.is_empty() {
+        def.slug.clone()
+    } else {
+        def.labels.name.clone()
+    };
+    let singular = if def.labels.singular_name.is_empty() {
+        title.clone()
+    } else {
+        def.labels.singular_name.clone()
+    };
+    let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data);
+    resource.fields = fields;
+    resource.columns = columns;
+    resource
+}
+
+/// The taxonomies the type `def` uses, with their field label and whether the list shows them:
+/// those `def` names, then each custom taxonomy whose `object_type` names the type, as
+/// `register_taxonomy` attaches it. A taxonomy whose `show_ui` is off, or that is not
+/// registered, is left out. Categories and tags have WordPress's labels and always show in the
+/// list; a custom taxonomy shows with `show_admin_column`.
+fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, String, bool)> {
+    let custom = registry.all_taxonomies();
+    let mut names: Vec<&str> = def.taxonomies.iter().map(String::as_str).collect();
+    for taxonomy in &custom {
+        if taxonomy.object_type.contains(&def.slug) && !names.contains(&taxonomy.slug.as_str()) {
+            names.push(&taxonomy.slug);
+        }
+    }
+    let mut out = Vec::new();
+    for name in names {
+        match name {
+            "category" => out.push((Taxonomy::CATEGORY, "Categories".to_owned(), true)),
+            "post_tag" => out.push((Taxonomy::POST_TAG, "Tags".to_owned(), true)),
+            _ => match custom.iter().find(|t| t.slug == name) {
+                Some(t) if t.effective_show_ui() => {
+                    let label = if t.labels.name.is_empty() {
+                        t.slug.clone()
+                    } else {
+                        t.labels.name.clone()
+                    };
+                    out.push((t.to_taxonomy(), label, t.show_admin_column));
+                }
+                Some(_) => {}
+                None => log::debug!(
+                    "The post type `{}` names the taxonomy `{name}`, which is not registered.",
+                    def.slug
+                ),
+            },
+        }
+    }
+    out
+}
+
+/// Creates the `auto-draft` the admin's New screen edits, as `get_default_post_to_edit` does
+/// with `$create_in_db`: a post of `post_type` by `author_id`, titled "Auto Draft", with no date.
+/// The form shows it with a blank title and the status `draft`; its first save makes it what the
+/// form says. The list leaves auto-drafts out.
+///
+/// The caller decides who may create one: the admin checks the type's `edit_posts` first
+/// (Ruling R116, Task 6.1).
+///
+/// # Errors
+///
+/// [`Error::ForeignKeyViolation`] when the author does not exist, or the database's error.
+pub async fn create_auto_draft(
+    db: &Database,
+    post_type: &str,
+    author_id: i64,
+) -> Result<Post, Error> {
+    Post::create(
+        db,
+        NewPost {
+            status: PostStatus::AutoDraft,
+            title: AUTO_DRAFT_TITLE.to_owned(),
+            ..NewPost::new(author_id, post_type)
+        },
+    )
+    .await
+}
+
+/// A post type whose resource Ignite refused, and why: its slug is a panel page or another
+/// resource's (Ignite reserves `login`, `profile` and its own resources' slugs, such as `users`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedResource {
+    /// The post type's slug.
+    pub post_type: String,
+    /// Ignite's reason.
+    pub error: RuntimeError,
+}
+
+impl fmt::Display for RefusedResource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the post type `{}` has no admin screens: {}",
+            self.post_type, self.error
+        )
+    }
+}
+
+impl std::error::Error for RefusedResource {}
+
+/// The resources of the post types the admin shows, on Ignite's runtime registry: `post`,
+/// `page`, and each post type in use in the [`Registry`] whose `show_ui` is on (by default, a
+/// public one). Call [`sync`](Self::sync) at start and after every change to a post type,
+/// taxonomy or field group (saved or deleted in the admin, registered or removed by a plugin);
+/// it is idempotent.
+///
+/// Ignite's registry is one per process: keep one `PostTypeResources` per app.
+///
+/// ```ignore
+/// let resources = PostTypeResources::new(Arc::clone(&registry));
+/// for refused in resources.sync() {
+///     log::warn!("{refused}");
+/// }
+/// ```
+#[derive(Debug)]
+pub struct PostTypeResources {
+    registry: Arc<Registry>,
+    /// The slugs this value registered, in order. Held only by synchronous code.
+    registered: Mutex<Vec<String>>,
+}
+
+impl PostTypeResources {
+    /// Resources for the post types of `registry`; nothing is registered until
+    /// [`sync`](Self::sync).
+    pub fn new(registry: Arc<Registry>) -> Self {
+        Self {
+            registry,
+            registered: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The post types that get a resource: `post`, `page`, then the registry's in use whose
+    /// `show_ui` is on.
+    pub fn post_types(&self) -> Vec<PostTypeDef> {
+        builtin_post_types()
+            .into_iter()
+            .chain(
+                self.registry
+                    .all_post_types()
+                    .into_iter()
+                    .filter(PostTypeDef::effective_show_ui),
+            )
+            .collect()
+    }
+
+    /// Builds the resource of every post type of [`post_types`](Self::post_types) and
+    /// registers it on Ignite, replacing the one this value registered before; unregisters the
+    /// resources of types that are gone or no longer shown. Returns the types Ignite refused,
+    /// which have no admin screens. From the next request on, the panel serves the new
+    /// definitions.
+    pub fn sync(&self) -> Vec<RefusedResource> {
+        let mut registered = self
+            .registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let wanted = self.post_types();
+        for slug in registered.iter() {
+            // Ours, so it is there unless something else removed it.
+            let _ = unregister_runtime(slug);
+        }
+        registered.clear();
+        let mut refused = Vec::new();
+        for def in &wanted {
+            match register_runtime(post_type_resource(def, &self.registry)) {
+                Ok(()) => registered.push(def.slug.clone()),
+                Err(error) => refused.push(RefusedResource {
+                    post_type: def.slug.clone(),
+                    error,
+                }),
+            }
+        }
+        refused
+    }
+
+    /// Unregisters the resource of `post_type`, if this value registered it, as when the type
+    /// is removed and [`sync`](Self::sync) is not run. True when there was one.
+    pub fn remove(&self, post_type: &str) -> bool {
+        let mut registered = self
+            .registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(index) = registered.iter().position(|s| s == post_type) else {
+            return false;
+        };
+        registered.remove(index);
+        unregister_runtime(post_type).is_ok()
+    }
+
+    /// The post types whose resource this value has registered, in order.
+    pub fn registered(&self) -> Vec<String> {
+        self.registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Errors
+
+/// The database error of a meta read or write. A stored value that is not JSON cannot be written
+/// by these functions, which only write JSON values; it is reported as a decode error.
+fn meta_error(e: MetaError) -> Error {
+    match e {
+        MetaError::Database(e) => e,
+        MetaError::InvalidJson(e) => Error::Database(sqlx::Error::Decode(Box::new(e))),
+    }
+}
+
+/// The database error of a scheduler call; the scheduler fails otherwise only on a payload that
+/// does not serialise, which a post id always does.
+fn scheduler_error(e: crate::scheduler::Error) -> Error {
+    match e {
+        crate::scheduler::Error::Database(e) => e,
+        other => Error::Database(sqlx::Error::Protocol(other.to_string())),
+    }
+}
+
+/// What a save refused: no post of this type has the id.
+fn not_found() -> Error {
+    Error::NotFound { table: "posts" }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Values
+
+/// A UTC time as the site's local time, as the form and the list show it.
+fn local_text(utc: NaiveDateTime, offset: FixedOffset) -> String {
+    (utc + Duration::seconds(i64::from(offset.local_minus_utc())))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// The form's local date and time (`YYYY-MM-DD HH:MM:SS`, as Ignite's validation gives it) in
+/// UTC.
+fn utc_from_local(text: &str, offset: FixedOffset) -> Option<NaiveDateTime> {
+    let local = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%dT%H:%M"))
+        .ok()?;
+    Some(local - Duration::seconds(i64::from(offset.local_minus_utc())))
+}
+
+/// The text of a row value: a string, or a number written out.
+fn text_of(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// The ids a relationship value holds: its JSON list (as text) of ids.
+fn row_ids(value: &Value) -> Vec<i64> {
+    let list = match value {
+        Value::String(text) => serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    let mut ids: Vec<i64> = list
+        .as_array()
+        .map(|items| items.iter().filter_map(id_of).collect())
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids.dedup();
+    // A post's own terms are read up to MAX_POST_TERMS, so a merged list (R123) keeps as many.
+    ids.truncate(usize::try_from(MAX_POST_TERMS).unwrap_or(usize::MAX));
+    ids
+}
+
+/// A field group field's value from the form, as it is stored in post meta, as ACF stores it
+/// (JSON, since Mission Control's meta is JSON): text as text, a number as a number, a
+/// true/false as a boolean, a date as `Ymd` (ACF's `date_picker` format), a media, post, user
+/// or term id as a number, and the structured kinds (link, relationship, gallery, repeater,
+/// group, flexible content) as their JSON. A cleared value is `null`.
+fn meta_value(kind: &FieldKindDef, value: &Value) -> Value {
+    let Value::String(text) = value else {
+        // Null, a number (number, decimal) or a boolean (checkbox): stored as it is.
+        return value.clone();
+    };
+    match kind {
+        FieldKindDef::Date => match NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+            Ok(date) => Value::from(date.format("%Y%m%d").to_string()),
+            Err(_) => value.clone(),
+        },
+        FieldKindDef::Image
+        | FieldKindDef::File
+        | FieldKindDef::PostObject
+        | FieldKindDef::User
+        | FieldKindDef::Taxonomy => text
+            .trim()
+            .parse::<i64>()
+            .map_or_else(|_| value.clone(), Value::from),
+        FieldKindDef::Link
+        | FieldKindDef::Relationship
+        | FieldKindDef::Gallery
+        | FieldKindDef::Repeater(_)
+        | FieldKindDef::Group(_)
+        | FieldKindDef::FlexibleContent(_) => {
+            serde_json::from_str(text).unwrap_or_else(|_| value.clone())
+        }
+        _ => value.clone(),
+    }
+}
+
+/// A stored field group value as the form shows it: the shape Ignite's
+/// `validate_update` gives the field (text for most kinds, a number, a boolean, the structured
+/// kinds' JSON as text).
+fn form_value(kind: &FieldKindDef, stored: Value) -> Value {
+    match (kind, stored) {
+        (_, Value::Null) => Value::Null,
+        (FieldKindDef::Checkbox, value) => Value::Bool(match value {
+            Value::Bool(b) => b,
+            Value::Number(n) => n.as_f64() != Some(0.0),
+            Value::String(s) => matches!(s.trim(), "1" | "true" | "on"),
+            _ => false,
+        }),
+        (FieldKindDef::Number | FieldKindDef::Decimal(_), Value::String(s)) => s
+            .trim()
+            .parse::<i64>()
+            .map(Value::from)
+            .or_else(|_| s.trim().parse::<f64>().map(Value::from))
+            .unwrap_or(Value::String(s)),
+        (FieldKindDef::Number | FieldKindDef::Decimal(_), value) => value,
+        (FieldKindDef::Date, Value::String(s)) => {
+            match NaiveDate::parse_from_str(s.trim(), "%Y%m%d") {
+                Ok(date) => Value::from(date.format("%Y-%m-%d").to_string()),
+                Err(_) => Value::String(s),
+            }
+        }
+        (
+            FieldKindDef::Link
+            | FieldKindDef::Relationship
+            | FieldKindDef::Gallery
+            | FieldKindDef::Repeater(_)
+            | FieldKindDef::Group(_)
+            | FieldKindDef::FlexibleContent(_),
+            value,
+        ) => match value {
+            Value::String(s) => Value::String(s),
+            other => Value::String(other.to_string()),
+        },
+        (_, Value::String(s)) => Value::String(s),
+        (_, Value::Number(n)) => Value::String(n.to_string()),
+        (_, Value::Bool(b)) => Value::String(if b { "1" } else { "0" }.to_owned()),
+        (_, other) => Value::String(other.to_string()),
+    }
+}
+
+/// The name WordPress's status object gives `status`, as the Status column shows it.
+fn status_label(status: PostStatus) -> &'static str {
+    match status {
+        PostStatus::AutoDraft => "Draft",
+        PostStatus::Inherit => "Inherit",
+        other => STATUSES
+            .iter()
+            .find(|(s, _)| *s == other)
+            .map_or("", |(_, label)| label),
+    }
+}
+
+/// Question marks for `n` binds.
+fn marks(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reads
+
+impl PostTypeData {
+    /// Post `id` if it is of this type.
+    async fn post(&self, db: &Database, id: i64) -> Result<Option<Post>, Error> {
+        Ok(Post::query()
+            .find(db, id)
+            .await?
+            .filter(|post| post.post_type == self.post_type))
+    }
+
+    /// The names of the users among `ids`.
+    async fn user_names(&self, db: &Database, ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
+        let mut ids: Vec<i64> = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut names = HashMap::new();
+        for chunk in ids.chunks(500) {
+            let rows: Vec<(i64, String)> = raw::fetch_all(
+                db,
+                &format!(
+                    "SELECT id, name FROM users WHERE id IN ({})",
+                    marks(chunk.len())
+                ),
+                &chunk.iter().map(|id| Sql::from(*id)).collect::<Vec<_>>(),
+            )
+            .await?;
+            names.extend(rows);
+        }
+        Ok(names)
+    }
+
+    /// The terms of the posts `ids` in this type's taxonomies, by post and taxonomy name: each
+    /// term's `term_id` and name, ordered by name, at most `per_post` per post and taxonomy.
+    async fn post_terms(
+        &self,
+        db: &Database,
+        ids: &[i64],
+        per_post: i64,
+    ) -> Result<HashMap<(i64, String), Vec<(i64, String)>>, Error> {
+        let mut out: HashMap<(i64, String), Vec<(i64, String)>> = HashMap::new();
+        if ids.is_empty() || self.taxonomies.is_empty() {
+            return Ok(out);
+        }
+        let taxonomies: Vec<&str> = self
+            .taxonomies
+            .iter()
+            .map(|t| t.taxonomy.name.as_ref())
+            .collect();
+        for chunk in ids.chunks(500) {
+            let mut binds: Vec<Sql> = chunk.iter().map(|id| Sql::from(*id)).collect();
+            binds.extend(taxonomies.iter().map(|t| Sql::from(*t)));
+            binds.push(per_post.into());
+            // `ROW_NUMBER()` keeps at most `per_post` terms of each post and taxonomy, so a post
+            // with many terms is never read whole.
+            let sql = format!(
+                "SELECT m_post, m_tax, m_term, m_name FROM (SELECT r.object_id AS m_post, \
+                 tt.taxonomy AS m_tax, t.id AS m_term, t.name AS m_name, ROW_NUMBER() OVER \
+                 (PARTITION BY r.object_id, tt.taxonomy ORDER BY t.name, t.id) AS m_rank \
+                 FROM term_relationships r \
+                 INNER JOIN term_taxonomy tt ON tt.id = r.term_taxonomy_id \
+                 INNER JOIN terms t ON t.id = tt.term_id \
+                 WHERE r.object_id IN ({}) AND tt.taxonomy IN ({})) ranked \
+                 WHERE m_rank <= ? ORDER BY m_post, m_tax, m_name, m_term",
+                marks(chunk.len()),
+                marks(taxonomies.len())
+            );
+            let rows: Vec<(i64, String, i64, String)> = raw::fetch_all(db, &sql, &binds).await?;
+            for (post, taxonomy, term, name) in rows {
+                // Exact comparison: MySQL compares text without case.
+                if taxonomies.contains(&taxonomy.as_str()) {
+                    out.entry((post, taxonomy)).or_default().push((term, name));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The column values of `post`: the title ("(no title)" when empty), the author's name, the
+    /// status, the term names and the date (published, or last modified when it has none).
+    fn columns(
+        &self,
+        row: &mut Row,
+        post: &Post,
+        authors: &HashMap<i64, String>,
+        terms: &HashMap<(i64, String), Vec<(i64, String)>>,
+        offset: FixedOffset,
+    ) {
+        let title = if post.title.trim().is_empty() || post.status == PostStatus::AutoDraft {
+            "(no title)".to_owned()
+        } else {
+            post.title.clone()
+        };
+        row.insert(COL_TITLE.into(), Value::from(title));
+        if self.author {
+            row.insert(
+                COL_AUTHOR.into(),
+                Value::from(authors.get(&post.author_id).cloned().unwrap_or_default()),
+            );
+        }
+        row.insert(COL_STATUS.into(), Value::from(status_label(post.status)));
+        for taxonomy in &self.taxonomies {
+            if let Some(key) = &taxonomy.column {
+                let names: Vec<&str> = terms
+                    .get(&(post.id, taxonomy.taxonomy.name.to_string()))
+                    .map(|list| list.iter().map(|(_, name)| name.as_str()).collect())
+                    .unwrap_or_default();
+                let text = if names.is_empty() {
+                    "—".to_owned()
+                } else {
+                    names.join(", ")
+                };
+                row.insert(key.clone(), Value::from(text));
+            }
+        }
+        let date = post.published_at.unwrap_or(post.modified_at);
+        row.insert(COL_DATE.into(), Value::from(local_text(date, offset)));
+    }
+
+    /// The stored values of the field group fields of post `id`, by meta key: the first value of
+    /// each key.
+    async fn custom_values(&self, db: &Database, id: i64) -> Result<HashMap<String, Value>, Error> {
+        let mut values = HashMap::new();
+        let keys: Vec<&str> = self.custom.iter().map(|c| c.def.name.as_str()).collect();
+        for chunk in keys.chunks(KEYS_CHUNK) {
+            let rows =
+                crate::content::meta_rows(db, crate::content::MetaTable::Post, &[id], chunk, 1)
+                    .await?;
+            for (_, key, text) in rows {
+                // A stored value that is not JSON was not written by Mission Control: it reads as
+                // none.
+                let value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                values.entry(key).or_insert(value);
+            }
+        }
+        Ok(values)
+    }
+
+    /// The form row of `post`: every field and column key.
+    async fn row(&self, db: &Database, post: &Post) -> Result<Row, Error> {
+        let offset = crate::content::gmt_offset(db).await?;
+        let mut row = Row::new();
+        row.insert("id".into(), Value::from(post.id));
+        let auto_draft = post.status == PostStatus::AutoDraft;
+        if self.title {
+            // `get_default_post_to_edit` shows an auto-draft with a blank title.
+            let title = if auto_draft && post.title == AUTO_DRAFT_TITLE {
+                ""
+            } else {
+                post.title.as_str()
+            };
+            row.insert(TITLE.into(), Value::from(title));
+        }
+        row.insert(SLUG.into(), Value::from(post.slug.clone()));
+        if self.editor {
+            row.insert(CONTENT.into(), Value::from(post.content.clone()));
+        }
+        if self.excerpt {
+            row.insert(EXCERPT.into(), Value::from(post.excerpt.clone()));
+        }
+        if self.author {
+            row.insert(AUTHOR.into(), Value::from(post.author_id.to_string()));
+        }
+        if self.has_parent() {
+            let parent = post.parent_id.filter(|p| *p > 0);
+            row.insert(
+                PARENT.into(),
+                parent.map_or(Value::Null, |p| Value::from(p.to_string())),
+            );
+        }
+        if self.page_attributes {
+            row.insert(MENU_ORDER.into(), Value::from(post.menu_order));
+        }
+        if self.thumbnail {
+            let thumbnail = match crate::content::get_post_meta(db, post.id, THUMBNAIL_META).await {
+                Ok(value) => value.as_ref().and_then(id_of),
+                Err(MetaError::InvalidJson(_)) => None,
+                Err(MetaError::Database(e)) => return Err(e),
+            };
+            row.insert(
+                FEATURED_MEDIA.into(),
+                thumbnail.map_or(Value::Null, |id| Value::from(id.to_string())),
+            );
+        }
+        let status = if auto_draft {
+            PostStatus::Draft
+        } else {
+            post.status
+        };
+        row.insert(STATUS.into(), Value::from(status.as_str()));
+        row.insert(
+            DATE.into(),
+            post.published_at
+                .map_or(Value::Null, |d| Value::from(local_text(d, offset))),
+        );
+        row.insert(
+            PASSWORD.into(),
+            post.password
+                .clone()
+                .filter(|p| !p.is_empty())
+                .map_or(Value::Null, Value::from),
+        );
+        if self.sticky {
+            let sticky = match get_option(db, "sticky_posts").await {
+                Ok(Some(Value::Array(ids))) => ids.iter().filter_map(id_of).any(|i| i == post.id),
+                Ok(_) | Err(MetaError::InvalidJson(_)) => false,
+                Err(MetaError::Database(e)) => return Err(e),
+            };
+            row.insert(STICKY.into(), Value::Bool(sticky));
+        }
+        let terms = self.post_terms(db, &[post.id], MAX_POST_TERMS).await?;
+        for taxonomy in &self.taxonomies {
+            let ids: Vec<String> = terms
+                .get(&(post.id, taxonomy.taxonomy.name.to_string()))
+                .map(|list| list.iter().map(|(id, _)| id.to_string()).collect())
+                .unwrap_or_default();
+            row.insert(taxonomy.field.clone(), Value::from(json!(ids).to_string()));
+        }
+        let mut values = self.custom_values(db, post.id).await?;
+        for custom in &self.custom {
+            let stored = values.remove(&custom.def.name).unwrap_or(Value::Null);
+            row.insert(custom.field.clone(), form_value(&custom.def.kind, stored));
+        }
+        let authors = if self.author {
+            self.user_names(db, &[post.author_id]).await?
+        } else {
+            HashMap::new()
+        };
+        self.columns(&mut row, post, &authors, &terms, offset);
+        Ok(row)
+    }
+
+    /// One page of the list: every post of the type but auto-drafts, matching the search on the
+    /// title, excerpt and content as `WP_Query::parse_search` splits it.
+    async fn list_page(&self, db: &Database, query: &ListQuery) -> Result<Page<Row>, Error> {
+        let per_page = query.per_page.clamp(1, MAX_PER_PAGE);
+        let offset_rows = query.page.max(1).saturating_sub(1).saturating_mul(per_page);
+        let mut filter = String::from("FROM posts p WHERE p.post_type = ? AND p.status <> ?");
+        let mut binds: Vec<Sql> =
+            vec![self.post_type.as_str().into(), PostStatus::AutoDraft.into()];
+        if let Some(search) = &query.search {
+            let mut cut = search.len().min(MAX_SEARCH_BYTES);
+            while !search.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            for term in search_terms(&search[..cut]) {
+                let like = format!("%{}%", escape_like(&term.text.to_lowercase()));
+                filter.push_str(if term.exclude { " AND NOT " } else { " AND " });
+                filter.push_str(
+                    "(LOWER(p.title) LIKE ? ESCAPE '!' OR LOWER(p.excerpt) LIKE ? ESCAPE '!' \
+                     OR LOWER(p.content) LIKE ? ESCAPE '!')",
+                );
+                binds.extend(std::iter::repeat_n(Sql::from(like), 3));
+            }
+        }
+        let total: i64 =
+            raw::fetch_scalar(db, &format!("SELECT COUNT(*) {filter}"), &binds).await?;
+        let date = "COALESCE(p.published_at, p.modified_at)";
+        let order = match &query.sort {
+            Some((key, direction)) => {
+                let dir = match direction {
+                    Direction::Asc => "ASC",
+                    Direction::Desc => "DESC",
+                };
+                match key.as_str() {
+                    COL_TITLE => format!("p.title {dir}, p.id {dir}"),
+                    _ => format!("{date} {dir}, p.id {dir}"),
+                }
+            }
+            // `wp_edit_posts_query`: a hierarchical type by order and title, others newest first.
+            None if self.hierarchical => "p.menu_order ASC, p.title ASC, p.id ASC".to_owned(),
+            None => format!("{date} DESC, p.id DESC"),
+        };
+        let mut page_binds = binds;
+        page_binds.push(per_page.into());
+        page_binds.push(offset_rows.into());
+        let ids: Vec<(i64,)> = raw::fetch_all(
+            db,
+            &format!("SELECT p.id {filter} ORDER BY {order} LIMIT ? OFFSET ?"),
+            &page_binds,
+        )
+        .await?;
+        let ids: Vec<i64> = ids.into_iter().map(|(id,)| id).collect();
+        if ids.is_empty() {
+            return Ok(Page {
+                rows: Vec::new(),
+                total,
+            });
+        }
+        let mut posts = Post::query()
+            .where_in(Post::PRIMARY_KEY, ids.clone())
+            .get(db)
+            .await?;
+        posts.sort_by_key(|post| ids.iter().position(|id| *id == post.id));
+        let offset = crate::content::gmt_offset(db).await?;
+        let authors = if self.author {
+            let ids: Vec<i64> = posts.iter().map(|p| p.author_id).collect();
+            self.user_names(db, &ids).await?
+        } else {
+            HashMap::new()
+        };
+        let terms = self.post_terms(db, &ids, MAX_TERMS_SHOWN).await?;
+        let rows = posts
+            .iter()
+            .map(|post| {
+                let mut row = Row::new();
+                row.insert("id".into(), Value::from(post.id));
+                self.columns(&mut row, post, &authors, &terms, offset);
+                row
+            })
+            .collect();
+        Ok(Page { rows, total })
+    }
+
+    /// The `(value, label)` choices of the field `field`, at most [`MAX_OPTIONS`].
+    async fn choices(&self, db: &Database, field: &str) -> Result<Vec<(String, String)>, Error> {
+        if field == AUTHOR && self.author {
+            // `post_author_meta_box`: the users who may edit posts of the type.
+            let users = users_with_cap(db, &self.edit_posts, MAX_OPTIONS).await?;
+            return Ok(users
+                .into_iter()
+                .map(|(id, name)| (id.to_string(), name))
+                .collect());
+        }
+        if field == PARENT && self.has_parent() {
+            return posts_of(db, &[self.post_type.as_str()]).await;
+        }
+        if let Some(taxonomy) = self.taxonomies.iter().find(|t| t.field == field) {
+            return terms_of(db, &taxonomy.taxonomy.name).await;
+        }
+        let Some(custom) = self.custom.iter().find(|c| c.field == field) else {
+            return Ok(Vec::new());
+        };
+        let setting = |name: &str| -> Vec<String> {
+            match custom.def.settings.get(name) {
+                Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .take(super::definition::MAX_LIST_ITEMS)
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        match custom.def.kind {
+            FieldKindDef::User => users(db).await,
+            FieldKindDef::PostObject | FieldKindDef::Relationship => {
+                let types = setting("post_type");
+                let types: Vec<&str> = types.iter().map(String::as_str).collect();
+                posts_of(db, &types).await
+            }
+            FieldKindDef::Taxonomy => match setting("taxonomy").first() {
+                Some(taxonomy) => terms_of(db, taxonomy).await,
+                None => Ok(Vec::new()),
+            },
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+/// The users, by name: `(id, name)`.
+async fn users(db: &Database) -> Result<Vec<(String, String)>, Error> {
+    let rows: Vec<(i64, String)> = raw::fetch_all(
+        db,
+        "SELECT id, name FROM users ORDER BY name, id LIMIT ?",
+        &[(MAX_OPTIONS as i64).into()],
+    )
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| (id.to_string(), name))
+        .collect())
+}
+
+/// The posts of `types` (every type but revisions, attachments and menu items when empty) that
+/// are not trashed or auto-drafts, by order and title: `(id, title)`, "(no title)" for none.
+async fn posts_of(db: &Database, types: &[&str]) -> Result<Vec<(String, String)>, Error> {
+    let mut sql = String::from("SELECT id, title FROM posts WHERE status NOT IN (?, ?)");
+    let mut binds: Vec<Sql> = vec![PostStatus::Trash.into(), PostStatus::AutoDraft.into()];
+    if types.is_empty() {
+        sql.push_str(" AND post_type NOT IN (?, ?, ?)");
+        binds.extend(["revision", "attachment", "nav_menu_item"].map(Sql::from));
+    } else {
+        sql.push_str(&format!(" AND post_type IN ({})", marks(types.len())));
+        binds.extend(types.iter().map(|t| Sql::from(*t)));
+    }
+    sql.push_str(" ORDER BY menu_order, title, id LIMIT ?");
+    binds.push((MAX_OPTIONS as i64).into());
+    let rows: Vec<(i64, String)> = raw::fetch_all(db, &sql, &binds).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, title)| {
+            let title = if title.trim().is_empty() {
+                "(no title)".to_owned()
+            } else {
+                title
+            };
+            (id.to_string(), title)
+        })
+        .collect())
+}
+
+/// The terms of the taxonomy named `taxonomy`, by name: `(term_id, name)`.
+async fn terms_of(db: &Database, taxonomy: &str) -> Result<Vec<(String, String)>, Error> {
+    let rows: Vec<(i64, String, String)> = raw::fetch_all(
+        db,
+        "SELECT t.id, t.name, tt.taxonomy FROM term_taxonomy tt \
+         INNER JOIN terms t ON t.id = tt.term_id WHERE tt.taxonomy = ? \
+         ORDER BY t.name, t.id LIMIT ?",
+        &[taxonomy.into(), (MAX_OPTIONS as i64).into()],
+    )
+    .await?;
+    Ok(rows
+        .into_iter()
+        // Exact comparison: MySQL compares text without case.
+        .filter(|(_, _, name)| name == taxonomy)
+        .map(|(id, name, _)| (id.to_string(), name))
+        .collect())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Writes
+
+/// What a form changes on the post row, read and checked before the save.
+#[derive(Debug, Default)]
+struct Changes {
+    title: Option<String>,
+    slug: Option<String>,
+    content: Option<String>,
+    excerpt: Option<String>,
+    author: Option<i64>,
+    /// `Some(None)` for no parent.
+    parent: Option<Option<i64>>,
+    menu_order: Option<i32>,
+    status: Option<PostStatus>,
+    /// `Some(None)` for "Publish immediately".
+    date: Option<Option<NaiveDateTime>>,
+    /// `Some(None)` for no password.
+    password: Option<Option<String>>,
+}
+
+impl Changes {
+    /// `stored` with the changes made, its status and date settled as `wp_insert_post` settles
+    /// them. A status of `trash` is not set here: the post is trashed after the save.
+    fn apply(&self, stored: &Post) -> Post {
+        let mut post = stored.clone();
+        if let Some(title) = &self.title {
+            post.title = title.clone();
+        }
+        if let Some(slug) = &self.slug {
+            post.slug = slug.clone();
+        }
+        if let Some(content) = &self.content {
+            post.content = content.clone();
+        }
+        if let Some(excerpt) = &self.excerpt {
+            post.excerpt = excerpt.clone();
+        }
+        if let Some(author) = self.author {
+            post.author_id = author;
+        }
+        if let Some(parent) = self.parent {
+            post.parent_id = parent;
+        }
+        if let Some(order) = self.menu_order {
+            post.menu_order = order;
+        }
+        if let Some(password) = &self.password {
+            post.password = password.clone();
+        }
+        if let Some(date) = self.date {
+            post.published_at = date;
+        }
+        let status = match self.status {
+            Some(PostStatus::Trash) | None => post.status,
+            Some(status) => status,
+        };
+        if self.status.is_some() || self.date.is_some() {
+            let (status, date) = settle_status(status, post.published_at);
+            post.status = status;
+            post.published_at = date;
+        }
+        // `edit_post`: the private visibility clears the password.
+        if self.status == Some(PostStatus::Private) {
+            post.password = None;
+        }
+        post
+    }
+}
+
+impl PostTypeData {
+    /// Reads the post row's changes from the validated `input`, checking what refers to other
+    /// rows: an author that does not exist is ignored, and so is a parent that is not a post of
+    /// this type; a parent that would make a loop is none, as
+    /// `wp_check_post_hierarchy_for_loops` breaks it.
+    async fn changes(
+        &self,
+        db: &Database,
+        stored: &Post,
+        input: &Row,
+        offset: FixedOffset,
+    ) -> Result<Changes, Error> {
+        let id = stored.id;
+        let text = |key: &str| input.get(key).map(|v| text_of(v).unwrap_or_default());
+        let mut changes = Changes::default();
+        if self.title {
+            changes.title = text(TITLE);
+        }
+        // The slug the form showed is no change: a trashed post's `__trashed` slug sent back
+        // unchanged does not replace the slug its restore brings back. A changed slug goes
+        // through the save's slug rules (sanitized, made unique once published), as the REST
+        // API's `slug` does.
+        changes.slug = text(SLUG).filter(|slug| *slug != stored.slug);
+        if self.editor {
+            changes.content = text(CONTENT);
+        }
+        if self.excerpt {
+            changes.excerpt = text(EXCERPT);
+        }
+        if self.author
+            && let Some(author) = input.get(AUTHOR).and_then(id_of)
+        {
+            let found: i64 = raw::fetch_scalar(
+                db,
+                "SELECT COUNT(*) FROM users WHERE id = ?",
+                &[author.into()],
+            )
+            .await?;
+            // A blank or unknown author keeps the post's: a post always has one.
+            if found > 0 {
+                changes.author = Some(author);
+            }
+        }
+        if self.has_parent()
+            && let Some(value) = input.get(PARENT)
+        {
+            let parent = match id_of(value) {
+                Some(parent) => self.post(db, parent).await?.map(|p| p.id),
+                None => None,
+            };
+            changes.parent = Some(loop_free_parent(db, id, parent).await?);
+        }
+        if self.page_attributes
+            && let Some(value) = input.get(MENU_ORDER)
+        {
+            changes.menu_order = Some(value.as_i64().map_or(0, |n| {
+                n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+            }));
+        }
+        if let Some(status) = input.get(STATUS).and_then(Value::as_str) {
+            changes.status = STATUSES
+                .iter()
+                .map(|(s, _)| *s)
+                .find(|s| s.as_str() == status);
+        }
+        if let Some(value) = input.get(DATE) {
+            changes.date = Some(value.as_str().and_then(|t| utc_from_local(t, offset)));
+        }
+        if let Some(value) = input.get(PASSWORD) {
+            changes.password = Some(text_of(value).filter(|p| !p.is_empty()));
+        }
+        Ok(changes)
+    }
+
+    /// Saves `changes` on post `id` (read as `stored`), as the last write: tried again on a
+    /// post another save changed meanwhile. A save that changes the title, content or excerpt of
+    /// a type with `revisions` records a revision, as `wp_save_post_revision` does; any other is
+    /// a plain save. Returns the saved post.
+    async fn save(
+        &self,
+        db: &Database,
+        mut stored: Post,
+        changes: &Changes,
+    ) -> Result<Post, Error> {
+        for _ in 0..MAX_ATTEMPTS {
+            let post = changes.apply(&stored);
+            let revised = post.title != stored.title
+                || post.content != stored.content
+                || post.excerpt != stored.excerpt;
+            if !(self.revisions && revised) {
+                let mut post = post;
+                post.save(db).await?;
+                return Ok(post);
+            }
+            match save_revision(db, &post, stored.modified_at).await {
+                Ok(_) => return self.post(db, post.id).await?.ok_or_else(not_found),
+                Err(SaveError::Conflict { .. }) => {
+                    stored = self.post(db, stored.id).await?.ok_or_else(not_found)?;
+                }
+                Err(SaveError::NotFound { .. } | SaveError::IsRevision { .. }) => {
+                    return Err(not_found());
+                }
+                Err(SaveError::Database(e)) => return Err(e),
+            }
+        }
+        log::error!(
+            "Post {} changed under {MAX_ATTEMPTS} saves in a row; the admin's save gave up.",
+            stored.id
+        );
+        Err(Error::Database(sqlx::Error::Protocol(format!(
+            "post {} kept changing during the save",
+            stored.id
+        ))))
+    }
+
+    /// Ruling R123: keeps the stored references the form could not show. [`RuntimeData::options`]
+    /// does not know which post the form edits, so a stored term, parent, author or field
+    /// group reference that is not among the bounded choices (past [`MAX_OPTIONS`], or a trashed
+    /// parent) shows unselected and comes back blank. As WordPress's dropdowns add the selected
+    /// value (`include_selected`), such a value is kept: a relationship's new list is the ids
+    /// sent and the stored ids outside the choices; a single reference sent blank keeps its
+    /// stored value when that value is not a choice. A value that is a choice can still be
+    /// cleared. Rewrites `input` before the save.
+    async fn keep_unshown(
+        &self,
+        db: &Database,
+        stored: &Post,
+        input: &mut Row,
+    ) -> Result<(), Error> {
+        let mut singles: Vec<(String, Option<String>)> = Vec::new();
+        let mut lists: Vec<(String, Vec<String>)> = Vec::new();
+        if self.author && input.contains_key(AUTHOR) {
+            singles.push((AUTHOR.to_owned(), Some(stored.author_id.to_string())));
+        }
+        if self.has_parent() && input.contains_key(PARENT) {
+            let parent = stored.parent_id.filter(|p| *p > 0).map(|p| p.to_string());
+            singles.push((PARENT.to_owned(), parent));
+        }
+        if self.taxonomies.iter().any(|t| input.contains_key(&t.field)) {
+            let terms = self.post_terms(db, &[stored.id], MAX_POST_TERMS).await?;
+            for taxonomy in &self.taxonomies {
+                if input.contains_key(&taxonomy.field) {
+                    let ids = terms
+                        .get(&(stored.id, taxonomy.taxonomy.name.to_string()))
+                        .map(|list| list.iter().map(|(id, _)| id.to_string()).collect())
+                        .unwrap_or_default();
+                    lists.push((taxonomy.field.clone(), ids));
+                }
+            }
+        }
+        let referring: Vec<&CustomField> = self
+            .custom
+            .iter()
+            .filter(|c| c.def.kind.loads_options() && input.contains_key(&c.field))
+            .collect();
+        if !referring.is_empty() {
+            let mut values = self.custom_values(db, stored.id).await?;
+            for custom in referring {
+                let stored = form_value(
+                    &custom.def.kind,
+                    values.remove(&custom.def.name).unwrap_or(Value::Null),
+                );
+                if custom.def.kind == FieldKindDef::Relationship {
+                    let ids = row_ids(&stored).iter().map(i64::to_string).collect();
+                    lists.push((custom.field.clone(), ids));
+                } else {
+                    singles.push((custom.field.clone(), text_of(&stored)));
+                }
+            }
+        }
+        for (field, stored) in singles {
+            let Some(stored) = stored.filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let blank = input
+                .get(&field)
+                .is_none_or(|v| v.is_null() || text_of(v).is_some_and(|t| t.trim().is_empty()));
+            if blank && !self.is_choice(db, &field, &stored).await? {
+                input.insert(field, Value::from(stored));
+            }
+        }
+        for (field, stored) in lists {
+            if stored.is_empty() {
+                continue;
+            }
+            let choices: HashSet<String> = self
+                .choices(db, &field)
+                .await?
+                .into_iter()
+                .map(|(value, _)| value)
+                .collect();
+            let mut ids: Vec<String> = input
+                .get(&field)
+                .map(|v| row_ids(v).iter().map(i64::to_string).collect())
+                .unwrap_or_default();
+            for id in stored {
+                if !choices.contains(&id) && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            input.insert(field, Value::from(json!(ids).to_string()));
+        }
+        Ok(())
+    }
+
+    /// Whether `value` is among the choices the form of `field` shows.
+    async fn is_choice(&self, db: &Database, field: &str, value: &str) -> Result<bool, Error> {
+        Ok(self
+            .choices(db, field)
+            .await?
+            .iter()
+            .any(|(choice, _)| choice == value))
+    }
+
+    /// The writes after the post row, for the keys `input` has: sticky, the featured image, the
+    /// terms and the field group fields; then the scheduled publication.
+    async fn save_extras(&self, db: &Database, post: &Post, input: &Row) -> Result<(), Error> {
+        if self.sticky
+            && let Some(Value::Bool(sticky)) = input.get(STICKY)
+        {
+            // The classic editor's visibility: a password-protected or private post is never
+            // sticky.
+            let protected = post.password.as_deref().is_some_and(|p| !p.is_empty());
+            let sticky = *sticky && !protected && post.status != PostStatus::Private;
+            set_sticky(db, post.id, sticky).await.map_err(meta_error)?;
+        }
+        if self.thumbnail
+            && let Some(value) = input.get(FEATURED_MEDIA)
+        {
+            match id_of(value) {
+                None => {
+                    delete_post_meta(db, post.id, THUMBNAIL_META)
+                        .await
+                        .map_err(meta_error)?;
+                }
+                // `set_post_thumbnail` sets only an attachment; any other id is ignored.
+                Some(media) => {
+                    let is_attachment = Post::query()
+                        .find(db, media)
+                        .await?
+                        .is_some_and(|p| p.post_type == "attachment");
+                    if is_attachment {
+                        set_post_meta(db, post.id, THUMBNAIL_META, &json!(media))
+                            .await
+                            .map_err(meta_error)?;
+                    }
+                }
+            }
+        }
+        for taxonomy in &self.taxonomies {
+            let Some(value) = input.get(&taxonomy.field) else {
+                continue;
+            };
+            let mut ids = row_ids(value);
+            // `wp_insert_post`: a post with no category gets the default one.
+            if ids.is_empty()
+                && post.post_type == "post"
+                && taxonomy.taxonomy.name == Taxonomy::CATEGORY.name
+                && post.status != PostStatus::AutoDraft
+            {
+                let default = match get_option(db, "default_category").await {
+                    Ok(value) => value.as_ref().and_then(id_of),
+                    Err(MetaError::InvalidJson(_)) => None,
+                    Err(MetaError::Database(e)) => return Err(e),
+                };
+                ids.extend(default);
+            }
+            set_post_terms(db, post, &taxonomy.taxonomy, &ids).await?;
+        }
+        for custom in &self.custom {
+            let Some(value) = input.get(&custom.field) else {
+                continue;
+            };
+            let name = &custom.def.name;
+            set_post_meta(db, post.id, name, &meta_value(&custom.def.kind, value))
+                .await
+                .map_err(meta_error)?;
+            set_post_meta(db, post.id, &format!("_{name}"), &json!(custom.def.key))
+                .await
+                .map_err(meta_error)?;
+        }
+        sync_publication(db, post).await.map_err(scheduler_error)
+    }
+
+    /// The update of post `id` from the validated `input`; see the [module](self).
+    async fn update_post(&self, db: &Database, id: i64, input: Row) -> Result<Row, Error> {
+        let mut stored = self.post(db, id).await?.ok_or_else(not_found)?;
+        let mut input = input;
+        self.keep_unshown(db, &stored, &mut input).await?;
+        let offset = crate::content::gmt_offset(db).await?;
+        let changes = self.changes(db, &stored, &input, offset).await?;
+        let wants_trash = changes.status == Some(PostStatus::Trash);
+        // A trashed post saved with another status leaves the trash first, as a draft. Not one
+        // transaction with the save: `Post::untrash`, `save_revision` and `Post::save` each run
+        // their own. A save that fails after the restore leaves the post restored, as a draft,
+        // with the form's changes lost, as WordPress's two steps (restore, then edit) would.
+        if stored.status == PostStatus::Trash && changes.status.is_some() && !wants_trash {
+            stored.untrash(db).await?;
+        }
+        let mut saved = self.save(db, stored, &changes).await?;
+        self.save_extras(db, &saved, &input).await?;
+        if wants_trash && saved.status != PostStatus::Trash {
+            saved.trash(db).await?;
+            sync_publication(db, &saved)
+                .await
+                .map_err(scheduler_error)?;
+        }
+        let saved = self.post(db, id).await?.ok_or_else(not_found)?;
+        self.row(db, &saved).await
+    }
+
+    /// Trashes post `id`, or deletes a trashed one for good. Returns how many posts went: 0 when
+    /// no post of this type has the id.
+    async fn delete_post(&self, db: &Database, id: i64) -> Result<u64, Error> {
+        let Some(mut post) = self.post(db, id).await? else {
+            return Ok(0);
+        };
+        if post.status == PostStatus::Trash {
+            return Ok(u64::from(post.delete(db).await?));
+        }
+        post.trash(db).await?;
+        sync_publication(db, &post).await.map_err(scheduler_error)?;
+        Ok(1)
+    }
+}
+
+impl RuntimeData for PostTypeData {
+    fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
+        Box::pin(async move { self.list_page(db, query).await })
+    }
+
+    fn find<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, Option<Row>> {
+        Box::pin(async move {
+            match self.post(db, id).await? {
+                Some(post) => Ok(Some(self.row(db, &post).await?)),
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// Refuses: a new post is an auto-draft made when the New screen opens
+    /// ([`create_auto_draft`]), which the form then updates, as `post-new.php` does (Ruling
+    /// R116). The panel shows the refusal as a server error.
+    fn create<'a>(&'a self, _db: &'a Database, _input: Row) -> RuntimeFuture<'a, Row> {
+        Box::pin(async {
+            Err(Error::Unsupported {
+                operation: "creating a post from the form (the New screen creates an \
+                            auto-draft with create_auto_draft, and the form updates it)",
+                driver: "Mission Control's post type resources",
+            })
+        })
+    }
+
+    fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
+        Box::pin(async move { self.update_post(db, id, input).await })
+    }
+
+    fn delete<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, u64> {
+        Box::pin(async move { self.delete_post(db, id).await })
+    }
+
+    /// The users for `author`; the type's other posts for `parent` (the post itself among them,
+    /// since the choices do not know which post the form edits: choosing it saves no parent);
+    /// the terms for a taxonomy field; and for a field group field, the users, the posts of its
+    /// `post_type` setting (any type when unset), or the terms of its `taxonomy` setting.
+    fn options<'a>(
+        &'a self,
+        db: &'a Database,
+        field: &'a str,
+    ) -> RuntimeFuture<'a, Vec<(String, String)>> {
+        Box::pin(async move { self.choices(db, field).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_map_to_ignite_names() {
+        assert_eq!(
+            custom_field_name("field_65a1B-2").as_deref(),
+            Some("field_65a1b_2")
+        );
+        assert_eq!(custom_field_name("field_x").as_deref(), Some("field_x"));
+        assert_eq!(
+            custom_field_name(&format!("field_{}", "a".repeat(60))),
+            None
+        );
+        assert_eq!(custom_field_name("1field"), None);
+    }
+
+    #[test]
+    fn dates_are_stored_as_acf_stores_them() {
+        let stored = meta_value(&FieldKindDef::Date, &json!("2026-11-15"));
+        assert_eq!(stored, json!("20261115"));
+        assert_eq!(form_value(&FieldKindDef::Date, stored), json!("2026-11-15"));
+    }
+
+    #[test]
+    fn structured_values_are_stored_as_json() {
+        let kind = FieldKindDef::Relationship;
+        let stored = meta_value(&kind, &json!("[\"3\",\"5\"]"));
+        assert_eq!(stored, json!(["3", "5"]));
+        assert_eq!(form_value(&kind, stored), json!("[\"3\",\"5\"]"));
+        let image = meta_value(&FieldKindDef::Image, &json!("12"));
+        assert_eq!(image, json!(12));
+        assert_eq!(form_value(&FieldKindDef::Image, image), json!("12"));
+    }
+
+    #[test]
+    fn local_times_round_trip() {
+        let offset = FixedOffset::east_opt(2 * 3600).unwrap();
+        let utc = utc_from_local("2026-03-01 12:00:00", offset).unwrap();
+        assert_eq!(utc.to_string(), "2026-03-01 10:00:00");
+        assert_eq!(local_text(utc, offset), "2026-03-01 12:00:00");
+    }
+}

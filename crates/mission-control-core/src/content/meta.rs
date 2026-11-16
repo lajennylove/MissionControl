@@ -657,6 +657,28 @@ pub async fn get_option(db: &Database, name: &str) -> Result<Option<Value>, Meta
     OPTIONS.get(&mut &*db, 0, name).await
 }
 
+/// The site's offset from UTC: the `gmt_offset` option, in hours (a JSON number or numeric
+/// text), as WordPress's date functions read it. An unset option, one that is not a number or not
+/// JSON, and an offset of a day or more are UTC. The REST API, the front end and the admin's post
+/// type screens all read it here.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub(crate) async fn gmt_offset(db: &Database) -> Result<chrono::FixedOffset, Error> {
+    let hours = match get_option(db, "gmt_offset").await {
+        Ok(Some(Value::Number(n))) => n.as_f64(),
+        Ok(Some(Value::String(s))) => s.trim().parse().ok(),
+        Ok(_) | Err(MetaError::InvalidJson(_)) => None,
+        Err(MetaError::Database(e)) => return Err(e),
+    };
+    let utc = || chrono::FixedOffset::east_opt(0).expect("zero is a valid offset");
+    Ok(
+        chrono::FixedOffset::east_opt((hours.unwrap_or(0.0) * 3600.0).round() as i32)
+            .unwrap_or_else(utc),
+    )
+}
+
 /// Sets option `name` to `value`, replacing the stored value, as `update_option` does. A new
 /// option gets the column's default `autoload`; a replaced one keeps its own.
 ///

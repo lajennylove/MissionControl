@@ -129,9 +129,9 @@ impl Site {
                 );
                 PermalinkStructure::plain()
             });
-        let hours = number(&option(db, "gmt_offset").await?).unwrap_or(0.0);
-        let offset = FixedOffset::east_opt((hours * 3600.0).round() as i32)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero is a valid offset"));
+        let offset = crate::content::gmt_offset(db)
+            .await
+            .map_err(|e| database_error(&e))?;
         let sticky = match option(db, "sticky_posts").await? {
             Some(Value::Array(ids)) => ids.iter().filter_map(id_of).collect(),
             _ => Vec::new(),
@@ -174,15 +174,6 @@ fn text(value: &Option<Value>) -> String {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         _ => String::new(),
-    }
-}
-
-/// An option's number, from a JSON number or a numeric string.
-fn number(value: &Option<Value>) -> Option<f64> {
-    match value {
-        Some(Value::Number(n)) => n.as_f64(),
-        Some(Value::String(s)) => s.trim().parse().ok(),
-        _ => None,
     }
 }
 

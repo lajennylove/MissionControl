@@ -40,7 +40,6 @@ pub use kses::{
     MAX_NESTING, PostFields, kses_data, kses_post, kses_post_fields, kses_title,
     safecss_filter_attr, sanitize_text_field,
 };
-pub(crate) use meta::put_post_meta_in;
 pub use meta::{
     MetaError, delete_option, delete_post_meta, delete_term_meta, delete_user_meta, get_option,
     get_post_meta, get_post_meta_values, get_term_meta, get_user_meta, set_option, set_option_raw,
@@ -48,6 +47,7 @@ pub use meta::{
     set_user_meta_raw,
 };
 pub(crate) use meta::{MetaTable, delete_meta, meta_rows, set_meta, set_meta_values};
+pub(crate) use meta::{gmt_offset, put_post_meta_in};
 pub use permalink::{
     PermalinkContext, PermalinkError, PermalinkStructure, Segment, Tag, page_ancestors, permalink,
 };

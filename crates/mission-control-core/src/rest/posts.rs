@@ -55,6 +55,9 @@ mod query;
 mod write;
 
 pub(crate) use query::{collection_args, relevance};
+pub(crate) use write::{
+    loop_free_parent, set_post_terms, set_sticky, settle_status, sync_publication,
+};
 
 use std::borrow::Cow;
 use std::sync::{RwLock, RwLockReadGuard};

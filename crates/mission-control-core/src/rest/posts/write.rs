@@ -2,19 +2,19 @@
 //! with their permission checks and `prepare_item_for_database`.
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime};
-use orbit_orm::{Model, raw};
+use orbit_orm::{Database, Error, Model, raw};
 use serde_json::{Map, Value, json};
 
 use super::prepare::{self, ItemOptions};
 use super::{PostType, PostsController, RestTaxonomy, invalid_id};
 use crate::content::{
-    MetaError, NewPost, Post, PostFields, PostStatus, SaveError, delete_post_meta, now,
-    save_revision, set_option, set_post_meta,
+    MetaError, NewPost, Post, PostFields, PostStatus, SaveError, Taxonomy, delete_post_meta,
+    get_option, now, save_revision, set_option, set_post_meta,
 };
 use crate::content::{PUBLISH_FUTURE_POST, terms_by_term_id};
 use crate::rest::meta::{MetaObject, MetaUpdate};
 use crate::rest::params::{Params, Reader, as_integer};
-use crate::rest::shared::{Context, Fields, Site, database_error, id_of, option};
+use crate::rest::shared::{Context, Fields, Site, database_error, id_of};
 use crate::rest::{RestError, RestResponse};
 use crate::scheduler;
 use crate::theme::page_template_name;
@@ -343,12 +343,13 @@ async fn check_references(
 }
 
 /// The parent to store for `post_id`: `parent`, or none when `parent` is the post or one of its
-/// descendants, as `wp_check_post_hierarchy_for_loops` breaks a loop.
-async fn loop_free_parent(
-    ctl: &PostsController<'_>,
+/// descendants, as `wp_check_post_hierarchy_for_loops` breaks a loop. Shared with the admin's
+/// post type resources ([`crate::types::resource`]).
+pub(crate) async fn loop_free_parent(
+    db: &Database,
     post_id: i64,
     parent: Option<i64>,
-) -> Result<Option<i64>, RestError> {
+) -> Result<Option<i64>, Error> {
     let mut next = parent;
     for _ in 0..64 {
         let Some(id) = next else {
@@ -357,11 +358,7 @@ async fn loop_free_parent(
         if id == post_id {
             return Ok(None);
         }
-        next = Post::query()
-            .find(ctl.db, id)
-            .await
-            .map_err(|e| database_error(&e))?
-            .and_then(|p| p.parent_id);
+        next = Post::query().find(db, id).await?.and_then(|p| p.parent_id);
     }
     Ok(parent)
 }
@@ -372,8 +369,8 @@ const FUTURE_GRACE: Duration = Duration::seconds(60);
 /// The status and date to save, as `wp_insert_post` settles them: a published, scheduled or
 /// private post gets a date (now) when it has none; a `publish` post dated a minute or more ahead
 /// becomes `future` (its publication is scheduled after the save), and a `future` post whose date
-/// is not ahead becomes `publish`.
-fn settle_status(
+/// is not ahead becomes `publish`. Shared with the admin's post type resources.
+pub(crate) fn settle_status(
     status: PostStatus,
     date: Option<NaiveDateTime>,
 ) -> (PostStatus, Option<NaiveDateTime>) {
@@ -416,24 +413,9 @@ async fn write_extras(
     let db = ctl.db;
     let meta_error = |e: MetaError| database_error(&e);
     if ctl.post_type.has_sticky() && (creating || changes.sticky.is_some()) {
-        let sticky = changes.sticky.unwrap_or(false);
-        // Read again just before the write, so a post made sticky since the request began is
-        // kept.
-        let mut list: Vec<i64> = match option(db, "sticky_posts").await? {
-            Some(Value::Array(ids)) => ids.iter().filter_map(id_of).collect(),
-            _ => Vec::new(),
-        };
-        let had = list.contains(&post.id);
-        if sticky && !had {
-            list.push(post.id);
-        } else if !sticky && had {
-            list.retain(|id| *id != post.id);
-        }
-        if sticky != had {
-            set_option(db, "sticky_posts", &json!(list))
-                .await
-                .map_err(meta_error)?;
-        }
+        set_sticky(db, post.id, changes.sticky.unwrap_or(false))
+            .await
+            .map_err(meta_error)?;
     }
     if let Some(media) = changes.featured_media {
         if media == 0 {
@@ -474,22 +456,58 @@ async fn write_extras(
         terms.push((categories.clone(), vec![default]));
     }
     for (taxonomy, ids) in terms {
-        let known = terms_by_term_id(db, &taxonomy.taxonomy, &ids)
-            .await
-            .map_err(|e| database_error(&e))?;
-        let tt_ids: Vec<i64> = known.iter().map(|t| t.term_taxonomy_id).collect();
-        post.sync_terms(db, &taxonomy.taxonomy, &tt_ids)
+        set_post_terms(db, post, &taxonomy.taxonomy, &ids)
             .await
             .map_err(|e| database_error(&e))?;
     }
-    // `_future_post_hook`: one event for a scheduled post, none for any other.
-    scheduler::unschedule(db, PUBLISH_FUTURE_POST, &post.id)
+    sync_publication(db, post)
         .await
         .map_err(|e| database_error(&e))?;
+    Ok(())
+}
+
+/// Makes post `post_id` sticky or not, in the `sticky_posts` option, as `stick_post` and
+/// `unstick_post` do. The option is read just before the write, so a post made sticky since the
+/// request began is kept; a value that is not a list of ids reads as none. Shared with the
+/// admin's post type resources.
+pub(crate) async fn set_sticky(db: &Database, post_id: i64, sticky: bool) -> Result<(), MetaError> {
+    let mut list: Vec<i64> = match get_option(db, "sticky_posts").await {
+        Ok(Some(Value::Array(ids))) => ids.iter().filter_map(id_of).collect(),
+        Ok(_) | Err(MetaError::InvalidJson(_)) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let had = list.contains(&post_id);
+    if sticky && !had {
+        list.push(post_id);
+    } else if !sticky && had {
+        list.retain(|id| *id != post_id);
+    }
+    if sticky != had {
+        set_option(db, "sticky_posts", &json!(list)).await?;
+    }
+    Ok(())
+}
+
+/// Makes the terms of `taxonomy` whose `term_id`s are `term_ids` the post's terms there, as
+/// `wp_set_object_terms` does: an id that is not a term of the taxonomy is skipped. Shared with
+/// the admin's post type resources.
+pub(crate) async fn set_post_terms(
+    db: &Database,
+    post: &Post,
+    taxonomy: &Taxonomy,
+    term_ids: &[i64],
+) -> Result<(), Error> {
+    let known = terms_by_term_id(db, taxonomy, term_ids).await?;
+    let tt_ids: Vec<i64> = known.iter().map(|t| t.term_taxonomy_id).collect();
+    post.sync_terms(db, taxonomy, &tt_ids).await
+}
+
+/// `_future_post_hook`: one publication event for a scheduled post, none for any other. Shared
+/// with the admin's post type resources.
+pub(crate) async fn sync_publication(db: &Database, post: &Post) -> Result<(), scheduler::Error> {
+    scheduler::unschedule(db, PUBLISH_FUTURE_POST, &post.id).await?;
     if let (PostStatus::Future, Some(date)) = (post.status, post.published_at) {
-        scheduler::schedule_single(db, date, PUBLISH_FUTURE_POST, &post.id)
-            .await
-            .map_err(|e| database_error(&e))?;
+        scheduler::schedule_single(db, date, PUBLISH_FUTURE_POST, &post.id).await?;
     }
     Ok(())
 }
@@ -688,7 +706,9 @@ pub(super) async fn update(
             .unwrap_or_else(|| site.sticky.contains(&post.id));
         check_sticky_password(sticky, post.password.as_deref().unwrap_or(""))?;
         if let Some(parent) = changes.parent {
-            post.parent_id = loop_free_parent(ctl, id, parent).await?;
+            post.parent_id = loop_free_parent(ctl.db, id, parent)
+                .await
+                .map_err(|e| database_error(&e))?;
         }
         if let Some(order) = changes.menu_order {
             post.menu_order = order;

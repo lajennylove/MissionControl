@@ -488,13 +488,7 @@ impl Site {
             Some(n) if n >= 1.0 => Some(n as i64),
             Some(_) => None,
         };
-        let hours = option(db, "gmt_offset")
-            .await?
-            .as_ref()
-            .and_then(number)
-            .unwrap_or(0.0);
-        let offset = FixedOffset::east_opt((hours * 3600.0).round() as i32)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero is a valid offset"));
+        let offset = crate::content::gmt_offset(db).await?;
         let base = async |name| -> Result<String, Error> {
             Ok(option(db, name)
                 .await?
