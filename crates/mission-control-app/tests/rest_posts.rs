@@ -5,7 +5,7 @@
 //! Users sign in with application passwords; their roles come from an in-memory provider.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -228,14 +228,16 @@ fn mission_control_now() -> NaiveDateTime {
 }
 
 fn config() -> Config {
+    config_with_themes(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes"))
+}
+
+fn config_with_themes(themes_dir: PathBuf) -> Config {
     Config {
         database_url: "unused: the database is passed in".to_owned(),
         secret_key: "unused".to_owned(),
         debug: false,
         upload_max_bytes: 1024,
-        themes_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../themes")
-            .to_path_buf(),
+        themes_dir,
         uploads_dir: std::env::temp_dir().join("mc-unused-uploads"),
         plugins_dir: std::env::temp_dir().join("mc-unused-plugins"),
         environment: Environment::Local,
@@ -266,6 +268,11 @@ async fn new_user(db: &Database, name: &str) -> (i64, String) {
 /// A site with an administrator, an editor, two authors and a contributor, pretty permalinks
 /// and the address [`HOME`].
 async fn site() -> Site {
+    site_with(config()).await
+}
+
+/// [`site`] with the configuration `config`.
+async fn site_with(config: Config) -> Site {
     let test = database().await;
     let db = test.db();
     create_users_table(db).await;
@@ -311,7 +318,7 @@ async fn site() -> Site {
         user_roles: Some(user_roles),
         ..AppOptions::default()
     };
-    let client = Client::tracked(rocket_with_options(config(), options))
+    let client = Client::tracked(rocket_with_options(config, options))
         .await
         .expect("the app ignites");
     Site {
@@ -2126,4 +2133,71 @@ async fn the_site_starts_when_the_type_tables_cannot_be_read() {
         .expect("the app ignites without the stored types");
     let response = client.get("/mc-json/mc/v2/posts").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
+}
+
+/// Ruling R124: the REST API's `template` is one the active theme declares for pages (matched by
+/// name, so `wide.php` is `wide`), `default` or empty; a template file the theme has but does not
+/// declare is refused, as WordPress's `check_template` refuses one `get_page_templates` lacks. An
+/// unchanged stored value is not checked.
+#[rocket::async_test]
+async fn a_template_is_one_the_theme_declares_for_pages() {
+    let themes = tempfile::tempdir().unwrap();
+    let theme = themes.path().join("default");
+    std::fs::create_dir_all(theme.join("templates")).unwrap();
+    std::fs::write(theme.join("index.propel"), "index").unwrap();
+    std::fs::write(theme.join("templates/wide.propel"), "wide").unwrap();
+    std::fs::write(theme.join("templates/plain.propel"), "plain").unwrap();
+    std::fs::write(
+        theme.join("theme.toml"),
+        "name = \"Test\"\n[templates]\n\"templates/wide\" = \"Full width\"\n",
+    )
+    .unwrap();
+    let site = site_with(config_with_themes(themes.path().to_path_buf())).await;
+
+    for template in ["templates/wide", "templates/wide.php", "default", ""] {
+        let (status, json) = body(
+            site.post(
+                "/mc-json/mc/v2/pages",
+                Some("editor"),
+                json!({"title": "Templated", "template": template}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, Status::Created, "{template}: {json}");
+    }
+    for (uri, template) in [
+        // A file the theme has, but does not declare.
+        ("/mc-json/mc/v2/pages", "templates/plain"),
+        // Page templates are for pages.
+        ("/mc-json/mc/v2/posts", "templates/wide"),
+    ] {
+        assert_error(
+            site.post(
+                uri,
+                Some("editor"),
+                json!({"title": "x", "template": template}),
+            )
+            .await,
+            Status::BadRequest,
+            "rest_invalid_param",
+        )
+        .await;
+    }
+    // An imported value the theme does not declare stays when it is sent back unchanged.
+    let page = site.published("editor", "page", "Imported").await;
+    set_post_meta(site.db(), page.id, "_wp_page_template", &json!("old.php"))
+        .await
+        .unwrap();
+    let (status, json) = body(
+        site.post(
+            &format!("/mc-json/mc/v2/pages/{}", page.id),
+            Some("editor"),
+            json!({"title": "Imported, edited", "template": "old.php"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["template"], json!("old.php"));
 }

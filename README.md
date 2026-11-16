@@ -31,6 +31,32 @@ Both ways start in setup mode when there is no `.env`: open `/mc-admin/install.p
 - **systemd:** `deploy/mission-control.service` (`Restart=always`, `RestartSec=2`, runs as the `mission-control` user, read-only file system except the install folder). The binary is installed root-owned at `/usr/local/bin/mission-control-app`; only the install folder is writable for the service. The install steps are in the file's header. CI runs `systemd-analyze verify` on it.
 - **Docker:** `docker build -t mission-control .`, then `docker run -d --restart unless-stopped -p 8000:8000 -v mission-control-data:/data mission-control`, or `docker compose -f deploy/docker-compose.yml up -d`. `/data` is the install folder (`.env`, `database.sqlite`, `uploads/`, `themes/`); the default theme is copied there on first start. The container runs as uid 10001, so a bind mount must be writable for it (`chown 10001:10001 ./data`). Setup mode is open to the first visitor, so finish setup right after the first start, or publish the port on loopback only until then (`-p 127.0.0.1:8000:8000`, as the Compose file does). To pass settings instead of using the wizard, use `--env-file` with a git-ignored file, not `-e`. The image listens on `0.0.0.0:8000` (`ROCKET_ADDRESS`, `ROCKET_PORT`); put a reverse proxy with TLS in front.
 
+## Admin
+
+The admin is Ignite's panel at `/mc-admin`: sign in at `/mc-admin/login`. Posts are at `/mc-admin/post`, pages at `/mc-admin/page`, and each custom post type the admin shows at `/mc-admin/<post type>`. Ignite also answers a health check at `/up`.
+
+- **MySQL or MariaDB only, for now.** Ignite 0.5.0 signs users in and keeps sessions on MySQL and MariaDB only. On SQLite and PostgreSQL, `/mc-admin` and everything under it answer a 503 page that says so; the site and the REST API work as usual.
+- **One database.** Ignite reads `DATABASE_URL` and `IGNITE_SECRET_KEY` from the environment or `.env` itself. They must be the site's: when `DATABASE_URL` is not the site's database, the admin answers the 503 page and the log says why.
+- **Who can use the post and page screens:** administrators and editors. Roles are Ignite roles named after WordPress's (`administrator`, `editor`, `author`, `contributor`, `subscriber`; Ignite's `super-admin` counts as an administrator), created when the site starts. Authors, contributors and subscribers can sign in and reach the dashboard and their profile, but not the post screens yet; they can write through the REST API with an application password.
+- **Page templates:** a theme lists its page templates in `theme.toml`, and the page form offers them with "Default template":
+
+  ```toml
+  [templates]
+  "templates/wide" = "Full width"   # templates/wide.propel
+  ```
+
+### The first administrator (MySQL or MariaDB)
+
+`mission-control-app ignite <command>` runs Ignite's command line with the site's settings, as Laravel's `artisan` does. Run it in the install folder, where `.env` is, after the installer has finished:
+
+```sh
+mission-control-app ignite role create administrator   # only before the site's first start
+mission-control-app ignite user create --email owner@example.com --name "Site Owner"
+mission-control-app ignite user role add owner@example.com administrator
+```
+
+`user create` asks for the password twice without echoing it (or reads it from standard input with `--password-stdin`). The site creates the five roles each time it starts, so `role create` is only needed before the first start. `mission-control-app ignite` with no command lists the others (`user roles`, `user password`, `user disable`, ...). The installer has already run Ignite's migrations, so `ignite migrate` has nothing to do.
+
 ## License
 
 GPL-2.0-or-later, like WordPress. See `LICENSE`. Copyright (c) 2026 Jenny Martinez.

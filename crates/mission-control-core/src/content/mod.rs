@@ -21,6 +21,7 @@
 //! post.sync_terms(&db, &Taxonomy::CATEGORY, &[news.term_taxonomy_id]).await?;
 //! ```
 
+mod auto_drafts;
 mod future;
 mod kses;
 mod meta;
@@ -31,6 +32,10 @@ mod shortcode;
 mod slug;
 mod taxonomy;
 
+pub use auto_drafts::{
+    AUTO_DRAFT_MAX_AGE, DELETE_AUTO_DRAFTS, MAX_AUTO_DRAFTS_PER_RUN, delete_old_auto_drafts,
+    register_delete_auto_drafts, schedule_auto_draft_deletion,
+};
 pub use future::{
     PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
     schedule_future_post,

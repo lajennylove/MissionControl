@@ -23,7 +23,8 @@ pub use hierarchy::templates_for;
 pub use loader::{LocatedTemplate, Theme, ThemeError, ThemeLoader, load_theme};
 pub(crate) use manifest::describe as describe_toml_error;
 pub use manifest::{
-    MANIFEST_FILE, MAX_AREA_ID, MAX_MANIFEST_BYTES, Manifest, MenuLocation, Sidebar, Support,
+    MANIFEST_FILE, MAX_AREA_ID, MAX_MANIFEST_BYTES, MAX_TEMPLATE_NAME, Manifest, MenuLocation,
+    PageTemplate, Sidebar, Support,
 };
 pub use menus::{
     MAX_MENU_DEPTH, MenuError, MenuItemObject, NAV_MENU_ITEM, NAV_MENU_LOCATIONS, NavMenu,

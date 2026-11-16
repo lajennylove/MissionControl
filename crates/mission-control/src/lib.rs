@@ -37,7 +37,8 @@
 //! limiter (`Arc<KsesLimiter>`), the uploads' storage (`Arc<dyn Storage>`, on the local disk in
 //! the uploads folder, `MC_UPLOADS_DIR`), the image size registry (`Arc<ImageSizes>`, WordPress's
 //! default sizes), the plugins (`Arc<Plugins>`) and the front end (`Arc<Frontend>`). The scheduler's loop starts at liftoff,
-//! once the server listens, and runs due events every minute.
+//! once the server listens, and runs due events every minute: scheduled posts, and the daily
+//! deletion of auto-drafts older than 7 days.
 //!
 //! The REST API serves discovery at `/mc-json/` and `/?rest_route=/`, posts, pages and every
 //! post type in [`PostTypes`] at `/mc-json/mc/v2/{rest_base}`, categories, tags and every
@@ -48,20 +49,32 @@
 //! is built registers the routes again (`register_routes`), so discovery lists them. Uploads are served at `/mc-content/uploads/`, as data
 //! (`nosniff`, a sandbox policy, the stored type). REST clients sign in with
 //! application passwords; routes take the [`RestAuth`] or [`RestUser`] guard for the current
-//! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`] (none: no
-//! role). Not mounted yet: the admin (Ignite).
+//! user, whose roles come from the [`UserRoles`] provider given in [`AppOptions`], by default
+//! Ignite's roles ([`IgniteUserRoles`], Ruling R121).
+//!
+//! The admin is Ignite's panel at [`ADMIN_PATH`] (`/mc-admin`), with the screens of every post
+//! type the admin shows; on a MySQL or MariaDB database only, for now: elsewhere `/mc-admin`
+//! answers a 503 page (Ruling R119). Ignite reads `DATABASE_URL` and `IGNITE_SECRET_KEY` from the
+//! environment (and `.env`), so they must be the configuration's. See the `admin` module's
+//! documentation in the source for what is mounted and who may use it.
 
+mod admin;
 mod front;
 mod rest;
 mod uploads;
 
+pub use admin::ADMIN_PATH;
 pub use rest::auth::{RestAuth, RestUser};
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use admin::AdminMode;
 use mission_control_core::config::Config;
-use mission_control_core::content::{Shortcodes, register_publish_future_post};
+use mission_control_core::content::{
+    Shortcodes, register_delete_auto_drafts, register_publish_future_post,
+    schedule_auto_draft_deletion,
+};
 use mission_control_core::front::{Frontend, load_active_theme};
 use mission_control_core::hooks::Hooks;
 use mission_control_core::media::{ImageSizes, LocalStorage, Storage};
@@ -73,7 +86,7 @@ use mission_control_core::rest::terms::Taxonomies;
 use mission_control_core::rest::{KsesLimiter, RestRoutes};
 use mission_control_core::scheduler::Scheduler;
 use mission_control_core::types::Registry;
-use mission_control_core::users::{NoUserRoles, UserRoles};
+use mission_control_core::users::{IgniteUserRoles, UserRoles};
 use orbit_orm::Database;
 use rocket::fairing::AdHoc;
 use rocket::fs::{FileServer, Options};
@@ -99,10 +112,14 @@ const ASSET_RANK: isize = 10;
 pub struct AppOptions {
     /// A database the caller has opened already, such as a test database. `None` opens the one
     /// at `config.database_url`.
+    ///
+    /// The admin's panel (Ignite) opens its own connection from `DATABASE_URL` in the
+    /// environment (or `.env`), not from this value: it is mounted only when that is
+    /// `config.database_url`, which must then name this same database. Otherwise `/mc-admin`
+    /// answers a 503 page and the log says why.
     pub database: Option<Arc<Database>>,
-    /// Where signed-in users' roles come from. `None` gives every user no role
-    /// ([`NoUserRoles`]), so a signed-in user can do nothing a visitor cannot, until Ignite's
-    /// roles provide them (Task 8.2b).
+    /// Where signed-in users' roles come from, for the REST API and the admin. `None` reads
+    /// them from Ignite's role tables ([`IgniteUserRoles`], Ruling R121).
     pub user_roles: Option<Arc<dyn UserRoles>>,
     /// How many kses filters the REST API runs at once, each on a blocking thread. `None` is
     /// [`KsesLimiter::DEFAULT_CONCURRENCY`].
@@ -170,7 +187,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let auth = rest::auth::AuthSettings {
         environment: config.environment,
         trusted_proxies: config.trusted_proxies.clone(),
-        user_roles: user_roles.unwrap_or_else(|| Arc::new(NoUserRoles)),
+        user_roles: user_roles.unwrap_or_else(|| Arc::new(IgniteUserRoles)),
     };
 
     let types = Types {
@@ -194,7 +211,8 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .mount("/", rest::routes(REST_RANK))
         .mount("/", uploads::routes())
         .mount("/", rest::auth::refused_routes())
-        .register("/", rest::auth::catchers())
+        .register("/mc-json", rest::auth::catchers(&rest::auth::CATCHER_CODES))
+        .register("/", rest::auth::catchers(&[403]))
         .attach(rest::auth::RestAuthFairing)
         .attach(AdHoc::try_on_ignite("Mission Control", move |rocket| {
             ignite(rocket, config, db, hooks, types)
@@ -305,9 +323,30 @@ async fn ignite(
             return Err(rocket);
         }
     };
+    // The admin, with the stored and the plugins' post types. Ignite registers its own 401 and
+    // 500 catchers at `/`; without the panel, the REST catchers take those too.
+    let rocket = match admin::admin_mode(&config, &db) {
+        AdminMode::Panel => {
+            admin::mount_panel(
+                rocket,
+                &db,
+                Arc::clone(&types.registry),
+                theme.page_templates(),
+            )
+            .await
+        }
+        AdminMode::Unavailable(reason) => rocket
+            .register("/", rest::auth::catchers(&[401, 500]))
+            .mount("/", admin::unavailable_routes(reason)),
+    };
 
     let scheduler = Arc::new(Scheduler::new(Arc::clone(&db), Arc::clone(&hooks)));
     register_publish_future_post(&scheduler);
+    // WordPress's daily `wp_scheduled_auto_draft_delete` (Ruling R125).
+    register_delete_auto_drafts(&scheduler);
+    if let Err(e) = schedule_auto_draft_deletion(&scheduler).await {
+        log::error!("The daily deletion of old auto-drafts was not scheduled: {e}");
+    }
 
     let frontend = Frontend::new(Arc::clone(&db), hooks, theme);
     let mut rocket = rocket.mount("/", front::routes(FRONT_RANK));

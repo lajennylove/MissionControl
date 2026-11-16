@@ -16,8 +16,8 @@
 //!
 //! # The form
 //!
-//! The resource's slug is the post type's slug, so `post` is served at `/admin/post` and `book`
-//! at `/admin/book`; its title and singular are the labels `name` and `singular_name`. Its
+//! The resource's slug is the post type's slug, so `post` is served at `/mc-admin/post` and `book`
+//! at `/mc-admin/book`; its title and singular are the labels `name` and `singular_name`. Its
 //! fields, in WordPress's names where the REST API has one:
 //!
 //! | `supports`        | field            | kind                                         |
@@ -28,6 +28,7 @@
 //! | `excerpt`         | `excerpt`        | textarea                                     |
 //! | `author`          | `author`         | user: who may edit the type's posts (`post_author_meta_box`), read from Ignite's roles |
 //! | `page-attributes` | `parent`         | post object (a hierarchical type only)       |
+//! | `page` only       | `template`       | select: "Default template" and the theme's page templates, when it has any (`_wp_page_template`) |
 //! | `page-attributes` | `menu_order`     | number                                       |
 //! | `thumbnail`       | `featured_media` | image (`_thumbnail_id`)                      |
 //! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash |
@@ -66,7 +67,8 @@
 //!   `wp_save_post_revision` does (Ruling R118).
 //! - Saving a trashed post with another status takes it out of the trash first (`draft`, as
 //!   WordPress 5.6 and later restore), then applies the form. Choosing Trash moves it to the
-//!   trash after the save.
+//!   trash after the save, except on the front page and the posts page, whose Trash needs
+//!   `manage_options` (the form refuses it; the list's Delete, checked by the admin, does not).
 //! - Delete moves a post to the trash; on a trashed post it deletes it permanently, with its
 //!   meta, term relationships and revisions (Ruling R117). The list shows every status but
 //!   `auto-draft`, with a Status column, so trashed posts can be found and restored.
@@ -79,9 +81,19 @@
 //! WordPress's dropdowns add the selected value). Ignite's `options` cannot see the post being
 //! edited, so the form cannot show it (owner item O9).
 //!
-//! Not on the form yet: the page template (Task 6.2, it needs the active theme), comment and
-//! ping status (comments, phase 2), the post format, and the field group rules that depend on
-//! the post (page template, status, user role) and ACF's `hide_on_screen`.
+//! The page templates are the active theme's
+//! ([`Theme::page_templates`](crate::theme::Theme::page_templates)), given to
+//! [`PostTypeResources::with_page_templates`]; as WordPress's Page Attributes box, the Template
+//! select shows only when the theme has some. A stored value is matched by its template name, so
+//! an imported `templates/wide.php` is the theme's `templates/wide`, and is kept as stored while
+//! the form leaves it unchanged. A page whose stored template the theme no
+//! longer has shows "Default template", and its next save stores none, as `wp_insert_post`
+//! resets a template that is not valid. The page set as the posts page still gets the select
+//! (WordPress hides it there): the resource does not know which page the form edits.
+//!
+//! Not on the form yet: comment and ping status (comments, phase 2), the post format, and the
+//! field group rules that depend on the post (page template, status, user role) and ACF's
+//! `hide_on_screen`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -107,6 +119,7 @@ use crate::rest::id_of;
 use crate::rest::posts::{
     loop_free_parent, set_post_terms, set_sticky, settle_status, sync_publication,
 };
+use crate::theme::{PageTemplate, page_template_name};
 use crate::users::users_with_cap;
 
 /// The most rows one list page holds, whatever the list asks for.
@@ -144,6 +157,7 @@ const STATUS: &str = "status";
 const DATE: &str = "date";
 const PASSWORD: &str = "password";
 const STICKY: &str = "sticky";
+const TEMPLATE: &str = "template";
 
 // The columns' keys.
 const COL_TITLE: &str = "col_title";
@@ -153,6 +167,12 @@ const COL_DATE: &str = "col_date";
 
 /// The post meta that holds a post's featured image.
 const THUMBNAIL_META: &str = "_thumbnail_id";
+
+/// The post meta that holds a page's template.
+const TEMPLATE_META: &str = "_wp_page_template";
+
+/// The Template select's value for no template, and its label (`page_template_dropdown`).
+const DEFAULT_TEMPLATE: (&str, &str) = ("default", "Default template");
 
 /// The statuses the form offers, with the names WordPress's status objects give them. `trash`
 /// is offered so a trashed post's form shows its status, and so it can be restored.
@@ -286,6 +306,8 @@ pub struct PostTypeData {
     sticky: bool,
     /// The type's `edit_posts` capability: who may be the author of its posts.
     edit_posts: String,
+    /// The page templates the Template select offers; empty for no select.
+    templates: Vec<PageTemplate>,
     taxonomies: Vec<TaxonomyField>,
     custom: Vec<CustomField>,
 }
@@ -300,8 +322,20 @@ impl PostTypeData {
 /// The resource of the post type `def`: its form, list and rows, as the [module](self)
 /// describes. `registry` gives the custom taxonomies attached to the type and the field groups
 /// that show on it. The resource is a snapshot: build and register it again when a definition
-/// changes ([`PostTypeResources::sync`]).
+/// changes ([`PostTypeResources::sync`]). It has no Template select; see
+/// [`post_type_resource_with_templates`].
 pub fn post_type_resource(def: &PostTypeDef, registry: &Registry) -> RuntimeResource {
+    post_type_resource_with_templates(def, registry, &[])
+}
+
+/// [`post_type_resource`], with `templates` (the active theme's page templates) in the Template
+/// select of `page`, after the parent, as WordPress's Page Attributes box shows it. No select when
+/// `templates` is empty or the type is not `page`.
+pub fn post_type_resource_with_templates(
+    def: &PostTypeDef,
+    registry: &Registry,
+    templates: &[PageTemplate],
+) -> RuntimeResource {
     let slug = def.slug.as_str();
     let supports = |s: Support| def.supports(s);
     let mut data = PostTypeData {
@@ -316,6 +350,11 @@ pub fn post_type_resource(def: &PostTypeDef, registry: &Registry) -> RuntimeReso
         revisions: supports(Support::Revisions),
         sticky: slug == "post",
         edit_posts: def.caps().edit_posts,
+        templates: if slug == "page" {
+            templates.to_vec()
+        } else {
+            Vec::new()
+        },
         taxonomies: Vec::new(),
         custom: Vec::new(),
     };
@@ -341,6 +380,22 @@ pub fn post_type_resource(def: &PostTypeDef, registry: &Registry) -> RuntimeReso
     }
     if data.has_parent() {
         fields.push(field(PARENT, "Parent", FieldKindDef::PostObject, false));
+    }
+    if !data.templates.is_empty() {
+        let choices =
+            std::iter::once((DEFAULT_TEMPLATE.0.to_owned(), DEFAULT_TEMPLATE.1.to_owned()))
+                .chain(
+                    data.templates
+                        .iter()
+                        .map(|t| (t.name.clone(), t.title.clone())),
+                )
+                .collect();
+        fields.push(field(
+            TEMPLATE,
+            "Template",
+            FieldKindDef::Select(choices),
+            false,
+        ));
     }
     if data.page_attributes {
         fields.push(field(MENU_ORDER, "Order", FieldKindDef::Number, false));
@@ -579,6 +634,8 @@ impl std::error::Error for RefusedResource {}
 #[derive(Debug)]
 pub struct PostTypeResources {
     registry: Arc<Registry>,
+    /// The page templates of `page`'s Template select.
+    page_templates: Vec<PageTemplate>,
     /// The slugs this value registered, in order. Held only by synchronous code.
     registered: Mutex<Vec<String>>,
 }
@@ -589,8 +646,29 @@ impl PostTypeResources {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
             registry,
+            page_templates: Vec::new(),
             registered: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Gives `page` a Template select with `templates`, the active theme's page templates
+    /// ([`Theme::page_templates`](crate::theme::Theme::page_templates)), from the next
+    /// [`sync`](Self::sync). A theme switch takes effect at the next start, as the front end's.
+    #[must_use]
+    pub fn with_page_templates(mut self, templates: Vec<PageTemplate>) -> Self {
+        self.page_templates = templates;
+        self
+    }
+
+    /// The definition of `post_type` when this value has registered its resource: the post type
+    /// behind the admin screens at `<mount>/<post_type>`.
+    pub fn post_type(&self, post_type: &str) -> Option<PostTypeDef> {
+        if !self.registered().iter().any(|slug| slug == post_type) {
+            return None;
+        }
+        self.post_types()
+            .into_iter()
+            .find(|def| def.slug == post_type)
     }
 
     /// The post types that get a resource: `post`, `page`, then the registry's in use whose
@@ -625,7 +703,9 @@ impl PostTypeResources {
         registered.clear();
         let mut refused = Vec::new();
         for def in &wanted {
-            match register_runtime(post_type_resource(def, &self.registry)) {
+            let resource =
+                post_type_resource_with_templates(def, &self.registry, &self.page_templates);
+            match register_runtime(resource) {
                 Ok(()) => registered.push(def.slug.clone()),
                 Err(error) => refused.push(RefusedResource {
                     post_type: def.slug.clone(),
@@ -648,6 +728,16 @@ impl PostTypeResources {
         };
         registered.remove(index);
         unregister_runtime(post_type).is_ok()
+    }
+
+    /// Whether `slug` is a post type this value would serve, whose Ignite resource is registered
+    /// by something else: another `PostTypeResources` in the process, or code that took the slug
+    /// first (`sync` then refused it). The admin refuses such a slug's screens, since the rules
+    /// it checks belong to this value's post types (fail closed).
+    pub fn is_unowned(&self, slug: &str) -> bool {
+        !self.registered().iter().any(|s| s == slug)
+            && ignite_core::runtime_resource(slug).is_some()
+            && self.post_types().iter().any(|def| def.slug == slug)
     }
 
     /// The post types whose resource this value has registered, in order.
@@ -1000,6 +1090,15 @@ impl PostTypeData {
         if self.page_attributes {
             row.insert(MENU_ORDER.into(), Value::from(post.menu_order));
         }
+        if !self.templates.is_empty() {
+            let stored = stored_template(db, post.id).await?;
+            // A stored value is matched by its template name, so WordPress's `wide.php` is the
+            // theme's `wide`; one the theme does not have (any more) shows as the default.
+            let template = stored
+                .and_then(|value| self.template_named(&value))
+                .map_or_else(|| DEFAULT_TEMPLATE.0.to_owned(), |t| t.name.clone());
+            row.insert(TEMPLATE.into(), Value::from(template));
+        }
         if self.thumbnail {
             let thumbnail = match crate::content::get_post_meta(db, post.id, THUMBNAIL_META).await {
                 Ok(value) => value.as_ref().and_then(id_of),
@@ -1184,6 +1283,15 @@ impl PostTypeData {
             },
             _ => Ok(Vec::new()),
         }
+    }
+}
+
+/// Post `id`'s stored `_wp_page_template`, when it is text.
+async fn stored_template(db: &Database, id: i64) -> Result<Option<String>, Error> {
+    match crate::content::get_post_meta(db, id, TEMPLATE_META).await {
+        Ok(value) => Ok(value.and_then(|v| v.as_str().map(str::to_owned))),
+        Err(MetaError::InvalidJson(_)) => Ok(None),
+        Err(MetaError::Database(e)) => Err(e),
     }
 }
 
@@ -1566,6 +1674,34 @@ impl PostTypeData {
                 }
             }
         }
+        if !self.templates.is_empty()
+            && let Some(value) = input.get(TEMPLATE)
+        {
+            // As the REST API stores it: the default (or none) deletes the meta. A name the
+            // theme does not offer cannot pass the form's select; it is ignored here too.
+            match text_of(value).filter(|t| !t.is_empty() && t != DEFAULT_TEMPLATE.0) {
+                None => {
+                    delete_post_meta(db, post.id, TEMPLATE_META)
+                        .await
+                        .map_err(meta_error)?;
+                }
+                Some(name) if self.templates.iter().any(|t| t.name == name) => {
+                    // The same template, stored with another spelling (an imported
+                    // `templates/wide.php`), is kept as it is.
+                    let stored = stored_template(db, post.id).await?;
+                    let same = stored
+                        .as_deref()
+                        .and_then(|value| self.template_named(value))
+                        .is_some_and(|t| t.name == name);
+                    if !same {
+                        set_post_meta(db, post.id, TEMPLATE_META, &json!(name))
+                            .await
+                            .map_err(meta_error)?;
+                    }
+                }
+                Some(_) => {}
+            }
+        }
         for taxonomy in &self.taxonomies {
             let Some(value) = input.get(&taxonomy.field) else {
                 continue;
@@ -1609,6 +1745,17 @@ impl PostTypeData {
         let offset = crate::content::gmt_offset(db).await?;
         let changes = self.changes(db, &stored, &input, offset).await?;
         let wants_trash = changes.status == Some(PostStatus::Trash);
+        if wants_trash && stored.status != PostStatus::Trash && self.is_site_page(db, id).await? {
+            log::warn!(
+                "Post {id} is the front page or the posts page: the form cannot move it to the \
+                 trash; Delete can, for a user with `delete_post` on it."
+            );
+            return Err(Error::Unsupported {
+                operation: "moving the front page or the posts page to the trash from the form \
+                            (use Delete, which checks delete_post)",
+                driver: "Mission Control's post type resources",
+            });
+        }
         // A trashed post saved with another status leaves the trash first, as a draft. Not one
         // transaction with the save: `Post::untrash`, `save_revision` and `Post::save` each run
         // their own. A save that fails after the restore leaves the post restored, as a draft,
@@ -1626,6 +1773,32 @@ impl PostTypeData {
         }
         let saved = self.post(db, id).await?.ok_or_else(not_found)?;
         self.row(db, &saved).await
+    }
+
+    /// The theme's page template a stored `_wp_page_template` value names: compared by template
+    /// name ([`page_template_name`]: the file extension dropped), as the front end loads it.
+    fn template_named(&self, stored: &str) -> Option<&PageTemplate> {
+        let name = page_template_name(stored)?;
+        self.templates.iter().find(|t| t.name == name)
+    }
+
+    /// Whether post `id` is the static front page (`page_on_front`) or the posts page
+    /// (`page_for_posts`), which only a user with `manage_options` may move to the trash
+    /// (`map_meta_cap`'s `delete_post`). The data layer does not know the user, so the form's
+    /// Trash status is refused on them for everyone; the list's Delete, which the admin checks
+    /// with `delete_post`, still trashes them.
+    async fn is_site_page(&self, db: &Database, id: i64) -> Result<bool, Error> {
+        for option in ["page_on_front", "page_for_posts"] {
+            let page = match get_option(db, option).await {
+                Ok(value) => value.as_ref().and_then(id_of),
+                Err(MetaError::InvalidJson(_)) => None,
+                Err(MetaError::Database(e)) => return Err(e),
+            };
+            if page == Some(id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Trashes post `id`, or deletes a trashed one for good. Returns how many posts went: 0 when

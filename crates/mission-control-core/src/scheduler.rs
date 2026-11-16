@@ -203,6 +203,21 @@ impl Scheduler {
     /// resolution) or over [`MAX_INTERVAL`], and with
     /// [`Error::Database`] when the database refuses the query.
     pub async fn schedule_recurring(&self, every: Duration, hook: Action<()>) -> Result<(), Error> {
+        self.schedule_recurring_from(now(), every, hook).await
+    }
+
+    /// [`schedule_recurring`](Self::schedule_recurring), with the first run at `first` (UTC)
+    /// instead of at once, when the hook has no recurring event yet.
+    ///
+    /// # Errors
+    ///
+    /// As [`schedule_recurring`](Self::schedule_recurring).
+    pub async fn schedule_recurring_from(
+        &self,
+        first: NaiveDateTime,
+        every: Duration,
+        hook: Action<()>,
+    ) -> Result<(), Error> {
         let seconds = i64::try_from(every.as_secs())
             .ok()
             .filter(|&s| s > 0 && next_run(now(), s, now()).is_some())
@@ -216,7 +231,7 @@ impl Scheduler {
             .update(&*self.db, &[("interval_seconds", seconds.into())])
             .await?;
         if updated == 0 {
-            insert(&*self.db, now(), hook, &(), Some(seconds)).await?;
+            insert(&*self.db, first.trunc_subsecs(0), hook, &(), Some(seconds)).await?;
         }
         Ok(())
     }

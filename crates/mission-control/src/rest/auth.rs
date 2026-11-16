@@ -253,12 +253,22 @@ fn forwarded_https(request: &Request<'_>) -> bool {
     values.peek().is_some() && values.all(|proto| proto.eq_ignore_ascii_case("https"))
 }
 
-/// The catchers that answer a REST guard's error with WordPress's JSON body: 401, 403 and 500.
-/// Another error with one of these statuses gets Rocket's own default answer.
-pub(crate) fn catchers() -> Vec<Catcher> {
-    [401, 403, 500]
-        .into_iter()
-        .map(|code| Catcher::new(code, rest_catcher))
+/// The statuses whose catchers answer a REST guard's error with WordPress's JSON body.
+pub(crate) const CATCHER_CODES: [u16; 3] = [401, 403, 500];
+
+/// The catchers for `codes` (of [`CATCHER_CODES`]) that answer a REST guard's error with
+/// WordPress's JSON body. Another error with one of these statuses gets Rocket's own default
+/// answer.
+///
+/// The app registers all three under `/mc-json`, where every REST route but the `rest_route`
+/// form lives, so they answer there even when the admin's catchers (Ignite's 401 and 500 at `/`)
+/// are registered; and at `/` the ones Ignite does not register. The `rest_route` form at `/`
+/// takes only [`RestAuth`], whose one error (refused credentials) the fairing answers through
+/// the internal route, so no REST error reaches a catcher at `/`.
+pub(crate) fn catchers(codes: &[u16]) -> Vec<Catcher> {
+    codes
+        .iter()
+        .map(|code| Catcher::new(*code, rest_catcher))
         .collect()
 }
 

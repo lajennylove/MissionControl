@@ -1,7 +1,8 @@
 //! Content, users, hooks, media, request routing, the scheduler, configuration, the
-//! definitions of custom post types, taxonomies and field groups, and plugin manifests: the core
-//! of Mission Control.
+//! definitions of custom post types, taxonomies and field groups, plugin manifests, and the
+//! admin's authorization rules: the core of Mission Control.
 
+pub mod admin;
 pub mod config;
 pub mod content;
 pub mod front;

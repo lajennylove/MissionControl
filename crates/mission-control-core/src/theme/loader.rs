@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use propel_runtime::{FileLoader, Loader, RenderError};
 
-use super::manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest, MenuLocation, Sidebar};
+use super::manifest::{
+    MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest, MenuLocation, PageTemplate, Sidebar,
+};
 
 /// The file extension of a Propel template.
 const VIEW_EXTENSION: &str = "propel";
@@ -381,6 +383,25 @@ impl Theme {
             }
         }
         locations
+    }
+
+    /// The page templates a page can choose, as `WP_Theme::get_page_templates` lists them: the
+    /// ones this theme declares, then its parent's that it does not (a child's declaration keeps
+    /// its own name), each only when its file is found ([`locate_template`](Self::locate_template),
+    /// in the child or the parent), sorted by the name the admin shows, as
+    /// `page_template_dropdown` sorts them.
+    pub fn page_templates(&self) -> Vec<PageTemplate> {
+        let mut templates = self.manifest.templates.clone();
+        if let Some(parent) = self.parent() {
+            for template in &parent.manifest.templates {
+                if !templates.iter().any(|t| t.name == template.name) {
+                    templates.push(template.clone());
+                }
+            }
+        }
+        templates.retain(|t| self.locate_template(&[t.name.as_str()]).is_some());
+        templates.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.name.cmp(&b.name)));
+        templates
     }
 
     /// The widget areas this theme declares, then its parent's that it does not, as for

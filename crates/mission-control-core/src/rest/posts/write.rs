@@ -319,13 +319,19 @@ async fn check_references(
             ));
         }
     }
+    // Ruling R124: as WordPress's `check_template` (the theme's `get_page_templates`), a template
+    // is one the active theme declares for pages, matched by name (`wide.php` is `wide`), or none
+    // (empty or `default`). An unchanged stored value is not checked, so an imported one stays.
     if let Some(template) = &changes.template
         && !template.is_empty()
+        && template != "default"
         && Some(template.as_str()) != current_template
     {
         let allowed = page_template_name(template).is_some_and(|name| {
-            ctl.theme
-                .is_some_and(|t| t.locate_template(&[name]).is_some())
+            ctl.post_type.name == "page"
+                && ctl
+                    .theme
+                    .is_some_and(|t| t.page_templates().iter().any(|p| p.name == name))
         });
         if !allowed {
             return Err(RestError::new(

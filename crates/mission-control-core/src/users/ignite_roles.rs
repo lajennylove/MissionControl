@@ -65,8 +65,8 @@ pub fn ignite_roles_with_cap(cap: &str) -> Vec<&'static str> {
     .collect()
 }
 
-/// Reads a user's roles from Ignite's `roles` and `role_user` tables. Not wired into the app
-/// yet: the admin's authorization (Task 6.1) does that.
+/// Reads a user's roles from Ignite's `roles` and `role_user` tables. The app's default
+/// provider, for the REST API and the admin's authorization (Ruling R121).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IgniteUserRoles;
 

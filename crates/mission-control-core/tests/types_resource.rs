@@ -19,10 +19,11 @@ use mission_control_core::content::{
 use mission_control_core::migrations::migrator;
 use mission_control_core::rest::RestRoutes;
 use mission_control_core::rest::meta_routes::MetaRoutesController;
+use mission_control_core::theme::PageTemplate;
 use mission_control_core::types::{
     FieldDef, FieldGroupDef, LocationOperator, LocationParam, LocationRule, MAX_OPTIONS, Origin,
     PostTypeDef, PostTypeResources, Registry, Support, TaxonomyDef, builtin_post_types,
-    create_auto_draft, get_field, post_type_resource,
+    create_auto_draft, get_field, post_type_resource, post_type_resource_with_templates,
 };
 use mission_control_core::users::{ADMINISTRATOR, IgniteUserRoles, UserCaps, UserRoles};
 use mission_control_testing::{create_users_table, database, unique_email};
@@ -1156,5 +1157,178 @@ async fn ignite_roles_are_read_as_wordpress_roles() {
             .unwrap()
             .roles
             .is_empty()
+    );
+}
+
+/// Task 6.2: the Template select of `page`, from the active theme's page templates, stored in
+/// `_wp_page_template` as the REST API stores it.
+#[tokio::test]
+async fn the_page_template_select_saves_as_wordpress_does() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let [post, page] = builtin_post_types();
+    let templates = vec![PageTemplate {
+        name: "templates/wide".to_owned(),
+        title: "Full width".to_owned(),
+    }];
+    let resource = post_type_resource_with_templates(&page, &Registry::default(), &templates);
+    let names = field_names(&resource);
+    let parent_at = names.iter().position(|n| *n == "parent").unwrap();
+    assert_eq!(names[parent_at + 1], "template");
+    assert_eq!(
+        field(&resource, "template").kind,
+        FieldKindDef::Select(vec![
+            ("default".to_owned(), "Default template".to_owned()),
+            ("templates/wide".to_owned(), "Full width".to_owned()),
+        ])
+    );
+    // Only pages get it, and only when the theme has templates (WordPress's Page Attributes box).
+    let posts = post_type_resource_with_templates(&post, &Registry::default(), &templates);
+    assert!(!field_names(&posts).contains(&"template"));
+    let bare = post_type_resource(&page, &Registry::default());
+    assert!(!field_names(&bare).contains(&"template"));
+
+    let draft = create_auto_draft(db, "page", author).await.unwrap();
+    let row = resource.data.find(db, draft.id).await.unwrap().unwrap();
+    assert_eq!(row["template"], "default");
+    let input = |template: &str| {
+        let mut row = Row::new();
+        row.insert("status".into(), json!("draft"));
+        row.insert("template".into(), json!(template));
+        row
+    };
+    let row = resource
+        .data
+        .update(db, draft.id, input("templates/wide"))
+        .await
+        .unwrap();
+    assert_eq!(row["template"], "templates/wide");
+    assert_eq!(
+        get_post_meta(db, draft.id, "_wp_page_template")
+            .await
+            .unwrap(),
+        Some(json!("templates/wide"))
+    );
+    // A name the theme does not offer is not stored (the form's select refuses it first).
+    resource
+        .data
+        .update(db, draft.id, input("templates/other"))
+        .await
+        .unwrap();
+    assert_eq!(
+        get_post_meta(db, draft.id, "_wp_page_template")
+            .await
+            .unwrap(),
+        Some(json!("templates/wide"))
+    );
+    // The default stores none.
+    let row = resource
+        .data
+        .update(db, draft.id, input("default"))
+        .await
+        .unwrap();
+    assert_eq!(row["template"], "default");
+    assert_eq!(
+        get_post_meta(db, draft.id, "_wp_page_template")
+            .await
+            .unwrap(),
+        None
+    );
+    // A stored template the theme no longer has reads as the default.
+    mission_control_core::content::set_post_meta(
+        db,
+        draft.id,
+        "_wp_page_template",
+        &json!("templates/gone"),
+    )
+    .await
+    .unwrap();
+    let row = resource.data.find(db, draft.id).await.unwrap().unwrap();
+    assert_eq!(row["template"], "default");
+}
+
+/// A template stored with WordPress's file name (`templates/wide.php`, as an import brings it)
+/// is the theme's `templates/wide`: the form shows it, and a save that keeps it leaves the stored
+/// value as it is.
+#[tokio::test]
+async fn an_imported_template_name_is_matched_and_kept() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let [_, page] = builtin_post_types();
+    let templates = vec![PageTemplate {
+        name: "templates/wide".to_owned(),
+        title: "Full width".to_owned(),
+    }];
+    let resource = post_type_resource_with_templates(&page, &Registry::default(), &templates);
+    let draft = create_auto_draft(db, "page", author).await.unwrap();
+    mission_control_core::content::set_post_meta(
+        db,
+        draft.id,
+        "_wp_page_template",
+        &json!("templates/wide.php"),
+    )
+    .await
+    .unwrap();
+    let row = resource.data.find(db, draft.id).await.unwrap().unwrap();
+    assert_eq!(row["template"], "templates/wide");
+    let mut input = Row::new();
+    input.insert("status".into(), json!("draft"));
+    input.insert("template".into(), json!("templates/wide"));
+    resource.data.update(db, draft.id, input).await.unwrap();
+    assert_eq!(
+        get_post_meta(db, draft.id, "_wp_page_template")
+            .await
+            .unwrap(),
+        Some(json!("templates/wide.php"))
+    );
+}
+
+/// `delete_post` on the front page or the posts page needs `manage_options`; the data layer does
+/// not know the user, so the form's Trash status is refused on them (the list's Delete, which the
+/// admin checks, still trashes them).
+#[tokio::test]
+async fn the_form_cannot_trash_the_front_page() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let [_, page] = builtin_post_types();
+    let resource = post_type_resource(&page, &Registry::default());
+    let front = create_auto_draft(db, "page", author).await.unwrap();
+    set_option(db, "page_on_front", &json!(front.id))
+        .await
+        .unwrap();
+    let mut input = Row::new();
+    input.insert("status".into(), json!("trash"));
+    assert!(resource.data.update(db, front.id, input).await.is_err());
+    let stored = Post::query().find(db, front.id).await.unwrap().unwrap();
+    assert_ne!(stored.status, PostStatus::Trash);
+    // Delete still trashes it.
+    assert_eq!(resource.data.delete(db, front.id).await.unwrap(), 1);
+}
+
+/// Fail closed: a post type whose Ignite resource something else registered is not this value's.
+#[test]
+fn a_slug_another_registration_holds_is_unowned() {
+    let _ignite = ignite_lock();
+    let registry = Arc::new(Registry::default());
+    registry
+        .register(post_type("rs_foreign", vec![Support::Title]))
+        .unwrap();
+    // Someone else takes the slug first.
+    register_runtime(post_type_resource(
+        &post_type("rs_foreign", vec![Support::Title]),
+        &Registry::default(),
+    ))
+    .unwrap();
+    let resources = PostTypeResources::new(Arc::clone(&registry));
+    assert!(resources.is_unowned("rs_foreign"));
+    assert!(resources.post_type("rs_foreign").is_none());
+    assert!(!resources.is_unowned("rs_nothing"));
+    unregister_runtime("rs_foreign").unwrap();
+    assert!(
+        !resources.is_unowned("rs_foreign"),
+        "no resource at all: Ignite's 404"
     );
 }

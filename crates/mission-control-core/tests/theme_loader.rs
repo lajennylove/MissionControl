@@ -665,3 +665,69 @@ fn reserved_widget_area_ids_are_refused() {
         assert!(error.to_string().contains("reserved"), "{error}");
     }
 }
+
+#[test]
+fn page_templates_are_declared_found_and_merged_with_the_parents() {
+    let themes = Themes::new();
+    themes.theme(
+        "base",
+        "name = \"Base\"\n[templates]\n\"templates/wide\" = \"Full width\"\nlanding = \"Landing\"\n\
+         \"templates/gone\" = \"No file\"\n",
+        &[
+            ("index.propel", ""),
+            ("templates/wide.propel", "wide"),
+            ("landing.propel", "landing"),
+        ],
+    );
+    let child = themes.theme(
+        "kid",
+        "name = \"Kid\"\ntemplate = \"base\"\n[templates]\nlanding = \"A landing page\"\n\
+         \"templates/sidebar\" = \"Blog sidebar\"\n",
+        &[("templates/sidebar.propel", "sidebar")],
+    );
+    let theme = load_theme(&child).unwrap();
+
+    let templates: Vec<(String, String)> = theme
+        .page_templates()
+        .into_iter()
+        .map(|t| (t.name, t.title))
+        .collect();
+    // The child's declaration wins; a declared template without a file is left out; sorted by
+    // the name the admin shows.
+    assert_eq!(
+        templates,
+        [
+            ("landing".to_owned(), "A landing page".to_owned()),
+            ("templates/sidebar".to_owned(), "Blog sidebar".to_owned()),
+            ("templates/wide".to_owned(), "Full width".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn the_templates_table_is_strict() {
+    let themes = Themes::new();
+    for (manifest, expected) in [
+        ("name = \"X\"\n[templates]\ndefault = \"A\"\n", "reserved"),
+        (
+            "name = \"X\"\n[templates]\n\"a/b/c\" = \"A\"\n",
+            "not valid",
+        ),
+        (
+            "name = \"X\"\n[templates]\n\"wide.propel\" = \"A\"\n",
+            "not valid",
+        ),
+        ("name = \"X\"\n[templates]\n\"../x\" = \"A\"\n", "not valid"),
+        ("name = \"X\"\n[templates]\nwide = 3\n", "string"),
+        ("name = \"X\"\n[templates]\nwide = \" \"\n", "empty"),
+    ] {
+        let error = manifest_error(&themes, manifest);
+        assert!(
+            matches!(error, ThemeError::InvalidManifest { .. }),
+            "{manifest}: {error:?}"
+        );
+        assert!(error.to_string().contains(expected), "{manifest}: {error}");
+    }
+    let error = manifest_error(&themes, "name = \"X\"\n[templates]\n\"<script>\" = \"A\"\n");
+    assert!(!error.to_string().contains("<script>"), "{error}");
+}

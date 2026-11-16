@@ -14,14 +14,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mission_control::{AppOptions, RestAuth, RestUser, rocket_with_options};
+use mission_control_app::install::run::run_migrations;
 use mission_control_core::config::{Config, Environment, TrustedProxies};
 use mission_control_core::migrations::migrator;
 use mission_control_core::rest::auth::AuthMethod;
 use mission_control_core::users::app_password::{self, PlainPassword};
 use mission_control_core::users::{
-    EDITOR, InMemoryUserRoles, RoleAssignment, RolesFuture, UserRoles, has_cap,
+    EDITOR, InMemoryUserRoles, NoUserRoles, RoleAssignment, RolesFuture, UserRoles, has_cap,
 };
-use mission_control_testing::{TestDatabase, create_users_table, database, unique_email};
+use mission_control_testing::{
+    TestDatabase, create_users_table, database, scratch_database, unique_email,
+};
 use orbit_orm::{Database, raw};
 use rocket::http::{Header, Status};
 use rocket::local::asynchronous::{Client, LocalResponse};
@@ -96,8 +99,8 @@ impl UserRoles for FailingRoles {
 enum Roles {
     /// An in-memory provider that makes the user an editor.
     Editor,
-    /// No provider.
-    NoProvider,
+    /// The provider that gives no role ([`NoUserRoles`]).
+    Nobody,
     /// A provider that fails.
     Failing,
 }
@@ -172,7 +175,7 @@ async fn site_with(
             roles.assign(user_id, RoleAssignment::new([EDITOR], BTreeMap::new()));
             Some(Arc::new(roles))
         }
-        Roles::NoProvider => None,
+        Roles::Nobody => Some(Arc::new(NoUserRoles)),
         Roles::Failing => Some(Arc::new(FailingRoles)),
     };
     let options = AppOptions {
@@ -269,8 +272,8 @@ async fn a_valid_application_password_signs_the_user_in_with_the_providers_roles
 }
 
 #[rocket::async_test]
-async fn with_no_provider_a_signed_in_user_has_no_role() {
-    let site = site_with(Environment::Local, TrustedProxies::None, Roles::NoProvider).await;
+async fn with_the_no_roles_provider_a_signed_in_user_has_no_role() {
+    let site = site_with(Environment::Local, TrustedProxies::None, Roles::Nobody).await;
     let response = site
         .client
         .get("/mc-json/test/v1/whoami")
@@ -283,6 +286,53 @@ async fn with_no_provider_a_signed_in_user_has_no_role() {
         json,
         json!({"id": site.user_id, "roles": [], "edit_others_posts": false})
     );
+}
+
+/// Ruling R121: with no provider given, a user's roles are their Ignite roles, read from
+/// Ignite's `roles` and `role_user` tables by name. On a database of its own, where the
+/// installer's migrations made Ignite's tables.
+#[rocket::async_test]
+async fn with_no_provider_the_roles_are_the_users_ignite_roles() {
+    let scratch = scratch_database("rest_auth_roles").await;
+    run_migrations(scratch.url()).await.expect("migrates");
+    let db = Arc::new(Database::connect(scratch.url()).await.expect("connects"));
+    let (user_id, email) = new_user(&db, "ann").await;
+    let (password, _) = app_password::create(&db, user_id, "Laptop", None)
+        .await
+        .expect("creates the application password");
+    // An editor, and a role Mission Control does not know, which grants nothing.
+    for role in ["editor", "billing"] {
+        raw::execute(&*db, "INSERT INTO roles (name) VALUES (?)", &[role.into()])
+            .await
+            .expect("creates the role");
+        raw::execute(
+            &*db,
+            "INSERT INTO role_user (user_id, role_id) SELECT ?, id FROM roles WHERE name = ?",
+            &[user_id.into(), role.into()],
+        )
+        .await
+        .expect("gives the role");
+    }
+    let options = AppOptions {
+        database: Some(Arc::clone(&db)),
+        ..AppOptions::default()
+    };
+    let rocket = rocket_with_options(config(Environment::Local, TrustedProxies::None), options)
+        .mount("/", rocket::routes![whoami]);
+    let client = Client::tracked(rocket).await.expect("the app ignites");
+    let response = client
+        .get("/mc-json/test/v1/whoami")
+        .header(basic(&email, password.as_str()))
+        .dispatch()
+        .await;
+    let (status, json) = body(response).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        json,
+        json!({"id": user_id, "roles": ["editor"], "edit_others_posts": true})
+    );
+    drop(client);
+    db.close().await;
 }
 
 #[rocket::async_test]

@@ -13,6 +13,9 @@ publish.workspace = true
 test-hooks = []
 
 [dependencies]
+# Checks IGNITE_SECRET_KEY before the `ignite` console starts (MIT OR Apache-2.0). The version
+# Ignite uses.
+base64 = "0.22"
 mission-control = { path = "../mission-control" }
 mission-control-core = { path = "../mission-control-core" }
 # The admin panel, whose migrations (the `users`, roles and sessions tables) the installer runs

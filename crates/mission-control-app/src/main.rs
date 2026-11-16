@@ -10,14 +10,60 @@
 //! When setup asks for a restart, Rocket shuts down gracefully and the binary starts again into
 //! normal mode: by replacing itself, or, under systemd or a container, by exiting with status 0
 //! for the supervisor to start again (see [`mission_control_app::restart`]).
+//!
+//! `mission-control-app ignite <command>` runs Ignite's command line instead of the site, as
+//! Laravel's `artisan` is the app's own console (Ruling R122): `ignite user create --email ...
+//! --name ...`, `ignite user role add <email> administrator` and the others `ignite` lists. It
+//! reads `DATABASE_URL` from the environment or `.env`, and exits with the command's status.
 
 use mission_control_app::restart::{Action, RestartHandle, RestartMethod, action, restart};
 use mission_control_app::setup::{Mode, setup_rocket_with_restart};
 
 fn main() {
+    // The console runs on its own runtime, so it starts before Rocket's.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("ignite") {
+        // Ignite stops with a panic when DATABASE_URL is missing; say it plainly instead.
+        ignite_panel::load_env();
+        if std::env::var_os("DATABASE_URL").is_none() {
+            eprintln!("DATABASE_URL must be set, in the environment or in .env.");
+            std::process::exit(1);
+        }
+        // A release build of Ignite stops with a panic without a valid key; a debug build uses a
+        // random one, which the console does not need.
+        if !cfg!(debug_assertions)
+            && let Err(problem) = check_secret_key(std::env::var("IGNITE_SECRET_KEY").ok())
+        {
+            eprintln!("{problem}");
+            std::process::exit(1);
+        }
+        std::process::exit(ignite_panel::Ignite::new().call_cli(args));
+    }
     // Read (and remove) the test hook before the runtime starts: no other thread exists yet.
     let hook = test_hook::take();
     rocket::execute(run(hook));
+}
+
+/// The shortest signing key Ignite accepts, in bytes.
+const MIN_SECRET_KEY_BYTES: usize = 32;
+
+/// Checks `IGNITE_SECRET_KEY` as Ignite does: base64 of at least 32 bytes. The message says what
+/// to do, and never repeats the key.
+fn check_secret_key(key: Option<String>) -> Result<(), &'static str> {
+    use base64::Engine;
+
+    let Some(key) = key else {
+        return Err(
+            "IGNITE_SECRET_KEY must be set, in the environment or in .env \
+                    (try `openssl rand -base64 32`).",
+        );
+    };
+    match base64::engine::general_purpose::STANDARD.decode(key.trim()) {
+        Ok(bytes) if bytes.len() >= MIN_SECRET_KEY_BYTES => Ok(()),
+        Ok(_) => Err("IGNITE_SECRET_KEY must decode to at least 32 bytes \
+                      (try `openssl rand -base64 32`)."),
+        Err(_) => Err("IGNITE_SECRET_KEY must be base64 (try `openssl rand -base64 32`)."),
+    }
 }
 
 async fn run(hook: test_hook::Hook) {
@@ -96,5 +142,20 @@ mod test_hook {
 
     pub fn attach(_: Hook, rocket: Rocket<Build>, _: &RestartHandle) -> Rocket<Build> {
         rocket
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_secret_key;
+
+    #[test]
+    fn the_secret_key_is_checked_as_ignite_checks_it() {
+        assert!(check_secret_key(None).is_err());
+        assert!(check_secret_key(Some("not base64!".into())).is_err());
+        assert!(check_secret_key(Some("c2hvcnQ=".into())).is_err());
+        let key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+        assert!(check_secret_key(Some(key.into())).is_ok());
+        assert!(check_secret_key(Some(format!(" {key}\n"))).is_ok());
     }
 }

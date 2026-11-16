@@ -310,9 +310,14 @@ async fn normal_mode_does_not_mount_the_installer() {
     let client = Client::tracked(rocket_with_database(config, test.shared()))
         .await
         .expect("the app ignites");
-    // The installer is not mounted: the path goes to the front end, which has no such page.
+    // The installer is not mounted. The path is under the admin's, which this database (not
+    // MySQL or MariaDB, or not Ignite's `DATABASE_URL`) cannot serve: the admin's 503 page
+    // answers it (Ruling R119), not the wizard.
     let response = client.get(INSTALL_PATH).dispatch().await;
-    assert_eq!(response.status(), Status::NotFound);
+    assert_eq!(response.status(), Status::ServiceUnavailable);
+    let body = response.into_string().await.unwrap_or_default();
+    assert!(body.contains("The admin is not available"), "{body}");
+    assert!(!body.contains("<form"), "{body}");
     // And the site is not redirected to it.
     let home = client.get("/").dispatch().await;
     assert_ne!(home.status(), Status::Found);

@@ -17,6 +17,9 @@
 //!
 //! [sidebars]                # register_sidebar: id => name
 //! footer = "Footer"
+//!
+//! [templates]               # page templates: template => name (`Template Name:`)
+//! "templates/wide" = "Full width"
 //! ```
 //!
 //! The theme's slug is the name of its folder, as in WordPress; the manifest cannot set it.
@@ -28,6 +31,14 @@
 //! or `_`, at most 64 characters. WordPress allows `-` too (`sidebar-1`), which Propel's paths
 //! cannot read. Declaring a menu location or a widget area adds the `menus` or `widgets` support,
 //! as `register_nav_menus` and `register_sidebar` do.
+//!
+//! Page templates are declared, as a block theme's `theme.json` declares `customTemplates`,
+//! instead of read from a `Template Name:` header in each file: the key is the template's name,
+//! the template file without `.propel` (`wide` is `wide.propel`, `templates/wide` is
+//! `templates/wide.propel`, one folder at most, as WordPress looks one folder deep), and the value
+//! is the name the admin shows. The key is what a page stores in `_wp_page_template`. `default`
+//! is refused: it is WordPress's "Default template", which stores no template. Templates are for
+//! pages, as a template without `Template Post Type:` is.
 
 use std::path::Path;
 
@@ -70,6 +81,22 @@ pub struct Manifest {
     pub menus: Vec<MenuLocation>,
     /// The theme's widget areas (`register_sidebar`), in the order written.
     pub sidebars: Vec<Sidebar>,
+    /// The theme's page templates, in the order written. [`Theme::page_templates`] lists the
+    /// ones whose file exists, with the parent theme's.
+    ///
+    /// [`Theme::page_templates`]: super::Theme::page_templates
+    pub templates: Vec<PageTemplate>,
+}
+
+/// A page template the theme declares: WordPress's template file with a `Template Name:`
+/// header, which a page chooses in the admin's Template box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageTemplate {
+    /// The template's name, such as `templates/wide`: its file without `.propel`, and the value
+    /// a page stores in `_wp_page_template`.
+    pub name: String,
+    /// The name the admin shows, such as `Full width` (`Template Name:`).
+    pub title: String,
 }
 
 /// A menu location the theme declares, as `register_nav_menus( array( $location => $description ) )`.
@@ -142,6 +169,7 @@ struct RawManifest {
     supports: Vec<Support>,
     menus: Option<toml::Table>,
     sidebars: Option<toml::Table>,
+    templates: Option<toml::Table>,
 }
 
 impl Manifest {
@@ -175,6 +203,11 @@ impl Manifest {
             .into_iter()
             .map(|(id, name)| Sidebar { id, name })
             .collect::<Vec<_>>();
+        let templates = page_templates(raw.templates)
+            .map_err(invalid)?
+            .into_iter()
+            .map(|(name, title)| PageTemplate { name, title })
+            .collect();
         let mut supports = raw.supports;
         if !menus.is_empty() && !supports.contains(&Support::Menus) {
             supports.push(Support::Menus);
@@ -194,6 +227,7 @@ impl Manifest {
             supports,
             menus,
             sidebars,
+            templates,
         })
     }
 
@@ -243,6 +277,67 @@ fn declared(
         pairs.push((id, text.to_owned()));
     }
     Ok(pairs)
+}
+
+/// The `(name, title)` pairs of the `[templates]` table, in order: each name a template name
+/// ([`is_template_name`]) other than `default`, and each title a string that is not empty once
+/// trimmed. The error names the key when it is safe to repeat, never a value.
+fn page_templates(table: Option<toml::Table>) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+    for (name, value) in table.unwrap_or_default() {
+        let shown = echoable_template(&name);
+        if name == "default" {
+            return Err(
+                "`[templates]` name `default` is reserved: it is the default template".to_owned(),
+            );
+        }
+        if !is_template_name(&name) {
+            return Err(match shown {
+                Some(name) => format!(
+                    "`[templates]` name `{name}` is not valid: use letters, digits, `-` and `_`, \
+                     with at most one folder (`templates/wide`)"
+                ),
+                None => "a `[templates]` name is not valid: use letters, digits, `-` and `_`, \
+                         with at most one folder (`templates/wide`)"
+                    .to_owned(),
+            });
+        }
+        let toml::Value::String(title) = value else {
+            return Err(format!(
+                "`[templates]` `{name}` has the wrong type (expected a string)"
+            ));
+        };
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(format!("`[templates]` `{name}` is empty"));
+        }
+        pairs.push((name, title.to_owned()));
+    }
+    Ok(pairs)
+}
+
+/// The longest page template name, in bytes.
+pub const MAX_TEMPLATE_NAME: usize = 128;
+
+/// Whether `name` can name a page template: one or two segments joined by `/` (a template in
+/// the theme's folder, or in one folder below it), each a run of ASCII letters, digits, `-` and
+/// `_`, as [`Theme::locate_template`](super::Theme::locate_template) finds a file; at most
+/// [`MAX_TEMPLATE_NAME`] bytes.
+pub(crate) fn is_template_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.split('/').collect();
+    name.len() <= MAX_TEMPLATE_NAME
+        && segments.len() <= 2
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// A template name that is safe to repeat in an error: a short template name.
+fn echoable_template(name: &str) -> Option<&str> {
+    (name.len() <= MAX_ECHOED_NAME && is_template_name(name)).then_some(name)
 }
 
 /// Whether `id` can name a menu location or widget area: a Propel path segment (an ASCII
