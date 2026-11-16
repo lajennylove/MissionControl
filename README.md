@@ -45,6 +45,8 @@ The admin is Ignite's panel at `/mc-admin`: sign in at `/mc-admin/login`. Posts 
   "templates/wide" = "Full width"   # templates/wide.propel
   ```
 
+- **The editor:** rich text fields, the post content included, use WordPress's classic editor: TinyMCE 7.9.3 with WordPress's toolbar, the Visual and Text tabs (Text is the HTML itself) and Add Media. Until the media library screen exists, Add Media inserts an image from its URL. The editor's files are compiled into the binary and served at `/mc-includes/js/editor.js` and `/mc-includes/js/tinymce/`; nothing is loaded from another site. The post screens store the HTML as sent (only users with `unfiltered_html` reach them). The Visual tab, as in WordPress, cleans the HTML it edits; switch to Text for markup it would change.
+
 ### The first administrator (MySQL or MariaDB)
 
 `mission-control-app ignite <command>` runs Ignite's command line with the site's settings, as Laravel's `artisan` does. Run it in the install folder, where `.env` is, after the installer has finished:
@@ -60,3 +62,5 @@ mission-control-app ignite user role add owner@example.com administrator
 ## License
 
 GPL-2.0-or-later, like WordPress. See `LICENSE`. Copyright (c) 2026 Jenny Martinez.
+
+The admin's editor bundles TinyMCE 7.9.3 (GPL-2.0-or-later) in `assets/editor/tinymce/`. Its version, licence, source and checksums are in `NOTICE`.

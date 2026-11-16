@@ -21,5 +21,8 @@ multer = { version = "3", features = ["tokio-io"] }
 propel_runtime = "0.3.0"
 rocket = "0.5.2"
 tokio.workspace = true
+# The version in the editor's URLs, from a hash of its files (MIT OR Apache-2.0). The version
+# the core uses.
+sha2 = "0.11"
 # The REST discovery documents.
 serde_json = "1"

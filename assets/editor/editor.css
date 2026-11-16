@@ -1,0 +1,91 @@
+/*!
+ * Mission Control's classic editor: the Add Media button and the Visual and Text tabs, laid out
+ * as WordPress's `wp-editor-tools`. GPL-2.0-or-later.
+ */
+.mc-editor {
+  display: grid;
+  gap: 0;
+}
+
+.mc-editor-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+.mc-editor-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.mc-editor-tab {
+  border: 1px solid #c3c4c7;
+  border-bottom: 0;
+  border-radius: 0.25rem 0.25rem 0 0;
+  background: #f6f7f7;
+  color: #50575e;
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+}
+
+.mc-editor-tab[aria-selected="true"] {
+  background: #fff;
+  color: #1d2327;
+}
+
+.mc-editor-tab:focus-visible {
+  outline: 2px solid #2271b1;
+  outline-offset: 1px;
+}
+
+/* The Toolbar Toggle: the second row is hidden until it is pressed. */
+.mc-editor-adv-hidden .tox-toolbar-overlord > .tox-toolbar:nth-child(n + 2),
+.mc-editor-adv-hidden .tox-toolbar-overlord > .tox-toolbar__primary > .tox-toolbar:nth-child(n + 2) {
+  display: none;
+}
+
+.mc-editor-container .mc-editor-area {
+  width: 100%;
+  min-height: 25rem;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.mc-editor-dialog {
+  max-width: 32rem;
+  width: calc(100% - 2rem);
+  border: 1px solid #c3c4c7;
+  border-radius: 0.5rem;
+  padding: 1.25rem;
+}
+
+.mc-editor-dialog form {
+  display: grid;
+  gap: 1rem;
+}
+
+.mc-editor-dialog label {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.mc-editor-dialog .mc-editor-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.mc-editor-dialog h2 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.mc-editor-dialog::backdrop {
+  background: rgb(0 0 0 / 0.4);
+}

@@ -31,6 +31,9 @@
 //!   days by a daily scheduler event (Ruling R125). Ignite's create (`POST /mc-admin/<post type>`)
 //!   is refused.
 //!
+//! - The classic editor for the rich text fields (Task 6.3): the editor script at
+//!   [`editor_script_url`] is registered with Ignite, whose forms then load it.
+//!
 //! At start the five WordPress roles are made sure to exist as Ignite roles, and each post type
 //! resource's five abilities are registered and granted to `administrator` and `editor`
 //! (Ruling R121), so Ignite's own coarse checks let them in. Errors are logged, and the site
@@ -58,6 +61,7 @@ use rocket::response::content::RawHtml;
 use rocket::route::{self, Handler, Route};
 use rocket::{Build, Data, Request, Rocket, State};
 
+use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
 /// Where the admin is mounted (Ruling R120).
@@ -171,6 +175,7 @@ pub(crate) async fn mount_panel(
     // Ignite first: it reserves its own pages' slugs (`login`, `profile`, ...) before a post type
     // can take one; such a type is then refused below instead of stopping the panel.
     let panel = Ignite::new().mount(ADMIN_PATH);
+    ignite_core::register_editor(editor_script_url());
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {
         log::error!("The admin could not reserve `{INSTALL_SLUG}`: {e}");
     }

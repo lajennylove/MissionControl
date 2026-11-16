@@ -1,0 +1,48 @@
+Mission Control
+Copyright (c) 2026 Jenny Martinez
+Licensed under the GNU General Public License, version 2 or (at your option) any later version.
+See LICENSE.
+
+This repository and the binaries built from it include the third-party software below.
+
+
+TinyMCE 7.9.3
+-------------
+
+Where:     assets/editor/tinymce/ (compiled into the mission-control library and served at
+           /mc-includes/js/tinymce/). Only the files the admin's editor loads are included:
+           tinymce.min.js, models/dom, themes/silver, icons/default, skins/ui/oxide,
+           skins/content/default and the charmap, fullscreen, help (with its English keyboard
+           help, plugins/help/js/i18n/keynav/en.js), link and lists plugins, unchanged.
+Copyright: Copyright (c) 2024, Ephox Corporation DBA Tiny Technologies, Inc.
+Licence:   GNU General Public License, version 2 or later (GPL-2.0-or-later), as stated in
+           assets/editor/tinymce/license.md ("Licensed under the terms of GNU General Public
+           License Version 2 or later"). Mission Control uses it with `license_key: 'gpl'`.
+Home:      https://github.com/tinymce/tinymce
+Source:    the npm package tinymce@7.9.3,
+           https://registry.npmjs.org/tinymce/-/tinymce-7.9.3.tgz
+           npm integrity: sha512-Mtm54U5YJ6Pyo/GaAx+JSHXTGEuxrg2AowVWCD9zy1eBolp5Ub7S1rTtsyQdxhPegfhLuR3VLiTKGw1tacv09g==
+           tarball SHA-256: dd8cc7fa067197d33ba67447b429f5c8b6bdb3fb66c10d9715f33f753ec36387
+           The unminified source of each file is in the same package and in the repository
+           above (tag 7.9.3).
+Checked:   2026-11-15. TinyMCE 8.x is published with "SEE LICENSE IN license.md" instead of the
+           plain GPL, so it is not used (Ruling R126).
+
+TinyMCE includes, inside tinymce.min.js, as listed in assets/editor/tinymce/notices.txt:
+
+  DOMPurify 3.2.6 (https://github.com/cure53/DOMPurify), by Mario Heiderich,
+  Copyright (c) Cure53 and other contributors,
+  licensed MPL-2.0 OR Apache-2.0 (its notice in tinymce.min.js: "Released under the Apache
+  license 2.0 and Mozilla Public License 2.0").
+
+notices.txt also lists PrismJS and prism-themes (MIT), which only TinyMCE's codesample
+plugin uses; that plugin is not included.
+
+
+Mission Control's own editor files
+----------------------------------
+
+assets/editor/editor.js and assets/editor/editor.css are Mission Control's (GPL-2.0-or-later). The
+`autop` function in editor.js follows WordPress's `wp.editor.autop` (wp-admin/js/editor.js),
+WordPress - Web publishing software, Copyright 2011-2026 by the contributors,
+GPL-2.0-or-later (https://wordpress.org).

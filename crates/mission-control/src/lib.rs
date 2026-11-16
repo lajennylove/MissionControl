@@ -57,13 +57,20 @@
 //! answers a 503 page (Ruling R119). Ignite reads `DATABASE_URL` and `IGNITE_SECRET_KEY` from the
 //! environment (and `.env`), so they must be the configuration's. See the `admin` module's
 //! documentation in the source for what is mounted and who may use it.
+//!
+//! The admin's rich text fields, the post content included, use WordPress's classic editor:
+//! TinyMCE 7 (GPL-2.0-or-later), with the Visual and Text tabs and the Add Media button. Its
+//! files are compiled into the binary and served at [`INCLUDES_PATH`] (`/mc-includes/js/editor.js`,
+//! `/mc-includes/js/tinymce/...`), with the version [`editor_version`] in each URL.
 
 mod admin;
+mod editor;
 mod front;
 mod rest;
 mod uploads;
 
 pub use admin::ADMIN_PATH;
+pub use editor::{INCLUDES_PATH, TINYMCE_VERSION, editor_script_url, editor_version};
 pub use rest::auth::{RestAuth, RestUser};
 
 use std::sync::Arc;
@@ -210,6 +217,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         .manage(upload_settings)
         .mount("/", rest::routes(REST_RANK))
         .mount("/", uploads::routes())
+        .mount("/", editor::routes())
         .mount("/", rest::auth::refused_routes())
         .register("/mc-json", rest::auth::catchers(&rest::auth::CATCHER_CODES))
         .register("/", rest::auth::catchers(&[403]))
