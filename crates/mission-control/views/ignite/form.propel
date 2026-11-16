@@ -1,0 +1,45 @@
+@extends('ignite::layouts.app')
+
+@section('ignite_head')@if (theme_style)<style>{!! $theme_style !!}</style>@endif@endsection
+
+@section('ignite_html')data-theme="{{ $theme }}"@endsection
+
+@section('ignite_aside')
+  @include('ignite::partials.nav')
+@endsection
+
+@section('ignite_column')ig-with-sidebar@endsection
+
+@section('ignite_bar')
+  <header class="sticky top-0 z-20 flex items-center border-b border-border bg-page px-5 py-3">
+    @include('ignite::partials.topbar')
+  </header>
+@endsection
+
+@section('ignite_flash')
+  @include('ignite::partials.flash')
+@endsection
+
+@section('title')
+  {{ $heading }}
+@endsection
+
+@section('content')
+  <h1 class="mb-6">{{ $heading }}</h1>
+
+  <form class="ig-card grid max-w-2xl gap-5" method="post" action="{{ $action }}">
+    <input type="hidden" name="_token" value="{{ $csrf_token }}">
+
+    @foreach (field in fields)
+      @include('ignite::partials.field')
+    @endforeach
+
+    <div class="flex flex-wrap items-center gap-3">
+      <button type="submit" class="ig-btn ig-btn-primary">{{ $submit_label }}</button>
+      <a class="ig-btn ig-btn-outline" href="{{ $back_url }}">Cancel</a>
+    </div>
+  </form>
+  @if (has_editor)
+    <script src="{{ $editor_script }}" defer></script>
+  @endif
+@endsection

@@ -1,0 +1,1 @@
+{{-- The panel resolves this view through the active admin theme (src/theme.rs). Compiled views get the ignite theme's. --}}@include('ignite::themes.ignite.partials.nav')

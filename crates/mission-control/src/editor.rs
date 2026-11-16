@@ -17,19 +17,22 @@
 //! - `tinymce/`, the parts of TinyMCE 7.9.3 (GPL-2.0-or-later, see `NOTICE`) the toolbar uses,
 //!   in TinyMCE's own folder layout, since it loads its theme, model, icons, skins and plugins
 //!   from its base URL. Ignite, which is MIT, bundles none of it.
+//! - The admin's brand images, from `assets/brand/`: the Mission Control logo and mark (WebP) and
+//!   the favicons made from the mark, which the admin's views (`views/ignite`) show in place of
+//!   Ignite's, as WordPress serves its own logo under `/wp-includes/images/`.
 //!
 //! # Where they are served
 //!
 //! Under [`INCLUDES_PATH`] (`/mc-includes`), as WordPress serves them under `/wp-includes`:
-//! `js/editor.js`, `js/media.js`, `css/editor.css` and `js/tinymce/...` (WordPress's
-//! `/wp-includes/js/tinymce/`). The path is outside the panel's `/mc-admin/<slug>` routes, and
+//! `js/editor.js`, `js/media.js`, `css/editor.css`, `js/tinymce/...` (WordPress's
+//! `/wp-includes/js/tinymce/`) and `images/...`. The path is outside the panel's `/mc-admin/<slug>` routes, and
 //! the public site's catch-all ranks below it.
 //!
 //! - Only the files of the bundle are served: a path is looked up in a fixed table, never on the
 //!   disk, so `..` or an encoded separator cannot reach another file. Any other path under
 //!   `/mc-includes` forwards, and the public site answers with the theme's 404 page.
-//! - Each file has its `Content-Type` (`text/javascript` or `text/css`, UTF-8; the licence
-//!   files as plain text) and `X-Content-Type-Options: nosniff`.
+//! - Each file has its `Content-Type` (`text/javascript` or `text/css`, UTF-8; `image/webp`,
+//!   `image/png` and `image/x-icon` for the images; the licence files as plain text) and `X-Content-Type-Options: nosniff`.
 //! - Each URL the editor asks for carries `?ver=` [`editor_version`] (WordPress's `?ver=` and
 //!   TinyMCE's `cache_suffix`), which changes whenever a file of the bundle changes. A request
 //!   with the current version is cached for a year (`immutable`); any other is sent with
@@ -80,7 +83,7 @@ macro_rules! bundle {
 /// stylesheet, and the parts of TinyMCE that the settings in `editor.js` load: the silver
 /// theme, the DOM model, the default icons, the oxide skin, the default content style and the
 /// `charmap`, `fullscreen`, `help` (with its English keyboard help), `link` and `lists`
-/// plugins.
+/// plugins; and the admin's brand images, whose files are in `assets/brand/`.
 static BUNDLE: &[Asset] = bundle! {
     "js/editor.js" => "editor.js",
     "js/media.js" => "media.js",
@@ -104,6 +107,12 @@ static BUNDLE: &[Asset] = bundle! {
         "tinymce/plugins/help/js/i18n/keynav/en.js",
     "js/tinymce/plugins/link/plugin.min.js" => "tinymce/plugins/link/plugin.min.js",
     "js/tinymce/plugins/lists/plugin.min.js" => "tinymce/plugins/lists/plugin.min.js",
+    // The admin's brand images, from `assets/brand/`.
+    "images/mission-control-logo.webp" => "../brand/mission-control-logo.webp",
+    "images/mission-control-mark.webp" => "../brand/mission-control-mark.webp",
+    "images/favicon.ico" => "../brand/favicon.ico",
+    "images/favicon-32.png" => "../brand/favicon-32.png",
+    "images/apple-touch-icon.png" => "../brand/apple-touch-icon.png",
 };
 
 /// The version every editor URL carries: TinyMCE's version and the start of a SHA-256 of the
@@ -144,6 +153,9 @@ fn content_type(path: &str) -> ContentType {
     match path.rsplit_once('.').map(|(_, extension)| extension) {
         Some("js") => ContentType::new("text", "javascript").with_params(("charset", "utf-8")),
         Some("css") => ContentType::CSS,
+        Some("webp") => ContentType::WEBP,
+        Some("png") => ContentType::PNG,
+        Some("ico") => ContentType::Icon,
         _ => ContentType::Plain,
     }
 }
@@ -225,6 +237,7 @@ mod tests {
     fn only_the_files_of_the_bundle_are_found() {
         assert!(find(&["js", "editor.js"]).is_some());
         assert!(find(&["js", "tinymce", "tinymce.min.js"]).is_some());
+        assert!(find(&["images", "mission-control-mark.webp"]).is_some());
         for refused in [
             &[][..],
             &["js"],
@@ -258,6 +271,14 @@ mod tests {
         assert_eq!(
             content_type("css/editor.css").to_string(),
             "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            content_type("images/mission-control-logo.webp").to_string(),
+            "image/webp"
+        );
+        assert_eq!(
+            content_type("images/favicon.ico").to_string(),
+            "image/x-icon"
         );
         assert_eq!(
             content_type("js/tinymce/license.md").to_string(),

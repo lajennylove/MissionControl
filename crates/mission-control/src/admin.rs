@@ -13,7 +13,12 @@
 //! # What is mounted
 //!
 //! - Ignite's panel ([`Ignite`]), with its sign-in, dashboard and profile. Its signing key is
-//!   `IGNITE_SECRET_KEY`, which Ignite also reads from the environment.
+//!   `IGNITE_SECRET_KEY`, which Ignite also reads from the environment. Its views are read from
+//!   [`VIEWS_DIR`], a copy of Ignite 0.5.0's `views/ignite` with the Mission Control logo, mark
+//!   and favicons in place of Ignite's (served under `/mc-includes/images/`, see
+//!   [`crate::editor`]). Ignite reads a views directory in debug builds only: a release build
+//!   renders the views compiled into Ignite, with Ignite's logo. `IGNITE_VIEWS_DIR`, when set,
+//!   wins, as it does in Ignite.
 //! - Every post type the admin shows, `post` and `page` included, as an Ignite runtime resource
 //!   at `/mc-admin/<post type>` ([`PostTypeResources`], Ruling R114), with the active theme's page
 //!   templates in the page form. The page `install.php` is reserved (Ruling R120).
@@ -91,6 +96,13 @@ mod media;
 
 /// Where the admin is mounted (Ruling R120).
 pub const ADMIN_PATH: &str = "/mc-admin";
+
+/// The admin's copy of Ignite's views, with Mission Control's logo (see the [module](self)).
+const VIEWS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/views/ignite");
+
+/// The variable Ignite reads a views directory from (Ignite's `VIEWS_DIR_ENV`, which it does not
+/// export).
+const IGNITE_VIEWS_DIR_ENV: &str = "IGNITE_VIEWS_DIR";
 
 /// The first path segment of [`ADMIN_PATH`].
 const ADMIN_SEGMENT: &str = "mc-admin";
@@ -214,7 +226,10 @@ pub(crate) async fn mount_panel(
 ) -> Rocket<Build> {
     // Ignite first: it reserves its own pages' slugs (`login`, `profile`, ...) before a post type
     // can take one; such a type is then refused below instead of stopping the panel.
-    let panel = Ignite::new().mount(ADMIN_PATH);
+    let mut panel = Ignite::new().mount(ADMIN_PATH);
+    if std::env::var_os(IGNITE_VIEWS_DIR_ENV).is_none() {
+        panel = panel.views_dir(VIEWS_DIR);
+    }
     ignite_core::register_editor(editor_script_url());
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {
         log::error!("The admin could not reserve `{INSTALL_SLUG}`: {e}");
