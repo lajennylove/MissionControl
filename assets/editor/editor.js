@@ -14,7 +14,8 @@
  * For other scripts (the media library, Task 6.4), `window.mcEditor` offers:
  *
  * - `mcEditor.media`: set it to `{ open: function (editorId) { ... } }`; Add Media then calls
- *   `open` with the textarea's id instead of the built-in "Insert from URL" dialog.
+ *   `open` with the textarea's id instead of the built-in "Insert from URL" dialog. This script
+ *   loads the media library's picker (`media.js`, next to it), which sets it.
  * - `mcEditor.insert(editorId, html)`: inserts HTML at the cursor of that editor, in the Visual
  *   or the Text tab (WordPress's `send_to_editor`).
  * - `mcEditor.isVisual(editorId)`: whether that editor shows the Visual tab.
@@ -32,6 +33,7 @@
   var query = ver ? '?ver=' + encodeURIComponent(ver) : '';
   var tinymceBase = new URL('tinymce', scriptUrl).href;
   var stylesheet = new URL('../css/editor.css', scriptUrl).href + query;
+  var mediaScript = new URL('media.js', scriptUrl).href + query;
 
   /** The key under which the last tab used is remembered, as WordPress's `editor` setting. */
   var MODE_KEY = 'mc-editor-mode';
@@ -588,6 +590,20 @@
     return tinymceLoading;
   }
 
+  /**
+   * Loads the Add Media picker (`media.js`, Task 6.4), which sets `mcEditor.media`. Until it
+   * has loaded, or if it cannot load, Add Media opens the "Insert from URL" dialog.
+   */
+  function loadMediaPicker() {
+    if (api.media) {
+      return;
+    }
+    var tag = document.createElement('script');
+    tag.src = mediaScript;
+    tag.async = true;
+    document.head.appendChild(tag);
+  }
+
   function addStylesheet() {
     var link = document.createElement('link');
     link.rel = 'stylesheet';
@@ -613,6 +629,7 @@
       return;
     }
     addStylesheet();
+    loadMediaPicker();
     var mode = remembered();
     Array.prototype.forEach.call(areas, function (textarea) {
       if (!textarea.id || editors[textarea.id]) {

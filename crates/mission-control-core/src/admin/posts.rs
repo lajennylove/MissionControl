@@ -89,6 +89,9 @@ pub enum Refusal {
     /// A save of a trashed post (which restores it, or keeps it in the trash) needs
     /// `delete_post`, as `wp_untrash_post` does, and it is refused.
     RestorePost,
+    /// The media library's upload page (`<mount>/attachment/new`, WordPress's `media-new.php`)
+    /// is refused: the user lacks the screen's capabilities or `upload_files`.
+    UploadFiles,
 }
 
 impl Refusal {
@@ -105,7 +108,8 @@ impl Refusal {
             | Self::EditPost
             | Self::TrashPost
             | Self::DeletePost
-            | Self::RestorePost => None,
+            | Self::RestorePost
+            | Self::UploadFiles => None,
         }
     }
 
@@ -119,6 +123,7 @@ impl Refusal {
             Self::TrashPost => "Sorry, you are not allowed to move this item to the Trash.",
             Self::DeletePost => "Sorry, you are not allowed to delete this item.",
             Self::RestorePost => "Sorry, you are not allowed to restore this item from the Trash.",
+            Self::UploadFiles => "Sorry, you are not allowed to upload files.",
         }
     }
 }
@@ -211,7 +216,7 @@ pub async fn authorize_post_screen(
 }
 
 /// The status a trashed post had before (`_wp_trash_meta_status`), as the REST layer reads it.
-async fn trash_status(db: &Database, post: &Post) -> Result<Option<PostStatus>, Error> {
+pub(crate) async fn trash_status(db: &Database, post: &Post) -> Result<Option<PostStatus>, Error> {
     if post.status != PostStatus::Trash {
         return Ok(None);
     }
@@ -223,7 +228,7 @@ async fn trash_status(db: &Database, post: &Post) -> Result<Option<PostStatus>, 
 }
 
 /// The site's special pages, from their options; a value that is not valid JSON is unset.
-async fn site_pages(db: &Database) -> Result<SitePages, Error> {
+pub(crate) async fn site_pages(db: &Database) -> Result<SitePages, Error> {
     let page = async |name: &str| -> Result<Option<i64>, Error> {
         match get_option(db, name).await {
             Ok(value) => Ok(value.as_ref().and_then(id_of)),

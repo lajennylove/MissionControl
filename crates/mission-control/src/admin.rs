@@ -33,6 +33,12 @@
 //!
 //! - The classic editor for the rich text fields (Task 6.3): the editor script at
 //!   [`editor_script_url`] is registered with Ignite, whose forms then load it.
+//! - The media library (Task 6.4, Rulings R127 to R129, see the `media` submodule): the screen of
+//!   `attachment` at `/mc-admin/attachment`, authorized by the same fairing with the
+//!   `attachment` type's capabilities (those of `post`) and `unfiltered_html`, and `edit_post`
+//!   or `delete_post` on the attachment; its upload page at `/mc-admin/attachment/new`; the
+//!   picker's endpoints `/mc-admin/async-upload.php` and `/mc-admin/admin-ajax.php`; and the
+//!   media library of Ignite's Image, File and Gallery fields.
 //!
 //! At start the five WordPress roles are made sure to exist as Ignite roles, and each post type
 //! resource's five abilities are registered and granted to `administrator` and `editor`
@@ -46,7 +52,9 @@ use std::sync::{Arc, OnceLock};
 
 use ignite_panel::authz::{self, AuthzError};
 use ignite_panel::{AdminUser, Ignite, ignite_core};
-use mission_control_core::admin::{PostScreen, Refusal, authorize_post_screen};
+use mission_control_core::admin::{
+    PostScreen, Refusal, attachment_post_type, authorize_post_screen,
+};
 use mission_control_core::config::Config;
 use mission_control_core::theme::PageTemplate;
 use mission_control_core::types::{PostTypeDef, PostTypeResources, Registry, create_auto_draft};
@@ -63,6 +71,8 @@ use rocket::{Build, Data, Request, Rocket, State};
 
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
+
+mod media;
 
 /// Where the admin is mounted (Ruling R120).
 pub const ADMIN_PATH: &str = "/mc-admin";
@@ -199,7 +209,14 @@ pub(crate) async fn mount_panel(
             resources.remove(&slug);
         }
     }
-    provision(db, &resources.registered()).await;
+    // The media library (Task 6.4): its screen, upload page and endpoints, and Ignite's media
+    // fields' library.
+    let (rocket, media_screen) = media::mount_media(rocket);
+    let mut slugs = resources.registered();
+    if media_screen.registered {
+        slugs.push(media::ATTACHMENT.to_owned());
+    }
+    provision(db, &slugs).await;
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
@@ -345,7 +362,24 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
     let rest: Vec<&str> = segments.take(3).collect();
     let rocket = request.rocket();
     let resources = rocket.state::<Arc<PostTypeResources>>()?;
-    let Some(def) = resources.post_type(slug) else {
+    let def = if slug == media::ATTACHMENT {
+        // The media library's screen (Ruling R127), when this app registered it; otherwise,
+        // when another registration holds the slug, it is refused (fail closed).
+        match rocket.state::<media::MediaScreen>() {
+            Some(screen) if screen.registered => Some(attachment_post_type()),
+            _ if ignite_core::runtime_resource(slug).is_some() => {
+                log::error!(
+                    "Refused `{}`: Ignite's resource `{slug}` was not registered by this app.",
+                    request.uri().path()
+                );
+                return Some(AdminRefusal::NotServed);
+            }
+            _ => None,
+        }
+    } else {
+        resources.post_type(slug)
+    };
+    let Some(def) = def else {
         if resources.is_unowned(slug) {
             log::error!(
                 "Refused `{}`: Ignite's resource `{slug}` was not registered by this app.",
@@ -373,7 +407,10 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         }
     };
     let screen = PostScreen::parse(request.method().as_str(), &rest);
+    // The media library's upload page is `media-new.php`: its refusal is WordPress's for it.
+    let upload_page = slug == media::ATTACHMENT && rest == ["new"];
     match authorize_post_screen(db, &caps, &def, screen).await {
+        Ok(Some(_)) if upload_page => Some(AdminRefusal::Refused(Refusal::UploadFiles)),
         Ok(refused) => refused.map(AdminRefusal::Refused),
         Err(e) => {
             log::error!("Could not check the admin request {screen:?} on `{slug}`: {e}");

@@ -217,25 +217,50 @@ async fn create(
     )
 }
 
-/// The body, read up to `cap` bytes; `rest_upload_file_too_big` (naming the upload limit
-/// `max`) when it is longer, or says it is.
+/// Why [`read_body`] did not return a body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyError {
+    /// The body is longer than the cap, or its `Content-Length` says so.
+    TooLarge,
+    /// The body could not be read (logged).
+    Unreadable,
+}
+
+/// The body, read up to `cap` bytes: [`BodyError::TooLarge`] when `content_length` is over the
+/// cap (nothing is read) or the body is longer (nothing more is read). Shared by the REST upload
+/// and the admin's uploads.
+pub(crate) async fn read_body(
+    data: Data<'_>,
+    content_length: Option<u64>,
+    cap: u64,
+) -> Result<Vec<u8>, BodyError> {
+    if content_length.is_some_and(|length| length > cap) {
+        return Err(BodyError::TooLarge);
+    }
+    let body = data.open(cap.bytes()).into_bytes().await.map_err(|e| {
+        log::warn!("Could not read an upload: {e}");
+        BodyError::Unreadable
+    })?;
+    if !body.is_complete() {
+        return Err(BodyError::TooLarge);
+    }
+    Ok(body.into_inner())
+}
+
+/// The body, read up to `cap` bytes ([`read_body`]); `rest_upload_file_too_big` (naming the
+/// upload limit `max`) when it is longer, or says it is.
 async fn read_capped(
     data: Data<'_>,
     content_length: Option<u64>,
     cap: u64,
     max: u64,
 ) -> Result<Vec<u8>, RestError> {
-    if content_length.is_some_and(|length| length > cap) {
-        return Err(upload_too_big(max));
-    }
-    let body = data.open(cap.bytes()).into_bytes().await.map_err(|e| {
-        log::warn!("Could not read an upload: {e}");
-        unreadable()
-    })?;
-    if !body.is_complete() {
-        return Err(upload_too_big(max));
-    }
-    Ok(body.into_inner())
+    read_body(data, content_length, cap)
+        .await
+        .map_err(|e| match e {
+            BodyError::TooLarge => upload_too_big(max),
+            BodyError::Unreadable => unreadable(),
+        })
 }
 
 /// `rest_invalid_body`, 400: a body that cannot be read.

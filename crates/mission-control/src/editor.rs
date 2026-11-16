@@ -10,7 +10,10 @@
 //! - `editor.js`, Mission Control's script. Ignite's form loads it (it is registered with
 //!   [`register_editor`](ignite_panel::ignite_core::register_editor) when the panel mounts); it
 //!   loads TinyMCE and turns each `textarea[data-ignite-editor="wysiwyg"]` into the editor.
-//! - `editor.css`, the tabs and the Add Media button.
+//! - `media.js`, the Add Media picker (Task 6.4), which `editor.js` loads: it uploads a file or
+//!   picks one from the media library, and inserts it as WordPress's editor does.
+//! - `editor.css`, the tabs, the Add Media button, the picker and the media library's upload
+//!   page.
 //! - `tinymce/`, the parts of TinyMCE 7.9.3 (GPL-2.0-or-later, see `NOTICE`) the toolbar uses,
 //!   in TinyMCE's own folder layout, since it loads its theme, model, icons, skins and plugins
 //!   from its base URL. Ignite, which is MIT, bundles none of it.
@@ -18,7 +21,7 @@
 //! # Where they are served
 //!
 //! Under [`INCLUDES_PATH`] (`/mc-includes`), as WordPress serves them under `/wp-includes`:
-//! `js/editor.js`, `css/editor.css` and `js/tinymce/...` (WordPress's
+//! `js/editor.js`, `js/media.js`, `css/editor.css` and `js/tinymce/...` (WordPress's
 //! `/wp-includes/js/tinymce/`). The path is outside the panel's `/mc-admin/<slug>` routes, and
 //! the public site's catch-all ranks below it.
 //!
@@ -73,12 +76,14 @@ macro_rules! bundle {
     };
 }
 
-/// Every file served under [`INCLUDES_PATH`]. TinyMCE's parts are the ones its settings in
-/// `editor.js` load: the silver theme, the DOM model, the default icons, the oxide skin, the
-/// default content style and the `charmap`, `fullscreen`, `help` (with its English
-/// keyboard help), `link` and `lists` plugins.
+/// Every file served under [`INCLUDES_PATH`]: Mission Control's editor script, picker and
+/// stylesheet, and the parts of TinyMCE that the settings in `editor.js` load: the silver
+/// theme, the DOM model, the default icons, the oxide skin, the default content style and the
+/// `charmap`, `fullscreen`, `help` (with its English keyboard help), `link` and `lists`
+/// plugins.
 static BUNDLE: &[Asset] = bundle! {
     "js/editor.js" => "editor.js",
+    "js/media.js" => "media.js",
     "css/editor.css" => "editor.css",
     "js/tinymce/tinymce.min.js" => "tinymce/tinymce.min.js",
     "js/tinymce/license.md" => "tinymce/license.md",
@@ -126,6 +131,12 @@ pub fn editor_version() -> &'static str {
 /// The URL of the editor script that Ignite's forms load: `/mc-includes/js/editor.js?ver=...`.
 pub fn editor_script_url() -> String {
     format!("{INCLUDES_PATH}/{SCRIPT}?ver={}", editor_version())
+}
+
+/// The URL of the editor's stylesheet, `/mc-includes/css/editor.css?ver=...`, which also styles
+/// the Add Media picker and the media library's upload page.
+pub(crate) fn editor_stylesheet_url() -> String {
+    format!("{INCLUDES_PATH}/css/editor.css?ver={}", editor_version())
 }
 
 /// The `Content-Type` of a file of the bundle, from its extension.

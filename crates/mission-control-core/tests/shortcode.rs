@@ -237,3 +237,78 @@ fn hostile_input_stays_linear() {
         assert!(out == expected, "unexpected output (len {})", out.len());
     }
 }
+
+/// WordPress's default `[caption]` (`img_caption_shortcode`, Ruling R134), in its HTML5 output.
+#[test]
+fn caption_renders_wordpress_html5_figure() {
+    let s = Arc::new(Shortcodes::new());
+    s.register_core_shortcodes();
+    assert!(s.shortcode_exists("caption") && s.shortcode_exists("wp_caption"));
+    let img = r#"<img src="/u/a-300x225.jpg" alt="x" width="300" height="225" class="size-medium wp-image-7" />"#;
+
+    // What the editor's Add Media inserts: the caption after the image.
+    let out = s.do_shortcodes(&format!(
+        r#"[caption id="attachment_7" align="aligncenter" width="300"]{img} Boats at <em>dawn</em>[/caption]"#
+    ));
+    assert_eq!(
+        out,
+        format!(
+            r#"<figure id="attachment_7" aria-describedby="caption-attachment-7" style="width: 300px" class="wp-caption aligncenter">{img}<figcaption id="caption-attachment-7" class="wp-caption-text">Boats at <em>dawn</em></figcaption></figure>"#
+        )
+    );
+    // A link around the image stays with it; text before the image is dropped, as WordPress.
+    let out = s.do_shortcodes(&format!(
+        r#"[wp_caption id="attachment_7" width="300px"]before <a href="/x">{img}</a>  Cap [/wp_caption]"#
+    ));
+    assert_eq!(
+        out,
+        format!(
+            r#"<figure id="attachment_7" aria-describedby="caption-attachment-7" style="width: 300px" class="wp-caption alignnone"><a href="/x">{img}</a><figcaption id="caption-attachment-7" class="wp-caption-text">Cap</figcaption></figure>"#
+        )
+    );
+    // Attributes: ids cleaned as `sanitize_html_class`, the rest escaped; the `caption`
+    // attribute's tags stripped; a `caption_id` of its own; extra classes.
+    let out = s.do_shortcodes(&format!(
+        r#"[caption id='a"t<t>%20x' align='alignleft" onclick="x' width=150 class="big" caption="Hi <script>x</script>there" caption_id="c_1"]{img}[/caption]"#
+    ));
+    assert_eq!(
+        out,
+        format!(
+            r#"<figure id="attx" aria-describedby="c_1" style="width: 150px" class="wp-caption alignleft&quot; onclick=&quot;x big">{img}<figcaption id="c_1" class="wp-caption-text">Hi there</figcaption></figure>"#
+        )
+    );
+    // No width, a width below 1, or no caption: the content without the wrapper.
+    for call in [
+        format!(r#"[caption id="attachment_7"]{img} Cap[/caption]"#),
+        format!(r#"[caption width="0"]{img} Cap[/caption]"#),
+        format!(r#"[caption width="abc"]{img} Cap[/caption]"#),
+        format!(r#"[caption width="300"]{img}[/caption]"#),
+    ] {
+        assert_eq!(s.do_shortcodes(&call), img, "{call}");
+    }
+    // No id: no ids printed. The caption is printed as stored: its shortcodes do not run.
+    s.add_shortcode("hello", Owner::Core, |_, _| "HELLO".to_string())
+        .unwrap();
+    let out = s.do_shortcodes(&format!(
+        r#"[caption width="10"]{img}[hello] Cap[/caption]"#
+    ));
+    assert_eq!(
+        out,
+        format!(
+            r#"<figure style="width: 10px" class="wp-caption alignnone">{img}<figcaption class="wp-caption-text">[hello] Cap</figcaption></figure>"#
+        )
+    );
+    // A self-closing caption, or one with no image and no caption, is empty.
+    assert_eq!(s.do_shortcodes(r#"[caption width="10" /]"#), "");
+    // `the_content` applies it.
+    let hooks = Hooks::new();
+    s.register_the_content(&hooks);
+    let shown = hooks.apply_filters(
+        THE_CONTENT,
+        format!(r#"[caption width="300"]{img} C[/caption]"#),
+    );
+    assert!(
+        shown.starts_with("<figure style=\"width: 300px\""),
+        "{shown}"
+    );
+}

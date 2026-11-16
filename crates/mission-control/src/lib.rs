@@ -28,8 +28,8 @@
 //! ([`Plugins::spawn_recovery`]).
 //!
 //! The app manages, for code that extends it: the database (`Arc<Database>`), the hook registry
-//! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`), the
-//! scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
+//! (`Arc<Hooks>`), the shortcode registry (`Arc<Shortcodes>`, run on `the_content`, with
+//! WordPress's `[caption]`), the scheduler (`Arc<Scheduler>`), the REST route registry (`Arc<RestRoutes>`), the post types the
 //! REST API serves (`Arc<PostTypes>`), the taxonomies it serves (`Arc<Taxonomies>`), the
 //! registry of custom post types, taxonomies and field groups (`Arc<Registry>`, which feeds
 //! those two), the registered meta keys shown under `meta` (`Arc<MetaKeys>`, empty at start), the settings the
@@ -55,12 +55,16 @@
 //! The admin is Ignite's panel at [`ADMIN_PATH`] (`/mc-admin`), with the screens of every post
 //! type the admin shows; on a MySQL or MariaDB database only, for now: elsewhere `/mc-admin`
 //! answers a 503 page (Ruling R119). Ignite reads `DATABASE_URL` and `IGNITE_SECRET_KEY` from the
-//! environment (and `.env`), so they must be the configuration's. See the `admin` module's
-//! documentation in the source for what is mounted and who may use it.
+//! environment (and `.env`), so they must be the configuration's. The media library is the
+//! `attachment` screen at `/mc-admin/attachment`, with an upload page, and the editor's Add Media
+//! picker uploads and lists through `/mc-admin/async-upload.php` and `/mc-admin/admin-ajax.php`
+//! with the admin session. See the `admin` module's documentation in the source for what is
+//! mounted and who may use it.
 //!
 //! The admin's rich text fields, the post content included, use WordPress's classic editor:
 //! TinyMCE 7 (GPL-2.0-or-later), with the Visual and Text tabs and the Add Media button. Its
-//! files are compiled into the binary and served at [`INCLUDES_PATH`] (`/mc-includes/js/editor.js`,
+//! files are compiled into the binary and served at [`INCLUDES_PATH`]
+//! (`/mc-includes/js/editor.js`, the picker `/mc-includes/js/media.js`,
 //! `/mc-includes/js/tinymce/...`), with the version [`editor_version`] in each URL.
 
 mod admin;
@@ -167,6 +171,8 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let hooks = Arc::new(Hooks::new());
     let shortcodes = Arc::new(Shortcodes::new());
     shortcodes.register_the_content(&hooks);
+    // WordPress's default `[caption]` and `[wp_caption]` (Ruling R134).
+    shortcodes.register_core_shortcodes();
     let rest_routes = Arc::new(RestRoutes::new());
     let post_types = Arc::new(PostTypes::new());
     post_types.register_routes(&rest_routes);

@@ -22,6 +22,7 @@
 //! ```
 
 mod auto_drafts;
+mod caption;
 mod future;
 mod kses;
 mod meta;
