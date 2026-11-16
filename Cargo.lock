@@ -1427,14 +1427,14 @@ dependencies = [
 
 [[package]]
 name = "ignite-core"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "536d4ddf42cceedc184d53f9007252323cb33e5e2f2e114a3cd275a5c637faa7"
+checksum = "e62eaa1e7e103617b32e1f0c8a198401c71f565236e079d12ecbbc8f41139f54"
 dependencies = [
  "argon2",
  "chrono",
  "ignite-macros",
- "orbit-orm 0.3.0",
+ "orbit-orm",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -1443,9 +1443,9 @@ dependencies = [
 
 [[package]]
 name = "ignite-macros"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfb938e52d26f0d0c05b8c128affd55df1cd618ff999bc73ad691be4565b944e"
+checksum = "da80851db2b29fc1648a06074996dfb5ebce35921c9f743101bf529383bad6cf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1454,9 +1454,9 @@ dependencies = [
 
 [[package]]
 name = "ignite-panel"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9498fd327372f733b48227bbda29a8216a760d6c2167b927f6c7941756b8dd71"
+checksum = "835e24511af108159a95c12868b0ec54ed5becf878a9762d848391d6d62f8052"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1465,7 +1465,7 @@ dependencies = [
  "form_urlencoded",
  "hmac 0.12.1",
  "ignite-core",
- "orbit-orm 0.3.0",
+ "orbit-orm",
  "propel_compiler",
  "propel_rocket",
  "propel_runtime",
@@ -1773,7 +1773,7 @@ dependencies = [
  "log",
  "mission-control-core",
  "multer",
- "orbit-orm 0.4.0",
+ "orbit-orm",
  "propel_runtime",
  "rocket",
  "serde_json",
@@ -1793,8 +1793,7 @@ dependencies = [
  "mission-control-app",
  "mission-control-core",
  "mission-control-testing",
- "orbit-orm 0.3.0",
- "orbit-orm 0.4.0",
+ "orbit-orm",
  "percent-encoding",
  "propel_runtime",
  "rocket",
@@ -1828,7 +1827,7 @@ dependencies = [
  "log",
  "md-5",
  "mission-control-testing",
- "orbit-orm 0.4.0",
+ "orbit-orm",
  "propel_parser",
  "propel_runtime",
  "semver",
@@ -1852,7 +1851,7 @@ name = "mission-control-testing"
 version = "0.1.0"
 dependencies = [
  "mission-control-core",
- "orbit-orm 0.4.0",
+ "orbit-orm",
  "tempfile",
  "tokio",
 ]
@@ -1980,19 +1979,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "orbit-orm"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb3a957516cd0901567d0b87b35d6b3fc6287062cd83d0a102a979567a2f6a24"
-dependencies = [
- "chrono",
- "orbit-macros",
- "sqlx",
- "thiserror",
- "tokio",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ use mission_control_core::migrations::migrator;
 use mission_control_testing::{CORE_TABLES, scratch_database, table_exists};
 use orbit_orm::{Database, Migrator, raw};
 
-/// The tables Ignite 0.4.0's panel migrations create.
+/// The tables Ignite 0.5.0's panel migrations create.
 const PANEL_TABLES: &[&str] = &[
     "users",
     "sessions",
@@ -71,7 +71,7 @@ async fn a_new_database_gets_the_panel_and_core_tables_once() {
     let again = run_migrations(scratch.url()).await.expect("migrates again");
     assert!(again.is_empty(), "{again:?}");
     assert_eq!(history_rows(&db).await, recorded);
-    let ignite = orbit_orm_ignite::Database::connect(scratch.url())
+    let ignite = Database::connect(scratch.url())
         .await
         .expect("Ignite connects");
     assert!(
@@ -192,7 +192,7 @@ async fn a_run_of_new_core_migrations_rolls_back_on_its_own() {
     let (newest, older) = core.migrations().split_last().expect("has migrations");
 
     // A site installed before the newest core migration existed.
-    let ignite = orbit_orm_ignite::Database::connect(scratch.url())
+    let ignite = Database::connect(scratch.url())
         .await
         .expect("Ignite connects");
     let panel = ignite_panel::migrate(&ignite)

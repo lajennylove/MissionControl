@@ -1,10 +1,9 @@
 //! The installer's migrations (Task 11.4, Ruling R78): Ignite's panel migrations, then the core
 //! migrations, on the database at one `DATABASE_URL`, and the rollback of the last run.
 //!
-//! Ignite 0.4.0 is built on Orbit 0.3 and Mission Control on Orbit 0.4, so no Orbit type passes
-//! between them. [`run_migrations`] opens Ignite's own connection (Orbit 0.3) from the URL, runs
-//! the panel's migrations on it and closes it, then opens Mission Control's connection (Orbit
-//! 0.4) and runs the core migrations. The panel goes first because the core tables reference its
+//! Ignite 0.5.0 and Mission Control are both built on Orbit 0.4. [`run_migrations`] opens a
+//! connection from the URL, runs the panel's migrations on it and closes it, then opens another
+//! and runs the core migrations. The panel goes first because the core tables reference its
 //! `users` table.
 //!
 //! Both migrators record their runs in the same table, `__diesel_schema_migrations`, in the same
@@ -35,7 +34,7 @@
 //! moved into, or reverted with, this one's batch.
 //!
 //! This lives in the app crate, not in `mission-control-core`, so the core crate does not depend
-//! on Ignite (and on Rocket through it). The app is where Ignite and the core meet.
+//! on `ignite-panel` (and on Rocket through it). The app is where the panel and the core meet.
 //!
 //! ```ignore
 //! let summary = mission_control_app::install::run::run_migrations(&database_url).await?;
@@ -72,7 +71,7 @@ impl MigrationSummary {
 /// Why the installer's migrations did not run, or stopped. The messages name the database
 /// server's complaint, never the password or the database URL.
 ///
-/// Ignite's errors are Orbit 0.3 types, so they are kept as their message.
+/// Ignite's errors are kept as their message.
 #[derive(Debug)]
 pub enum InstallError {
     /// Ignite could not connect to the database.
@@ -161,7 +160,7 @@ impl std::error::Error for InstallError {
 pub async fn run_migrations(database_url: &str) -> Result<MigrationSummary, InstallError> {
     let core = migrator().map_err(InstallError::CoreInvalid)?;
 
-    let ignite = orbit_orm_ignite::Database::connect(database_url)
+    let ignite = Database::connect(database_url)
         .await
         .map_err(|e| InstallError::PanelConnect(e.to_string()))?;
     let panel = run_panel(&ignite, &core).await;
@@ -234,7 +233,7 @@ async fn run_core(
 pub async fn rollback_last_batch(database_url: &str) -> Result<MigrationSummary, InstallError> {
     let core = migrator().map_err(InstallError::CoreInvalid)?;
 
-    let ignite = orbit_orm_ignite::Database::connect(database_url)
+    let ignite = Database::connect(database_url)
         .await
         .map_err(|e| InstallError::PanelConnect(e.to_string()))?;
     let panel = ignite_panel::migration_status(&ignite).await;
@@ -260,7 +259,7 @@ pub async fn rollback_last_batch(database_url: &str) -> Result<MigrationSummary,
 
     // The core migrations of the batch are reverted, so the last batch now holds only the
     // panel's: Ignite's own rollback reverts it.
-    let ignite = orbit_orm_ignite::Database::connect(database_url)
+    let ignite = Database::connect(database_url)
         .await
         .map_err(|e| InstallError::PanelConnect(e.to_string()))?;
     let panel_reverted = ignite_panel::rollback(&ignite).await;
@@ -394,7 +393,7 @@ fn version(name: &str) -> &str {
 /// Checks the two sets' versions against each other, then runs the panel's migrations on
 /// Ignite's connection.
 async fn run_panel(
-    ignite: &orbit_orm_ignite::Database,
+    ignite: &Database,
     core: &orbit_orm::Migrator,
 ) -> Result<Vec<String>, InstallError> {
     // Reads only: on a new database it lists every panel migration as pending.
