@@ -7,7 +7,7 @@
 //! Both sets record their runs in the same table, `__diesel_schema_migrations`, by the 14-digit
 //! version at the start of the name only, so a core version must never equal one of Ignite's: the
 //! migrator that ran second would take the other's row for its own and skip its migration. Ignite
-//! 0.5.0 has one version a day at midnight (`20261114000000_account_lifecycle`,
+//! 0.6.0 has one version a day at midnight (`20261114000000_account_lifecycle`,
 //! `20261115000000_password_reset_tokens`), so the core versions are on the hour 12
 //! (`20261114120000`, `20261115120000`, ...). The installer refuses to run when two versions match, and a test in
 //! `mission-control-app` checks the two sets against each other.

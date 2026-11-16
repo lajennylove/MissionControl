@@ -110,6 +110,7 @@ use serde_json::{Value, json};
 use super::definition::{CapabilityType, FieldDef, FieldKindDef, Origin, PostTypeDef, Support};
 use super::location::ScreenContext;
 use super::registry::Registry;
+use crate::admin::navigation::{PostTypePositions, place_post_type};
 use crate::content::{
     MetaError, NewPost, Post, PostStatus, SaveError, Taxonomy, delete_post_meta, get_option,
     save_revision, set_post_meta,
@@ -702,9 +703,13 @@ impl PostTypeResources {
         }
         registered.clear();
         let mut refused = Vec::new();
+        let mut positions = PostTypePositions::default();
         for def in &wanted {
-            let resource =
+            let mut resource =
                 post_type_resource_with_templates(def, &self.registry, &self.page_templates);
+            // The sidebar's WordPress order: the positions are given in the types' order.
+            let position = positions.next(def);
+            place_post_type(&mut resource, def, position);
             match register_runtime(resource) {
                 Ok(()) => registered.push(def.slug.clone()),
                 Err(error) => refused.push(RefusedResource {

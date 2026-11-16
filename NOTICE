@@ -47,16 +47,3 @@ assets/editor/editor.js and assets/editor/editor.css are Mission Control's (GPL-
 WordPress - Web publishing software, Copyright 2011-2026 by the contributors,
 GPL-2.0-or-later (https://wordpress.org).
 
-
-Ignite 0.5.0 panel views
-------------------------
-
-Where:     crates/mission-control/views/ignite/, the admin's copy of Ignite's views, which the
-           admin reads in debug builds (Ignite's `views_dir`). They are ignite-panel's
-           views/ignite at the tag v0.5.0 (commit 83fa83e841e68666c7c72a60c479e87350d7aebb),
-           unchanged except the logo, the mark and the favicons in
-           themes/ignite/layouts/app.propel, themes/ignite/partials/nav.propel and
-           themes/ignite/partials/topbar.propel, which show Mission Control's.
-Copyright: Copyright (c) 2026 Jenny Martinez
-Licence:   MIT
-Home:      https://github.com/lajennylove/Ignite

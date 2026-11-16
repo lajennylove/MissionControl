@@ -18,8 +18,10 @@
 //!   in TinyMCE's own folder layout, since it loads its theme, model, icons, skins and plugins
 //!   from its base URL. Ignite, which is MIT, bundles none of it.
 //! - The admin's brand images, from `assets/brand/`: the Mission Control logo and mark (WebP) and
-//!   the favicons made from the mark, which the admin's views (`views/ignite`) show in place of
-//!   Ignite's, as WordPress serves its own logo under `/wp-includes/images/`.
+//!   the favicons made from the mark, as WordPress serves its own logo under
+//!   `/wp-includes/images/`. The admin shows the logo and `favicon-32.png` through Ignite's brand
+//!   options; Ignite links one favicon, so the mark, `favicon.ico` and `apple-touch-icon.png` are
+//!   served for the site's own use (a theme's or a later admin's).
 //!
 //! # Where they are served
 //!

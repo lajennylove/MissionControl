@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 # The admin panel (MIT), mounted at `/mc-admin` on MySQL and MariaDB. `sqlite` and `postgres` add
 # the drivers beside MySQL and MariaDB, as Orbit's own features do for the workspace.
-ignite-panel = { version = "0.5.0", features = ["postgres", "sqlite"] }
+ignite-panel = { version = "0.6.0", features = ["postgres", "sqlite"] }
 # The logging facade Rocket 0.5 logs through.
 log = "0.4"
 mission-control-core = { path = "../mission-control-core" }

@@ -561,6 +561,16 @@ pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> 
         sortable: false,
         searchable: false,
     }];
+    // Settings (80), with the screens in WordPress's submenu order.
+    let index = SettingsScreen::ALL
+        .iter()
+        .position(|s| *s == screen)
+        .unwrap_or_default();
+    super::navigation::place(
+        &mut resource,
+        super::navigation::SETTINGS + i32::try_from(index).unwrap_or_default(),
+        super::navigation::SETTINGS_ICON,
+    );
     resource
 }
 

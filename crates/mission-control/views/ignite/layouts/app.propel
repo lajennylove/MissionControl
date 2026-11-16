@@ -1,1 +1,0 @@
-{{-- The panel's layout. The panel renders it through the active admin theme (src/theme.rs); compiled views and apps that extend it get the ignite theme's layout. --}}@extends('ignite::themes.ignite.layouts.app')

@@ -228,6 +228,12 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
         column(COL_LOCATIONS, "Theme Locations", false, false),
         column(COL_ITEMS, "Items", false, false),
     ];
+    // WordPress's Menus screen is in Appearance (60).
+    super::navigation::place(
+        &mut resource,
+        super::navigation::APPEARANCE,
+        super::navigation::APPEARANCE_ICON,
+    );
     resource
 }
 

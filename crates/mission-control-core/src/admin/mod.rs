@@ -1,11 +1,13 @@
 //! The admin's rules that need neither Rocket nor Ignite's routes: who may use the screens of a
 //! post type ([`posts`], Ruling R115), the media library's screen, picker and uploads
 //! ([`media`], Rulings R127 to R129), the settings screens ([`settings`], Ruling R132) and the
-//! menus screen ([`menus`], Ruling R133). The `mission-control` crate mounts Ignite's panel at
+//! menus screen ([`menus`], Ruling R133), and the sidebar's WordPress order
+//! ([`navigation`]). The `mission-control` crate mounts Ignite's panel at
 //! `/mc-admin` and applies them before Ignite's routes run.
 
 pub mod media;
 pub mod menus;
+pub mod navigation;
 pub mod posts;
 pub mod settings;
 

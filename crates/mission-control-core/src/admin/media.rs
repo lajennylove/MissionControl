@@ -184,6 +184,11 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
         column(COL_AUTHOR, "Author", false, false),
         column(COL_DATE, "Date", true, false),
     ];
+    super::navigation::place(
+        &mut resource,
+        super::navigation::MEDIA,
+        super::navigation::MEDIA_ICON,
+    );
     resource
 }
 

@@ -2,7 +2,7 @@
 //!
 //! # When it is mounted
 //!
-//! Ignite 0.5.0 runs its sign-in, session and user queries on MySQL and MariaDB only, so the
+//! Ignite 0.6.0 runs its sign-in, session and user queries on MySQL and MariaDB only, so the
 //! panel is mounted only when the site's database is MySQL or MariaDB (Ruling R119). Ignite reads
 //! its database from `DATABASE_URL` in the environment (after loading `.env`), not from the
 //! app's configuration, so the panel is mounted only when that is the configuration's database
@@ -13,12 +13,16 @@
 //! # What is mounted
 //!
 //! - Ignite's panel ([`Ignite`]), with its sign-in, dashboard and profile. Its signing key is
-//!   `IGNITE_SECRET_KEY`, which Ignite also reads from the environment. Its views are read from
-//!   [`VIEWS_DIR`], a copy of Ignite 0.5.0's `views/ignite` with the Mission Control logo, mark
-//!   and favicons in place of Ignite's (served under `/mc-includes/images/`, see
-//!   [`crate::editor`]). Ignite reads a views directory in debug builds only: a release build
-//!   renders the views compiled into Ignite, with Ignite's logo. `IGNITE_VIEWS_DIR`, when set,
-//!   wins, as it does in Ignite.
+//!   `IGNITE_SECRET_KEY`, which Ignite also reads from the environment. Its brand is Mission
+//!   Control's, through Ignite's brand options (as Filament's panel `brandName`, `brandLogo`,
+//!   `brandLogoHeight` and `favicon`): the logo shows in place of the name, which is its
+//!   alternative text, and the favicon replaces Ignite's; the images are served under
+//!   `/mc-includes/images/` (see [`crate::editor`]). The options are compiled into Ignite's
+//!   views, so they hold in a release build too.
+//! - The sidebar in WordPress's admin menu order: the dashboard, then the
+//!   `Content` group (Posts, Media, Pages, then the custom post types), then the `Site` group
+//!   (Menus, then the settings screens), each entry at its WordPress `menu_position` and with
+//!   its Dashicons class (see `mission_control_core::admin::navigation`).
 //! - Every post type the admin shows, `post` and `page` included, as an Ignite runtime resource
 //!   at `/mc-admin/<post type>` ([`PostTypeResources`], Ruling R114), with the active theme's page
 //!   templates in the page form. The page `install.php` is reserved (Ruling R120).
@@ -68,6 +72,7 @@ use std::sync::{Arc, OnceLock};
 use ignite_panel::authz::{self, AuthzError};
 use ignite_panel::{AdminUser, Ignite, ignite_core};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
+use mission_control_core::admin::navigation;
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
     attachment_post_type, authorize_menus_screen, authorize_post_screen, authorize_settings_screen,
@@ -97,12 +102,18 @@ mod media;
 /// Where the admin is mounted (Ruling R120).
 pub const ADMIN_PATH: &str = "/mc-admin";
 
-/// The admin's copy of Ignite's views, with Mission Control's logo (see the [module](self)).
-const VIEWS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/views/ignite");
+/// The admin's brand name: the sidebar logo's alternative text and the end of each page title.
+pub(crate) const BRAND_NAME: &str = "RocketBoost Mission Control";
 
-/// The variable Ignite reads a views directory from (Ignite's `VIEWS_DIR_ENV`, which it does not
-/// export).
-const IGNITE_VIEWS_DIR_ENV: &str = "IGNITE_VIEWS_DIR";
+/// The admin's logo, served from `assets/brand/` (see [`crate::editor`]).
+pub(crate) const BRAND_LOGO: &str = "/mc-includes/images/mission-control-logo.webp";
+
+/// The logo's height. The logo is 661x571 px; 8.625rem (138px) shows it 160px wide, the size the
+/// sidebar had it at before Ignite had brand options, inside the sidebar's 222px.
+pub(crate) const BRAND_LOGO_HEIGHT: &str = "8.625rem";
+
+/// The admin's favicon, served from `assets/brand/` (see [`crate::editor`]).
+pub(crate) const FAVICON: &str = "/mc-includes/images/favicon-32.png";
 
 /// The first path segment of [`ADMIN_PATH`].
 const ADMIN_SEGMENT: &str = "mc-admin";
@@ -226,10 +237,13 @@ pub(crate) async fn mount_panel(
 ) -> Rocket<Build> {
     // Ignite first: it reserves its own pages' slugs (`login`, `profile`, ...) before a post type
     // can take one; such a type is then refused below instead of stopping the panel.
-    let mut panel = Ignite::new().mount(ADMIN_PATH);
-    if std::env::var_os(IGNITE_VIEWS_DIR_ENV).is_none() {
-        panel = panel.views_dir(VIEWS_DIR);
-    }
+    let panel = Ignite::new()
+        .mount(ADMIN_PATH)
+        .brand_name(BRAND_NAME)
+        .brand_logo(BRAND_LOGO)
+        .brand_logo_height(BRAND_LOGO_HEIGHT)
+        .favicon(FAVICON)
+        .navigation_groups(navigation::GROUPS);
     ignite_core::register_editor(editor_script_url());
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {
         log::error!("The admin could not reserve `{INSTALL_SLUG}`: {e}");

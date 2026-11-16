@@ -35,7 +35,7 @@ Both ways start in setup mode when there is no `.env`: open `/mc-admin/install.p
 
 The admin is Ignite's panel at `/mc-admin`: sign in at `/mc-admin/login`. Posts are at `/mc-admin/post`, pages at `/mc-admin/page`, and each custom post type the admin shows at `/mc-admin/<post type>`. Ignite also answers a health check at `/up`.
 
-- **MySQL or MariaDB only, for now.** Ignite 0.5.0 signs users in and keeps sessions on MySQL and MariaDB only. On SQLite and PostgreSQL, `/mc-admin` and everything under it answer a 503 page that says so; the site and the REST API work as usual.
+- **MySQL or MariaDB only, for now.** Ignite 0.6.0 signs users in and keeps sessions on MySQL and MariaDB only. On SQLite and PostgreSQL, `/mc-admin` and everything under it answer a 503 page that says so; the site and the REST API work as usual.
 - **One database.** Ignite reads `DATABASE_URL` and `IGNITE_SECRET_KEY` from the environment or `.env` itself. They must be the site's: when `DATABASE_URL` is not the site's database, the admin answers the 503 page and the log says why.
 - **Who can use the post and page screens:** administrators and editors. Roles are Ignite roles named after WordPress's (`administrator`, `editor`, `author`, `contributor`, `subscriber`; Ignite's `super-admin` counts as an administrator), created when the site starts. Authors, contributors and subscribers can sign in and reach the dashboard and their profile, but not the post screens yet; they can write through the REST API with an application password.
 - **Page templates:** a theme lists its page templates in `theme.toml`, and the page form offers them with "Default template":

@@ -316,6 +316,7 @@ async fn flows(scratch: &ScratchDatabase) {
     pages(&client, &db).await;
 
     sign_out(&client).await;
+    brand_and_sidebar(&client, &db).await;
     others_are_refused(&client, &db, &author_email, &subscriber_email).await;
     drop(client);
 
@@ -344,6 +345,83 @@ async fn flows(scratch: &ScratchDatabase) {
     assert_eq!(get(&second, "/mc-admin").await.0, Status::Ok);
     drop(second);
     db.close().await;
+}
+
+/// The admin's brand (Ignite's brand options) and its sidebar in WordPress's menu order: the
+/// dashboard, then Content (Posts 5, Media 10, Pages 20), then Site (Menus 60, then the settings
+/// screens from 80), each with its Dashicons class.
+async fn brand_and_sidebar(client: &Client, db: &Database) {
+    // The signed-out bar of the sign-in page shows the logo too.
+    let (_, login) = get(client, "/mc-admin/login").await;
+    assert!(
+        login.contains("src=\"/mc-includes/images/mission-control-logo.webp\" alt=\"RocketBoost Mission Control\""),
+        "{login}"
+    );
+    let (_, admin_email) = user(db, "ada", "administrator").await;
+    sign_in(client, &admin_email).await;
+    let (status, dashboard) = get(client, "/mc-admin").await;
+    assert_eq!(status, Status::Ok);
+    assert!(
+        dashboard.contains(
+            "<img src=\"/mc-includes/images/mission-control-logo.webp\" \
+             alt=\"RocketBoost Mission Control\" class=\"w-auto\" style=\"height: 8.625rem\">"
+        ),
+        "{dashboard}"
+    );
+    assert!(
+        dashboard.contains("href=\"/mc-includes/images/favicon-32.png\""),
+        "{dashboard}"
+    );
+    assert!(
+        dashboard.contains("· RocketBoost Mission Control</title>"),
+        "{dashboard}"
+    );
+    assert!(!dashboard.contains("ignite-mark.png"), "{dashboard}");
+    // The favicon and the logo are served.
+    for (uri, kind) in [
+        ("/mc-includes/images/favicon-32.png", "image/png"),
+        (
+            "/mc-includes/images/mission-control-logo.webp",
+            "image/webp",
+        ),
+    ] {
+        let response = client.get(uri).dispatch().await;
+        assert_eq!(response.status(), Status::Ok, "{uri}");
+        assert_eq!(response.content_type().unwrap().to_string(), kind, "{uri}");
+    }
+    let nav_start = dashboard.find("aria-label=\"Main\"").expect("the sidebar");
+    let nav = &dashboard[nav_start..dashboard[nav_start..].find("</nav>").unwrap() + nav_start];
+    let order = [
+        "href=\"/mc-admin\"",
+        ">Content</p>",
+        "<span class=\"dashicons dashicons-admin-post\" aria-hidden=\"true\"></span>Posts",
+        "<span class=\"dashicons dashicons-admin-media\" aria-hidden=\"true\"></span>Media",
+        "<span class=\"dashicons dashicons-admin-page\" aria-hidden=\"true\"></span>Pages",
+        ">Site</p>",
+        "<span class=\"dashicons dashicons-admin-appearance\" aria-hidden=\"true\"></span>Menus",
+        "dashicons-admin-settings\" aria-hidden=\"true\"></span>General Settings",
+        "</span>Writing Settings",
+        "</span>Reading Settings",
+        "</span>Discussion Settings",
+        "</span>Media Settings",
+        "</span>Permalink Settings",
+        "</span>Privacy",
+    ];
+    // Nothing between the dashboard and the Content group: every screen is in a group.
+    let dashboard_end = nav.find("href=\"/mc-admin\"").unwrap();
+    let content = nav.find(">Content</p>").unwrap();
+    assert!(
+        !nav[dashboard_end..content].contains("ig-nav-link\" href"),
+        "{nav}"
+    );
+    let mut at = 0;
+    for entry in order {
+        let found = nav[at..]
+            .find(entry)
+            .unwrap_or_else(|| panic!("`{entry}` after byte {at} of the sidebar: {nav}"));
+        at += found + entry.len();
+    }
+    sign_out(client).await;
 }
 
 async fn rest_errors_keep_their_json(client: &Client) {
