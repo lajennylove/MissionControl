@@ -109,6 +109,7 @@ use rocket::{Build, Data, Request, Rocket, State};
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
+mod locks;
 mod media;
 
 /// Where the admin is mounted (Ruling R120).
@@ -343,6 +344,7 @@ pub(crate) async fn mount_panel(
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
         .mount(ADMIN_PATH, new_routes())
+        .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))

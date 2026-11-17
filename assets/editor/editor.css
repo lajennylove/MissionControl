@@ -291,3 +291,12 @@
   padding: 0.25rem 0.75rem;
   margin-bottom: 1rem;
 }
+
+/* Post locks (Task A6): WordPress's "has taken over" notice on the edit form. */
+.mc-post-locked {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid #d63638;
+  background: #fcf0f1;
+  color: #1d2327;
+}

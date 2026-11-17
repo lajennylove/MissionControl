@@ -5,6 +5,7 @@
 //! ([`navigation`]). The `mission-control` crate mounts Ignite's panel at
 //! `/mc-admin` and applies them before Ignite's routes run.
 
+pub mod locks;
 pub mod media;
 pub mod menus;
 pub mod navigation;

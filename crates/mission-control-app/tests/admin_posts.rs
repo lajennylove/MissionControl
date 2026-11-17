@@ -311,6 +311,7 @@ async fn flows(scratch: &ScratchDatabase) {
     pages(&client, &db).await;
 
     sign_out(&client).await;
+    post_locks(&client, &db).await;
     brand_and_sidebar(&client, &db).await;
     others_are_refused(
         &client,
@@ -347,6 +348,141 @@ async fn flows(scratch: &ScratchDatabase) {
     assert_eq!(get(&second, "/mc-admin").await.0, Status::Ok);
     drop(second);
     db.close().await;
+}
+
+/// Task A6: post locks, as WordPress's `_edit_lock`: opening a post's form locks it, a second
+/// editor is shown who is editing and may take over, and the heartbeat renews or reports it.
+async fn post_locks(client: &Client, db: &Database) {
+    let (first, first_email) = user(db, "lena", "editor").await;
+    let (second, second_email) = user(db, "otto", "editor").await;
+    sign_in(client, &first_email).await;
+    let id = new_draft(client, "post").await;
+    let lock = get_post_meta(db, id, "_edit_lock").await.unwrap();
+    let lock = lock.and_then(|v| v.as_str().map(str::to_owned)).unwrap();
+    assert!(lock.ends_with(&format!(":{first}")), "{lock}");
+    sign_out(client).await;
+
+    // The second editor sees the lock and nothing else.
+    sign_in(client, &second_email).await;
+    let edit = format!("/mc-admin/post/{id}/edit");
+    let (status, page) = get(client, &edit).await;
+    assert_eq!(status, Status::Ok);
+    assert!(
+        page.contains("lena is currently editing this post. Do you want to take over?"),
+        "{page}"
+    );
+    assert!(!page.contains("data-ignite-editor"), "{page}");
+    // Take over needs the session's token.
+    let response = post(
+        client,
+        &format!("/mc-admin/post/{id}/lock"),
+        &[("_token", "x")],
+    )
+    .await;
+    assert_eq!(response.status().code, 419);
+    let csrf = token(client).await;
+    let response = post(
+        client,
+        &format!("/mc-admin/post/{id}/lock"),
+        &[("_token", &csrf)],
+    )
+    .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    assert_eq!(location(&response), edit);
+    let (status, page) = get(client, &edit).await;
+    assert_eq!(status, Status::Ok);
+    assert!(!page.contains("currently editing"), "{page}");
+    let heartbeat = |token: String| {
+        let id = id.to_string();
+        async move {
+            let response = post(
+                client,
+                "/mc-admin/admin-ajax.php?action=heartbeat",
+                &[
+                    ("action", "heartbeat"),
+                    ("post_type", "post"),
+                    ("post_id", &id),
+                    ("_token", &token),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), Status::Ok);
+            serde_json::from_str::<serde_json::Value>(&response.into_string().await.unwrap())
+                .unwrap()
+        }
+    };
+    let beat = heartbeat(token(client).await).await;
+    assert!(
+        beat["wp-refresh-post-lock"]["new_lock"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(":{second}")),
+        "{beat}"
+    );
+    sign_out(client).await;
+
+    // The first editor's heartbeat reports the take-over.
+    sign_in(client, &first_email).await;
+    let beat = heartbeat(token(client).await).await;
+    assert_eq!(
+        beat["wp-refresh-post-lock"]["lock_error"]["text"],
+        "otto has taken over and is currently editing."
+    );
+    // Leaving the form releases only one's own lock.
+    let csrf = token(client).await;
+    let response = post(
+        client,
+        "/mc-admin/admin-ajax.php?action=wp-remove-post-lock",
+        &[
+            ("action", "wp-remove-post-lock"),
+            ("post_type", "post"),
+            ("post_id", &id.to_string()),
+            ("_token", &csrf),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let (_, page) = get(client, &edit).await;
+    assert!(page.contains("otto is currently editing"), "{page}");
+    // A save locks the post for the one who saves, as WordPress's `edit_post`.
+    save(client, "post", id, &[("status", "draft")]).await;
+    let lock = get_post_meta(db, id, "_edit_lock").await.unwrap();
+    let lock = lock.and_then(|v| v.as_str().map(str::to_owned)).unwrap();
+    assert!(lock.ends_with(&format!(":{first}")), "{lock}");
+    // A heartbeat with a wrong token is refused.
+    let response = post(
+        client,
+        "/mc-admin/admin-ajax.php?action=heartbeat",
+        &[
+            ("action", "heartbeat"),
+            ("post_type", "post"),
+            ("post_id", &id.to_string()),
+            ("_token", "x"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status().code, 419);
+    sign_out(client).await;
+
+    // An author cannot edit an editor's post: no lock page, no name.
+    let (_, author_email) = user(db, "lockless", "author").await;
+    sign_in(client, &author_email).await;
+    let (status, page) = get(client, &edit).await;
+    assert_eq!(status, Status::NotFound);
+    assert!(!page.contains("lena"), "{page}");
+    sign_out(client).await;
+    // Signed out, the heartbeat says so.
+    let response = post(
+        client,
+        "/mc-admin/admin-ajax.php?action=heartbeat",
+        &[
+            ("action", "heartbeat"),
+            ("post_type", "post"),
+            ("post_id", &id.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Unauthorized);
 }
 
 /// The admin's brand (Ignite's brand options) and its sidebar in WordPress's menu order: the

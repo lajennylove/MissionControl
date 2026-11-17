@@ -623,7 +623,102 @@
     return Boolean(editor && editor.mode === 'tinymce');
   };
 
+  /*
+   * Post locks (Task A6), as WordPress's heartbeat (`wp-refresh-post-lock`) and `post.js` keep
+   * them: while a post's edit form is open its lock is renewed every 60 seconds (a lock lasts
+   * 150); when someone else takes over, a notice says so and the form's save is disabled; when
+   * the form is left, the lock is released (`wp-remove-post-lock`).
+   */
+  var LOCK_INTERVAL = 60000;
+
+  function startLock() {
+    // The edit form (`/mc-admin/<type>/<id>/edit`), or the form shown again after a save that
+    // failed its checks (`/mc-admin/<type>/<id>`).
+    var match = /\/mc-admin\/([^/]+)\/(\d+)(?:\/edit)?\/?$/.exec(window.location.pathname);
+    if (!match || !window.fetch) {
+      return;
+    }
+    var form = document.querySelector('form[action$="/' + match[1] + '/' + match[2] + '"]');
+    var tokenInput = form && form.querySelector('input[name="_token"]');
+    if (!form || !tokenInput) {
+      return;
+    }
+    var ajax = new URL('/mc-admin/admin-ajax.php', document.baseURI);
+    var fields = function (action) {
+      var body = new URLSearchParams();
+      body.set('action', action);
+      body.set('post_type', match[1]);
+      body.set('post_id', match[2]);
+      body.set('_token', tokenInput.value);
+      if (activeLock) {
+        body.set('active_post_lock', activeLock);
+      }
+      return body;
+    };
+    var url = function (action) {
+      ajax.searchParams.set('action', action);
+      return ajax.href;
+    };
+    var activeLock = '';
+    var locked = false;
+    var saving = false;
+    var timer = window.setInterval(function () {
+      fetch(url('heartbeat'), {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+        body: fields('heartbeat')
+      }).then(function (response) {
+        return response.ok ? response.json() : null;
+      }).then(function (data) {
+        var lock = data && data['wp-refresh-post-lock'];
+        if (lock && lock.new_lock) {
+          activeLock = lock.new_lock;
+        }
+        if (lock && lock.lock_error && !locked) {
+          locked = true;
+          window.clearInterval(timer);
+          showTakenOver(form, lock.lock_error.text);
+        }
+      }).catch(function () {});
+    }, LOCK_INTERVAL);
+    form.addEventListener('submit', function (event) {
+      if (locked) {
+        // Someone took over: this form is no longer saved (WordPress's dialog blocks it).
+        event.preventDefault();
+        return;
+      }
+      // The save keeps the lock (the server renews it); no release on the way out.
+      saving = true;
+    });
+    window.addEventListener('pagehide', function () {
+      if (!locked && !saving && navigator.sendBeacon) {
+        navigator.sendBeacon(url('wp-remove-post-lock'), fields('wp-remove-post-lock'));
+      }
+    });
+  }
+
+  /** WordPress's "has taken over" notice: the edit form can no longer be saved here. */
+  function showTakenOver(form, text) {
+    var notice = document.createElement('div');
+    notice.className = 'mc-post-locked';
+    notice.setAttribute('role', 'alert');
+    var message = document.createElement('p');
+    message.textContent = text;
+    var back = document.createElement('a');
+    back.href = window.location.pathname.replace(/\/\d+(?:\/edit)?\/?$/, '');
+    back.textContent = 'Go back';
+    notice.appendChild(message);
+    notice.appendChild(back);
+    form.parentNode.insertBefore(notice, form);
+    Array.prototype.forEach.call(
+      form.querySelectorAll('button[type="submit"], input[type="submit"], button:not([type])'),
+      function (button) { button.disabled = true; }
+    );
+  }
+
   function start() {
+    startLock();
     var areas = document.querySelectorAll('textarea[data-ignite-editor="wysiwyg"]');
     if (!areas.length) {
       return;

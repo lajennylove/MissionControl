@@ -239,7 +239,7 @@ impl<'r> FromRequest<'r> for UploadHeaders {
 
 /// Whether `submitted` is the session's CSRF token, compared without stopping at the first
 /// difference.
-fn token_matches(expected: &CsrfToken, submitted: Option<&str>) -> bool {
+pub(super) fn token_matches(expected: &CsrfToken, submitted: Option<&str>) -> bool {
     let Some(submitted) = submitted else {
         return false;
     };
@@ -562,7 +562,7 @@ async fn admin_ajax(
 // The upload page
 
 /// `text` with `&`, `<`, `>`, `"` and `'` escaped.
-fn escape(text: &str) -> String {
+pub(super) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
