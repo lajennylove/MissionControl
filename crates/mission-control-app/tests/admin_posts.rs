@@ -46,7 +46,7 @@ fn shipped_themes() -> PathBuf {
 }
 
 /// A copy of the default theme in a folder of its own, with a page template `templates/wide`
-/// ("Full width") declared in its manifest.
+/// ("Full width", from its `Template Name:` header).
 fn themes_with_a_page_template() -> tempfile::TempDir {
     fn copy(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
@@ -68,14 +68,8 @@ fn themes_with_a_page_template() -> tempfile::TempDir {
     std::fs::create_dir_all(theme.join("templates")).unwrap();
     std::fs::write(
         theme.join("templates/wide.propel"),
-        "@extends('layouts.app')\n\n@section('content')\n<main data-template=\"wide\">\n  \
+        "{{-- Template Name: Full width --}}\n@extends('layouts.app')\n\n@section('content')\n<main data-template=\"wide\">\n  \
          @include('partials.entry')\n</main>\n@endsection\n",
-    )
-    .unwrap();
-    let manifest = std::fs::read_to_string(theme.join("theme.toml")).unwrap();
-    std::fs::write(
-        theme.join("theme.toml"),
-        format!("{manifest}\n[templates]\n\"templates/wide\" = \"Full width\"\n"),
     )
     .unwrap();
     dir

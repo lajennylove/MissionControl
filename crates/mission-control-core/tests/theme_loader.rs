@@ -667,23 +667,59 @@ fn reserved_widget_area_ids_are_refused() {
 }
 
 #[test]
-fn page_templates_are_declared_found_and_merged_with_the_parents() {
+fn page_templates_are_found_by_their_header_and_merged_with_the_parents() {
     let themes = Themes::new();
     themes.theme(
         "base",
-        "name = \"Base\"\n[templates]\n\"templates/wide\" = \"Full width\"\nlanding = \"Landing\"\n\
-         \"templates/gone\" = \"No file\"\n",
+        "name = \"Base\"\n",
         &[
             ("index.propel", ""),
-            ("templates/wide.propel", "wide"),
-            ("landing.propel", "landing"),
+            (
+                "templates/wide.propel",
+                "{{-- Template Name: Full width --}}\n@extends('layouts.app')\n",
+            ),
+            (
+                "landing.propel",
+                "{{--\nTemplate Name: Landing\n--}}\nlanding",
+            ),
+            // No header: not a page template.
+            ("plain.propel", "{{-- Template Name: Parent plain --}}"),
+            // A template for another post type only.
+            (
+                "single-book.propel",
+                "{{-- Template Name: Book\n     Template Post Type: book, Movie --}}\n",
+            ),
+            // Two folders down: not scanned, as WordPress looks one folder deep.
+            ("a/b/deep.propel", "{{-- Template Name: Deep --}}"),
+            ("node_modules/x.propel", "{{-- Template Name: Vendored --}}"),
+            ("vendor/x.propel", "{{-- Template Name: Vendored --}}"),
+            // A header past the first 8 KiB is not read.
+            (
+                "late.propel",
+                &format!("{}\n{{{{-- Template Name: Late --}}}}", "x".repeat(9000)),
+            ),
+            (".hidden/x.propel", "{{-- Template Name: Hidden --}}"),
         ],
     );
     let child = themes.theme(
         "kid",
-        "name = \"Kid\"\ntemplate = \"base\"\n[templates]\nlanding = \"A landing page\"\n\
-         \"templates/sidebar\" = \"Blog sidebar\"\n",
-        &[("templates/sidebar.propel", "sidebar")],
+        "name = \"Kid\"\ntemplate = \"base\"\n",
+        &[
+            (
+                "landing.propel",
+                "{{-- template name:   A landing page   --}}",
+            ),
+            (
+                "templates/sidebar.propel",
+                "{{-- Template Name: Blog sidebar --}}\n",
+            ),
+            // A child file without a header hides the parent's file of the same name.
+            ("plain.propel", "child plain"),
+            (
+                "templates/both.propel",
+                "{{-- Template Name: Both\nTemplate Post Type: post, page --}}",
+            ),
+        ],
     );
     let theme = load_theme(&child).unwrap();
 
@@ -692,42 +728,70 @@ fn page_templates_are_declared_found_and_merged_with_the_parents() {
         .into_iter()
         .map(|t| (t.name, t.title))
         .collect();
-    // The child's declaration wins; a declared template without a file is left out; sorted by
-    // the name the admin shows.
+    // The child's file wins; sorted by the name the admin shows.
     assert_eq!(
         templates,
         [
             ("landing".to_owned(), "A landing page".to_owned()),
             ("templates/sidebar".to_owned(), "Blog sidebar".to_owned()),
+            ("templates/both".to_owned(), "Both".to_owned()),
             ("templates/wide".to_owned(), "Full width".to_owned()),
         ]
     );
 }
 
 #[test]
-fn the_templates_table_is_strict() {
+fn the_templates_table_is_gone() {
+    // Page templates come from the files' headers (G48); the old table is an unknown key.
     let themes = Themes::new();
-    for (manifest, expected) in [
-        ("name = \"X\"\n[templates]\ndefault = \"A\"\n", "reserved"),
-        (
-            "name = \"X\"\n[templates]\n\"a/b/c\" = \"A\"\n",
-            "not valid",
-        ),
-        (
-            "name = \"X\"\n[templates]\n\"wide.propel\" = \"A\"\n",
-            "not valid",
-        ),
-        ("name = \"X\"\n[templates]\n\"../x\" = \"A\"\n", "not valid"),
-        ("name = \"X\"\n[templates]\nwide = 3\n", "string"),
-        ("name = \"X\"\n[templates]\nwide = \" \"\n", "empty"),
-    ] {
-        let error = manifest_error(&themes, manifest);
-        assert!(
-            matches!(error, ThemeError::InvalidManifest { .. }),
-            "{manifest}: {error:?}"
-        );
-        assert!(error.to_string().contains(expected), "{manifest}: {error}");
-    }
-    let error = manifest_error(&themes, "name = \"X\"\n[templates]\n\"<script>\" = \"A\"\n");
-    assert!(!error.to_string().contains("<script>"), "{error}");
+    let error = manifest_error(
+        &themes,
+        "name = \"X\"\n[templates]\n\"templates/wide\" = \"Full width\"\n",
+    );
+    assert!(
+        matches!(error, ThemeError::InvalidManifest { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("templates"), "{error}");
+}
+
+#[test]
+fn template_headers_are_read_as_wordpress_reads_them() {
+    use mission_control_core::theme::page_template_header;
+    let header = |text: &str| page_template_header(text);
+    assert_eq!(
+        header("{{-- Template Name: Wide --}}"),
+        Some(("Wide".to_owned(), None))
+    );
+    assert_eq!(
+        header(" * Template Name: Wide */"),
+        Some(("Wide".to_owned(), None))
+    );
+    assert_eq!(
+        header("<?php /* Template Name: Wide */ ?>"),
+        Some(("Wide".to_owned(), None))
+    );
+    assert_eq!(
+        header("<? /* Template Name: Short */"),
+        Some(("Short".to_owned(), None))
+    );
+    // A carriage return alone ends a line, as `get_file_data` reads it.
+    assert_eq!(
+        header("{{-- Template Name: X\rTemplate Post Type: post --}}"),
+        Some(("X".to_owned(), Some(vec!["post".to_owned()])))
+    );
+    // A post type that cleans to nothing is not `page`.
+    assert_eq!(
+        header("{{-- Template Name: X\nTemplate Post Type: !! --}}"),
+        Some(("X".to_owned(), Some(vec![String::new()])))
+    );
+    assert_eq!(header("<p>Template Name: Wide</p>"), None);
+    assert_eq!(header("{{-- Template Name:   --}}"), None);
+    assert_eq!(
+        header("{{-- Template Name: W\r\nTemplate Post Type: Page , my-type --}}"),
+        Some((
+            "W".to_owned(),
+            Some(vec!["page".to_owned(), "my-type".to_owned()])
+        ))
+    );
 }

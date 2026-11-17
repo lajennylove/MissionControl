@@ -320,7 +320,7 @@ async fn check_references(
         }
     }
     // Ruling R124: as WordPress's `check_template` (the theme's `get_page_templates`), a template
-    // is one the active theme declares for pages, matched by name (`wide.php` is `wide`), or none
+    // is one of the active theme's page templates (a `Template Name:` header for pages), matched by name (`wide.php` is `wide`), or none
     // (empty or `default`). An unchanged stored value is not checked, so an imported one stays.
     if let Some(template) = &changes.template
         && !template.is_empty()

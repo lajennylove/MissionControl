@@ -16,6 +16,7 @@ use propel_runtime::{FileLoader, Loader, RenderError};
 
 use super::manifest::{
     MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest, MenuLocation, PageTemplate, Sidebar,
+    is_template_name,
 };
 
 /// The file extension of a Propel template.
@@ -28,6 +29,8 @@ pub struct Theme {
     dir: PathBuf,
     manifest: Manifest,
     parent: Option<Box<Theme>>,
+    /// The page templates, scanned once ([`Theme::page_templates`]), as WordPress caches them.
+    page_templates: std::sync::OnceLock<Vec<PageTemplate>>,
 }
 
 /// A template found by [`Theme::locate_template`].
@@ -322,6 +325,7 @@ fn read_theme(slug: String, dir: PathBuf) -> Result<Theme, ThemeError> {
         dir,
         manifest,
         parent: None,
+        page_templates: std::sync::OnceLock::new(),
     })
 }
 
@@ -385,21 +389,41 @@ impl Theme {
         locations
     }
 
-    /// The page templates a page can choose, as `WP_Theme::get_page_templates` lists them: the
-    /// ones this theme declares, then its parent's that it does not (a child's declaration keeps
-    /// its own name), each only when its file is found ([`locate_template`](Self::locate_template),
-    /// in the child or the parent), sorted by the name the admin shows, as
-    /// `page_template_dropdown` sorts them.
+    /// The page templates a page can choose, as `WP_Theme::get_page_templates` finds them (Task
+    /// A4, owner decision G48): each template file in this theme's folder or one folder below it
+    /// whose header has a `Template Name:` line ([`page_template_header`]), then its parent's
+    /// that it does not have (a child's file wins), for pages (no `Template Post Type:` line, or
+    /// one that lists `page`); sorted by the name the admin shows, as `page_template_dropdown`
+    /// sorts them. The file is the one [`locate_template`](Self::locate_template) finds. The scan
+    /// runs once per loaded theme: a template file added or renamed later is listed after a
+    /// restart. A folder that is a symbolic link is not scanned (stricter than WordPress).
     pub fn page_templates(&self) -> Vec<PageTemplate> {
-        let mut templates = self.manifest.templates.clone();
+        self.page_templates
+            .get_or_init(|| self.scan_page_templates())
+            .clone()
+    }
+
+    /// Scans the theme's files for [`page_templates`](Self::page_templates).
+    fn scan_page_templates(&self) -> Vec<PageTemplate> {
+        let mut names = template_files(&self.dir);
         if let Some(parent) = self.parent() {
-            for template in &parent.manifest.templates {
-                if !templates.iter().any(|t| t.name == template.name) {
-                    templates.push(template.clone());
+            for name in template_files(&parent.dir) {
+                if !names.contains(&name) {
+                    names.push(name);
                 }
             }
         }
-        templates.retain(|t| self.locate_template(&[t.name.as_str()]).is_some());
+        let mut templates: Vec<PageTemplate> = names
+            .into_iter()
+            .filter(|name| name != "default" && is_template_name(name))
+            .filter_map(|name| {
+                let located = self.locate_template(&[name.as_str()])?;
+                let header = read_header(&located.path)?;
+                let (title, post_types) = page_template_header(&header)?;
+                let for_pages = post_types.is_none_or(|types| types.iter().any(|t| t == "page"));
+                for_pages.then_some(PageTemplate { name, title })
+            })
+            .collect();
         templates.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.name.cmp(&b.name)));
         templates
     }
@@ -550,4 +574,137 @@ impl Loader for ThemeLoader {
         })?;
         self.files.template(name)
     }
+}
+
+/// The folders WordPress's `WP_Theme::scandir` skips.
+const SKIPPED_FOLDERS: [&str; 4] = ["CVS", "node_modules", "vendor", "bower_components"];
+
+/// How much of a template file is read for its header: 8 KiB, as WordPress's `get_file_data`.
+const HEADER_BYTES: u64 = 8 * 1024;
+
+/// The template names of the `.propel` files in `dir` and in its folders one level down
+/// (`wide`, `templates/wide`), as `get_files( 'php', 1 )` lists them; hidden files and folders,
+/// and WordPress's skipped folders, are left out.
+fn template_files(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let list = |folder: &Path| -> Vec<(String, bool)> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, bool)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let is_dir = entry.file_type().ok()?.is_dir();
+                (!name.starts_with('.')).then_some((name, is_dir))
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    for (name, is_dir) in list(dir) {
+        if is_dir {
+            if SKIPPED_FOLDERS.contains(&name.as_str()) {
+                continue;
+            }
+            for (file, sub_is_dir) in list(&dir.join(&name)) {
+                if let (false, Some(stem)) = (sub_is_dir, file.strip_suffix(".propel")) {
+                    names.push(format!("{name}/{stem}"));
+                }
+            }
+        } else if let Some(stem) = name.strip_suffix(".propel") {
+            names.push(stem.to_owned());
+        }
+    }
+    names
+}
+
+/// The first [`HEADER_BYTES`] of the file at `path`, as text (invalid UTF-8 replaced).
+fn read_header(path: &Path) -> Option<String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(HEADER_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The `Template Name:` and `Template Post Type:` headers of a template's first lines, as
+/// WordPress's `get_file_data` reads them (`^(?:[ \t]*<\?php)?[ \t/*#@]*Template Name:(.*)$`, any
+/// case), with Propel's comment opener `{{--` allowed where WordPress allows `<?php`, and the
+/// value cleaned as `_cleanup_header_comment` cleans it, also cutting Propel's `--}}`. `None`
+/// when there is no name; the post types are lowercase keys (`sanitize_key`, empty keys kept),
+/// `None` when the header is not there.
+///
+/// ```text
+/// {{-- Template Name: Full width --}}
+/// ```
+pub fn page_template_header(text: &str) -> Option<(String, Option<Vec<String>>)> {
+    // `get_file_data` makes every line ending a line feed first.
+    let text = text.replace('\r', "\n");
+    let title = header_value(&text, "Template Name")?;
+    let types = header_value(&text, "Template Post Type").map(|value| {
+        value
+            .split(',')
+            .map(|t| {
+                t.chars()
+                    .filter_map(|c| {
+                        let c = c.to_ascii_lowercase();
+                        (c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+                            .then_some(c)
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    });
+    Some((title, types))
+}
+
+/// The cleaned value of the first `field:` header line of `text`, when it is not empty.
+fn header_value(text: &str, field: &str) -> Option<String> {
+    let label = format!("{field}:");
+    for line in text.split('\n') {
+        let b = line.as_bytes();
+        let mut i = 0;
+        // `(?:[ \t]*<\?php)?`, or Propel's `{{--`.
+        let mut j = i;
+        while j < b.len() && matches!(b[j], b' ' | b'\t') {
+            j += 1;
+        }
+        // `<\?(?:php)?`: `<?php` before its prefix `<?`.
+        for opener in ["<?php", "<?", "{{--"] {
+            if line
+                .get(j..j + opener.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(opener))
+            {
+                i = j + opener.len();
+                break;
+            }
+        }
+        // `[ \t/*#@]*`.
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'/' | b'*' | b'#' | b'@') {
+            i += 1;
+        }
+        if !line
+            .get(i..i + label.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(&label))
+        {
+            continue;
+        }
+        let value = cleanup_header_comment(&line[i + label.len()..]);
+        return (!value.is_empty()).then_some(value);
+    }
+    None
+}
+
+/// WordPress's `_cleanup_header_comment`: the value up to a comment's end (`*/`, `?>`, and
+/// Propel's `--}}`), trimmed.
+fn cleanup_header_comment(value: &str) -> String {
+    let end = ["*/", "?>", "--}}"]
+        .iter()
+        .filter_map(|marker| value.find(marker))
+        .min()
+        .unwrap_or(value.len());
+    value[..end].trim().to_owned()
 }

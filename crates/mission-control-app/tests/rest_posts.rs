@@ -2135,9 +2135,9 @@ async fn the_site_starts_when_the_type_tables_cannot_be_read() {
     assert_eq!(response.status(), Status::Ok);
 }
 
-/// Ruling R124: the REST API's `template` is one the active theme declares for pages (matched by
-/// name, so `wide.php` is `wide`), `default` or empty; a template file the theme has but does not
-/// declare is refused, as WordPress's `check_template` refuses one `get_page_templates` lacks. An
+/// Ruling R124: the REST API's `template` is one of the active theme's page templates (matched
+/// by name, so `wide.php` is `wide`), `default` or empty; a template file without a `Template
+/// Name:` header is refused, as WordPress's `check_template` refuses one `get_page_templates` lacks. An
 /// unchanged stored value is not checked.
 #[rocket::async_test]
 async fn a_template_is_one_the_theme_declares_for_pages() {
@@ -2145,13 +2145,13 @@ async fn a_template_is_one_the_theme_declares_for_pages() {
     let theme = themes.path().join("default");
     std::fs::create_dir_all(theme.join("templates")).unwrap();
     std::fs::write(theme.join("index.propel"), "index").unwrap();
-    std::fs::write(theme.join("templates/wide.propel"), "wide").unwrap();
-    std::fs::write(theme.join("templates/plain.propel"), "plain").unwrap();
     std::fs::write(
-        theme.join("theme.toml"),
-        "name = \"Test\"\n[templates]\n\"templates/wide\" = \"Full width\"\n",
+        theme.join("templates/wide.propel"),
+        "{{-- Template Name: Full width --}}\nwide",
     )
     .unwrap();
+    std::fs::write(theme.join("templates/plain.propel"), "plain").unwrap();
+    std::fs::write(theme.join("theme.toml"), "name = \"Test\"\n").unwrap();
     let site = site_with(config_with_themes(themes.path().to_path_buf())).await;
 
     for template in ["templates/wide", "templates/wide.php", "default", ""] {

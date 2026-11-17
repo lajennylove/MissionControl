@@ -38,11 +38,11 @@ The admin is Ignite's panel at `/mc-admin`: sign in at `/mc-admin/login`. Posts 
 - **MySQL or MariaDB only, for now.** Ignite 0.6.0 signs users in and keeps sessions on MySQL and MariaDB only. On SQLite and PostgreSQL, `/mc-admin` and everything under it answer a 503 page that says so; the site and the REST API work as usual.
 - **One database.** Ignite reads `DATABASE_URL` and `IGNITE_SECRET_KEY` from the environment or `.env` itself. They must be the site's: when `DATABASE_URL` is not the site's database, the admin answers the 503 page and the log says why.
 - **Who can use the post and page screens:** as in WordPress, by capability. Roles are Ignite roles named after WordPress's (`administrator`, `editor`, `author`, `contributor`, `subscriber`; Ignite's `super-admin` counts as an administrator), created when the site starts. Administrators and editors see and edit every post and page. Authors and contributors see and edit only their own posts (not pages); an author publishes, a contributor's Published is saved as Pending, and their HTML is filtered by kses, as WordPress does for users without `unfiltered_html`. Subscribers reach the dashboard and their profile only. Another user's post is not found (404) for a user who may not edit it, and an action the user may not take is refused (403).
-- **Page templates:** a theme lists its page templates in `theme.toml`, and the page form offers them with "Default template":
+- **Page templates:** as in WordPress, a template file in the theme's folder or one folder below it is a page template when its header has a `Template Name:` line, written in a Propel comment; the page form offers them with "Default template". A `Template Post Type:` line that does not list `page` keeps it off the page form.
 
-  ```toml
-  [templates]
-  "templates/wide" = "Full width"   # templates/wide.propel
+  ```blade
+  {{-- Template Name: Full width --}}
+  @extends('layouts.app')
   ```
 
 - **The editor:** rich text fields, the post content included, use WordPress's classic editor: TinyMCE 7.9.3 with WordPress's toolbar, the Visual and Text tabs (Text is the HTML itself) and Add Media. Add Media opens a small media picker: upload a file, or search and pick one from the media library, choose an image's size, alignment and alternative text, and insert it with WordPress's markup (`<img ... class="alignnone size-medium wp-image-<id>">`, or a link for other files); an image with a caption goes in WordPress's `[caption]` shortcode, which the site shows as a `<figure class="wp-caption">` with its `<figcaption>`. The editor's files are compiled into the binary and served at `/mc-includes/js/editor.js` and `/mc-includes/js/tinymce/`; nothing is loaded from another site. The post screens store the HTML as sent for users with `unfiltered_html` (administrators and editors), and through kses for the others. The Visual tab, as in WordPress, cleans the HTML it edits; switch to Text for markup it would change.
