@@ -57,7 +57,7 @@ use rocket::{Build, Data, Request, Response, Rocket, Route};
 use serde_json::{Value, json};
 
 use super::ADMIN_PATH;
-use crate::editor::editor_stylesheet_url;
+use crate::editor::{editor_stylesheet_url, media_grid_script_url};
 use crate::rest::auth::AuthSettings;
 use crate::rest::media::{BodyError, MULTIPART_OVERHEAD, UploadSettings, read_body};
 
@@ -107,7 +107,13 @@ pub(crate) fn mount_media(rocket: Rocket<Build>) -> (Rocket<Build>, MediaScreen)
 
 /// The media routes, at [`MEDIA_RANK`].
 fn routes() -> Vec<Route> {
-    let mut routes = rocket::routes![async_upload, admin_ajax, upload_page_route, browser_upload];
+    let mut routes = rocket::routes![
+        async_upload,
+        admin_ajax,
+        upload_page_route,
+        browser_upload,
+        grid_page
+    ];
     for route in &mut routes {
         route.rank = MEDIA_RANK;
     }
@@ -742,5 +748,94 @@ mod tests {
         for text in [None, Some(""), Some("0"), Some("-3"), Some("x")] {
             assert_eq!(parent_of(text), None, "{text:?}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The grid (Task A8)
+
+/// The media library's view a request asks for (Ruling R147): the grid, unless it asks for the
+/// list (`mode=list`) or carries the list's own search, sort or page, which forwards to Ignite's
+/// list. WordPress remembers the mode per user (`media_library_mode`); here it is not
+/// remembered, because Ignite's list has no link back to the grid: a remembered list would
+/// leave no way back but typing `?mode=grid`. So the Media menu always opens the grid, and so
+/// do Ignite's redirects after a save or delete and the list's first page without a search or
+/// sort.
+struct GridMode;
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for GridMode {
+    type Error = ();
+
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, ()> {
+        let list = request.query_value::<&str>("mode").and_then(Result::ok) == Some("list")
+            || ["q", "sort", "dir", "page"]
+                .iter()
+                .any(|name| request.query_value::<&str>(name).is_some());
+        let ours = request
+            .rocket()
+            .state::<MediaScreen>()
+            .is_some_and(|screen| screen.registered);
+        if list || !ours {
+            Outcome::Forward(Status::NotFound)
+        } else {
+            Outcome::Success(Self)
+        }
+    }
+}
+
+/// `GET /mc-admin/attachment`: WordPress's Media Library in its grid mode, the default: the
+/// attachments as thumbnails, a search, "Load more", and the attachment details panel
+/// (`assets/editor/grid.js`), with a link to the list view. The fairing has checked the
+/// screen's capabilities; a visitor fails [`AdminUser`] with 401, which Ignite sends to its
+/// sign-in page.
+#[rocket::get("/attachment")]
+fn grid_page(_mode: GridMode, _user: AdminUser, token: CsrfToken) -> NoStore<RawHtml<String>> {
+    NoStore(RawHtml(format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Media Library</title>
+<link rel="icon" href="/mc-includes/images/favicon-32.png">
+<link rel="stylesheet" href="{stylesheet}">
+</head>
+<body class="mc-media-grid-page">
+<main id="mc-media-grid" data-ajax="{admin}/admin-ajax.php" data-admin="{admin}" data-token="{token}">
+<p><a href="{admin}">Dashboard</a></p>
+<h1>Media Library <a class="mc-grid-add" href="{admin}/{slug}/new">Add New Media File</a></h1>
+<div class="mc-grid-toolbar">
+<span class="mc-grid-modes"><span aria-current="page">Grid view</span> | <a href="{admin}/{slug}?mode=list">List view</a></span>
+<label for="mc-grid-search">Search media</label>
+<input type="search" id="mc-grid-search">
+</div>
+<p class="mc-grid-status" role="status" aria-live="polite"></p>
+<div class="mc-grid-body">
+<ul class="mc-grid-items"></ul>
+<aside class="mc-grid-details" hidden aria-label="Attachment details"></aside>
+</div>
+<p><button type="button" class="mc-grid-more" hidden>Load more</button></p>
+</main>
+<script src="{script}"></script>
+</body>
+</html>"#,
+        stylesheet = escape(&editor_stylesheet_url()),
+        script = escape(&media_grid_script_url()),
+        admin = ADMIN_PATH,
+        slug = ATTACHMENT,
+        token = escape(token.value()),
+    )))
+}
+
+/// A page that carries the session's CSRF token: not stored by caches.
+struct NoStore<R>(R);
+
+impl<'r, R: Responder<'r, 'static>> Responder<'r, 'static> for NoStore<R> {
+    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        let mut response = self.0.respond_to(request)?;
+        response.set_header(Header::new("Cache-Control", "no-store"));
+        Ok(response)
     }
 }

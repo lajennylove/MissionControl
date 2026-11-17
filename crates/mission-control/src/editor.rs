@@ -89,6 +89,7 @@ macro_rules! bundle {
 static BUNDLE: &[Asset] = bundle! {
     "js/editor.js" => "editor.js",
     "js/media.js" => "media.js",
+    "js/media-grid.js" => "grid.js",
     "css/editor.css" => "editor.css",
     "js/tinymce/tinymce.min.js" => "tinymce/tinymce.min.js",
     "js/tinymce/license.md" => "tinymce/license.md",
@@ -148,6 +149,11 @@ pub fn editor_script_url() -> String {
 /// the Add Media picker and the media library's upload page.
 pub(crate) fn editor_stylesheet_url() -> String {
     format!("{INCLUDES_PATH}/css/editor.css?ver={}", editor_version())
+}
+
+/// The URL of the media library's grid script (Task A8), `/mc-includes/js/media-grid.js?ver=...`.
+pub(crate) fn media_grid_script_url() -> String {
+    format!("{INCLUDES_PATH}/js/media-grid.js?ver={}", editor_version())
 }
 
 /// The `Content-Type` of a file of the bundle, from its extension.

@@ -476,9 +476,51 @@ async fn flow(scratch: &ScratchDatabase) {
     assert_eq!(response.status(), Status::BadRequest);
     assert_eq!(response.into_string().await.unwrap(), "0");
 
-    // The screen: listed with the file name and type, searchable.
-    let (status, list) = get(&client, "/mc-admin/attachment").await;
+    // The screen opens in WordPress's grid mode (Task A8): the page, its script and the list
+    // view link; the items come from `query-attachments`.
+    let (status, grid) = get(&client, "/mc-admin/attachment").await;
     assert_eq!(status, Status::Ok);
+    assert!(grid.contains("id=\"mc-media-grid\""), "{grid}");
+    assert!(
+        grid.contains("/mc-includes/js/media-grid.js?ver="),
+        "{grid}"
+    );
+    assert!(
+        grid.contains("href=\"/mc-admin/attachment?mode=list\""),
+        "{grid}"
+    );
+    assert!(grid.contains("data-token=\""), "{grid}");
+    let response = client
+        .get(format!(
+            "/mc-includes/js/media-grid.js?ver={}",
+            mission_control::editor_version()
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    // The list view, and the list's own search, sort and pages, are Ignite's list.
+    let (status, list) = get(&client, "/mc-admin/attachment?mode=list").await;
+    assert_eq!(status, Status::Ok);
+    assert!(!list.contains("mc-media-grid"), "{list}");
+    let (_, sorted) = get(&client, "/mc-admin/attachment?sort=col_title&dir=asc").await;
+    assert!(!sorted.contains("mc-media-grid"), "{sorted}");
+    // The mode is not remembered (Ruling R147): the plain address is the grid again, kept out
+    // of caches (the page carries the session's token).
+    let response = client.get("/mc-admin/attachment").dispatch().await;
+    assert_eq!(
+        response.headers().get_one("Cache-Control"),
+        Some("no-store")
+    );
+    assert!(
+        response
+            .into_string()
+            .await
+            .unwrap()
+            .contains("mc-media-grid")
+    );
+    let (_, plain) = get(&client, "/mc-admin/attachment").await;
+    assert!(plain.contains("mc-media-grid"), "{plain}");
+    // Listed with the file name and type, searchable.
     assert!(list.contains("Harbour Boats"), "{list}");
     assert!(list.contains("Harbour-Boats.jpg"), "{list}");
     assert!(list.contains("application/pdf"), "{list}");

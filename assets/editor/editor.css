@@ -300,3 +300,85 @@
   background: #fcf0f1;
   color: #1d2327;
 }
+
+/* The media library's grid (Task A8), as WordPress's Media Library grid mode. */
+.mc-media-grid-page {
+  margin: 0;
+  padding: 1rem 1.5rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #1d2327;
+  background: #f0f0f1;
+}
+.mc-grid-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+.mc-grid-add {
+  margin-left: 0.5rem;
+  font-size: 0.875rem;
+}
+.mc-grid-body {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.mc-grid-items {
+  display: grid;
+  flex: 1;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mc-grid-thumb {
+  display: flex;
+  width: 100%;
+  aspect-ratio: 1;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid #c3c4c7;
+  background: #fff;
+  cursor: pointer;
+}
+.mc-grid-thumb[aria-pressed="true"] {
+  outline: 3px solid #2271b1;
+}
+.mc-grid-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.mc-grid-file {
+  padding: 0.5rem;
+  overflow-wrap: anywhere;
+  font-size: 0.8125rem;
+}
+.mc-grid-details {
+  width: 300px;
+  padding: 1rem;
+  border: 1px solid #c3c4c7;
+  background: #fff;
+}
+.mc-grid-preview {
+  max-width: 100%;
+  height: auto;
+}
+.mc-grid-facts dt {
+  font-weight: 600;
+}
+.mc-grid-facts dd {
+  margin: 0 0 0.5rem;
+  overflow-wrap: anywhere;
+}
+.mc-grid-url {
+  width: 100%;
+}
+.mc-grid-remove {
+  color: #b32d2e;
+}
