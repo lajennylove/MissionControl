@@ -230,7 +230,7 @@ async fn delete(client: &Client, post_type: &str, id: i64) -> Status {
     .status()
 }
 
-/// Ruling R115's refusal: 403 with WordPress's message.
+/// The New screen's refusal (Ruling R115): 403 with WordPress's message.
 fn assert_refused(status: Status, body: &str, message: &str) {
     assert_eq!(status, Status::Forbidden, "{body}");
     assert!(body.contains(message), "{body}");
@@ -294,6 +294,7 @@ async fn flows(scratch: &ScratchDatabase) {
     // The roles exist once the app has started (Ruling R121).
     let (editor, editor_email) = user(&db, "edna", "editor").await;
     let (_, author_email) = user(&db, "arthur", "author").await;
+    let (_, contributor_email) = user(&db, "cora", "contributor").await;
     let (_, subscriber_email) = user(&db, "sue", "subscriber").await;
 
     // A visitor is sent to the sign-in page, by Ignite, also from the New screen.
@@ -317,7 +318,14 @@ async fn flows(scratch: &ScratchDatabase) {
 
     sign_out(&client).await;
     brand_and_sidebar(&client, &db).await;
-    others_are_refused(&client, &db, &author_email, &subscriber_email).await;
+    others_are_refused(
+        &client,
+        &db,
+        &author_email,
+        &contributor_email,
+        &subscriber_email,
+    )
+    .await;
     drop(client);
 
     // Fail closed: a second app in the process finds Ignite's `post` and `page` taken by the
@@ -654,12 +662,9 @@ async fn pages(client: &Client, db: &Database) {
     set_option(db, "wp_page_for_privacy_policy", &json!(parent))
         .await
         .unwrap();
+    // Ignite's policy refuses (Task A1): 403.
     let (status, body) = get(client, &format!("/mc-admin/page/{parent}/edit")).await;
-    assert_refused(
-        status,
-        &body,
-        "Sorry, you are not allowed to edit this item.",
-    );
+    assert_eq!(status, Status::Forbidden, "{body}");
     let csrf = token(client).await;
     let response = post(
         client,
@@ -667,13 +672,7 @@ async fn pages(client: &Client, db: &Database) {
         &[("_token", &csrf)],
     )
     .await;
-    let status = response.status();
-    let body = response.into_string().await.unwrap_or_default();
-    assert_refused(
-        status,
-        &body,
-        "Sorry, you are not allowed to move this item to the Trash.",
-    );
+    assert_eq!(response.status(), Status::Forbidden);
     assert_eq!(find(db, parent).await.unwrap().status, PostStatus::Publish);
 
     // A stored template the theme no longer has shows as the default, and the next save
@@ -685,13 +684,24 @@ async fn pages(client: &Client, db: &Database) {
     assert!(edit.contains("value=\"default\" selected"), "{edit}");
 }
 
+/// Task A1: authors and contributors on the post screens, through Ignite's policy and the
+/// resource's user-aware queries; subscribers are refused.
 async fn others_are_refused(
     client: &Client,
     db: &Database,
     author_email: &str,
+    contributor_email: &str,
     subscriber_email: &str,
 ) {
-    let any_post: i64 = Post::query()
+    let someones_post: i64 = Post::query()
+        .where_eq("post_type", "post")
+        .where_eq("title", "Hello from the seed")
+        .first(db)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let any_page: i64 = Post::query()
         .where_eq("post_type", "page")
         .first(db)
         .await
@@ -699,35 +709,114 @@ async fn others_are_refused(
         .unwrap()
         .id;
 
-    // An author cannot use the post screens yet (Ruling R115, owner item O8).
+    // An author: their own posts, published, with kses; not other users' posts, not pages.
     sign_in(client, author_email).await;
-    let (status, body) = get(client, "/mc-admin/post").await;
-    assert_refused(
-        status,
-        &body,
-        "Sorry, you are not allowed to edit posts in this post type.",
+    let (status, dashboard) = get(client, "/mc-admin").await;
+    assert_eq!(status, Status::Ok);
+    assert!(dashboard.contains("href=\"/mc-admin/post\""), "{dashboard}");
+    assert!(
+        !dashboard.contains("href=\"/mc-admin/page\""),
+        "{dashboard}"
     );
-    let (status, body) = get(client, "/mc-admin/post/new").await;
+    let id = new_draft(client, "post").await;
+    let author_id = find(db, id).await.unwrap().author_id;
+    save(
+        client,
+        "post",
+        id,
+        &[
+            ("title", "By <b>the</b> author"),
+            ("content", "<p>Hi <script>alert(1)</script>there</p>"),
+            ("author", &author_id.to_string()),
+            ("status", "publish"),
+        ],
+    )
+    .await;
+    let saved = find(db, id).await.unwrap();
+    assert_eq!(saved.status, PostStatus::Publish);
+    assert_eq!(saved.title, "By the author");
+    assert!(!saved.content.contains("<script"), "{}", saved.content);
+    let (status, list) = get(client, "/mc-admin/post").await;
+    assert_eq!(status, Status::Ok);
+    assert!(list.contains("By the author"), "{list}");
+    assert!(!list.contains("Hello from the seed"), "{list}");
+    // Another user's post is outside their list: 404 on its form, its save and its Delete.
+    let edit = format!("/mc-admin/post/{someones_post}/edit");
+    assert_eq!(get(client, &edit).await.0, Status::NotFound);
+    let csrf = token(client).await;
+    let response = post(
+        client,
+        &format!("/mc-admin/post/{someones_post}"),
+        &[("_token", &csrf), ("title", "Taken over")],
+    )
+    .await;
+    assert_eq!(response.status(), Status::NotFound);
+    assert_ne!(find(db, someones_post).await.unwrap().title, "Taken over");
+    assert_eq!(
+        delete(client, "post", someones_post).await,
+        Status::NotFound
+    );
+    // An author has no `edit_pages`.
+    assert_eq!(get(client, "/mc-admin/page").await.0, Status::Forbidden);
+    let (status, body) = get(client, "/mc-admin/page/new").await;
     assert_refused(
         status,
         &body,
         "Sorry, you are not allowed to create posts as this user.",
     );
+    assert_eq!(
+        get(client, &format!("/mc-admin/page/{any_page}/edit"))
+            .await
+            .0,
+        Status::Forbidden
+    );
+    // Their own post goes to the trash and comes back.
+    assert_eq!(delete(client, "post", id).await, Status::SeeOther);
+    assert_eq!(find(db, id).await.unwrap().status, PostStatus::Trash);
+    save(client, "post", id, &[("status", "draft")]).await;
+    assert_eq!(find(db, id).await.unwrap().status, PostStatus::Draft);
+    sign_out(client).await;
+
+    // A contributor cannot publish: Published is saved as Pending, as WordPress does; once
+    // published by someone else, their post is no longer theirs to edit.
+    sign_in(client, contributor_email).await;
+    let id = new_draft(client, "post").await;
+    save(
+        client,
+        "post",
+        id,
+        &[("title", "For review"), ("status", "publish")],
+    )
+    .await;
+    assert_eq!(find(db, id).await.unwrap().status, PostStatus::Pending);
+    save(client, "post", id, &[("status", "private")]).await;
+    assert_eq!(find(db, id).await.unwrap().status, PostStatus::Pending);
+    // A user who cannot publish sets no password (`_wp_translate_postdata`).
+    save(
+        client,
+        "post",
+        id,
+        &[("status", "pending"), ("password", "secret")],
+    )
+    .await;
+    assert_eq!(find(db, id).await.unwrap().password, None);
+    // Another author cannot be chosen: the only choice is themselves.
     let csrf = token(client).await;
     let response = post(
         client,
-        &format!("/mc-admin/page/{any_post}"),
-        &[
-            ("_token", &csrf),
-            ("title", "Taken over"),
-            ("status", "draft"),
-        ],
+        &format!("/mc-admin/post/{id}"),
+        &[("_token", &csrf), ("author", &author_id.to_string())],
     )
     .await;
-    assert_eq!(response.status(), Status::Forbidden);
-    assert_ne!(find(db, any_post).await.unwrap().title, "Taken over");
-    // Ignite's own pages stay open to them.
-    assert_eq!(get(client, "/mc-admin").await.0, Status::Ok);
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    assert_ne!(find(db, id).await.unwrap().author_id, author_id);
+    let mut published = find(db, id).await.unwrap();
+    published.status = PostStatus::Publish;
+    published.save(db).await.unwrap();
+    assert_eq!(
+        get(client, &format!("/mc-admin/post/{id}/edit")).await.0,
+        Status::Forbidden
+    );
     sign_out(client).await;
 
     // A subscriber reaches the dashboard and their profile (Ruling R23), not the screens.
@@ -736,17 +825,18 @@ async fn others_are_refused(
     assert_eq!(status, Status::Ok);
     assert!(!dashboard.contains("/mc-admin/post\""), "{dashboard}");
     assert_eq!(get(client, "/mc-admin/profile").await.0, Status::Ok);
-    let (status, body) = get(client, "/mc-admin/page").await;
+    assert_eq!(get(client, "/mc-admin/page").await.0, Status::Forbidden);
+    let (status, body) = get(client, "/mc-admin/post/new").await;
     assert_refused(
         status,
         &body,
-        "Sorry, you are not allowed to edit posts in this post type.",
+        "Sorry, you are not allowed to create posts as this user.",
     );
-    let (status, body) = get(client, &format!("/mc-admin/page/{any_post}/edit")).await;
-    assert_refused(
-        status,
-        &body,
-        "Sorry, you are not allowed to edit posts in this post type.",
+    assert_eq!(
+        get(client, &format!("/mc-admin/page/{any_page}/edit"))
+            .await
+            .0,
+        Status::Forbidden
     );
     sign_out(client).await;
 }

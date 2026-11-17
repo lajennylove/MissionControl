@@ -26,11 +26,16 @@
 //! - Every post type the admin shows, `post` and `page` included, as an Ignite runtime resource
 //!   at `/mc-admin/<post type>` ([`PostTypeResources`], Ruling R114), with the active theme's page
 //!   templates in the page form. The page `install.php` is reserved (Ruling R120).
-//! - A fairing that authorizes the post type screens before Ignite's routes run (Ruling R115):
-//!   the signed-in user must hold the type's whole capability set and `unfiltered_html`, and
-//!   `edit_post` or `delete_post` on the post in the URL ([`authorize_post_screen`]). A refused
-//!   request is answered with WordPress's 403 message. A visitor is let through, and Ignite sends
-//!   them to its sign-in page. Ignite's own pages are not touched.
+//! - Each post type's Ignite policy and user-aware queries (Task A1, see
+//!   `mission_control_core::admin::posts`): the list and New need the type's `edit_posts`, a
+//!   post's form and save `edit_post`, Delete `delete_post`; authors and contributors see and
+//!   edit their own posts, as WordPress lets them. Ignite answers a refusal with 403 and a post
+//!   outside the user's list with 404.
+//! - A fairing before Ignite's routes (Ruling R115, narrowed by Task A1): on a post type it
+//!   checks the New screen and refuses Ignite's create, with WordPress's 403 messages
+//!   ([`authorize_post_screen`]); on the media library it checks every screen (the type's whole
+//!   capability set and `unfiltered_html`, then the post's). A visitor is let through, and Ignite
+//!   sends them to its sign-in page. Ignite's own pages are not touched.
 //!   It fails closed: a post type whose Ignite resource this app did not register (another app
 //!   in the process holds it, or code took the slug first) answers 503, logged; and when this
 //!   app cannot register `post` or `page`, it serves no post type screens at all.
@@ -59,8 +64,10 @@
 //!   their theme locations and their items; the fairing checks `edit_theme_options`.
 //!
 //! At start the five WordPress roles are made sure to exist as Ignite roles, and each post type
-//! resource's five abilities are registered and granted to `administrator` and `editor`
-//! (Ruling R121), so Ignite's own coarse checks let them in. The settings screens' `viewAny`,
+//! resource's five abilities are registered and granted to `administrator`, `editor` and the
+//! roles whose defaults hold the type's `edit_posts` (Ruling R121, Task A1), so Ignite's coarse
+//! checks let them reach the type's policy; the media library's go to `administrator` and
+//! `editor`. The settings screens' `viewAny`,
 //! `view` and `update` and the Menus screen's five abilities are granted to `administrator`
 //! only (Ruling R132). Errors are logged, and the site starts anyway.
 //!
@@ -76,14 +83,19 @@ use mission_control_core::admin::navigation;
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
     attachment_post_type, authorize_menus_screen, authorize_post_screen, authorize_settings_screen,
-    register_nav_menus_resource, register_settings_resources,
+    may_use_post_screens, register_nav_menus_resource, register_settings_resources,
 };
 use mission_control_core::config::Config;
 use mission_control_core::media::ImageSizes;
 use mission_control_core::rest::KsesLimiter;
 use mission_control_core::theme::Theme;
-use mission_control_core::types::{PostTypeDef, PostTypeResources, Registry, create_auto_draft};
-use mission_control_core::users::{ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, SUBSCRIBER};
+use mission_control_core::types::{
+    Access, PostTypeDef, PostTypeResources, Registry, create_auto_draft,
+};
+use mission_control_core::users::{
+    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, IGNITE_SUPER_ADMIN, SUBSCRIBER,
+    ignite_roles_with_cap,
+};
 use orbit_orm::{Database, Driver};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::uri::Origin;
@@ -254,13 +266,25 @@ pub(crate) async fn mount_panel(
     let kses = rocket
         .state::<Arc<KsesLimiter>>()
         .map(|kses| KsesLimiter::clone(kses));
-    let (settings, refused_settings) =
-        register_settings_resources(SettingsServices { image_sizes, kses });
+    let (settings, refused_settings) = register_settings_resources(SettingsServices {
+        image_sizes,
+        kses: kses.clone(),
+    });
     for e in refused_settings {
         log::error!("A settings screen is not served by this app: {e}");
     }
-    let resources =
-        PostTypeResources::new(Arc::clone(&registry)).with_page_templates(theme.page_templates());
+    // The post type screens read the acting user's capabilities as the REST API does: the app's
+    // roles provider and kses limiter (Task A1).
+    let access = Access::new(
+        rocket.state::<AuthSettings>().map_or_else(
+            || Arc::new(mission_control_core::users::IgniteUserRoles) as Arc<_>,
+            |auth| Arc::clone(&auth.user_roles),
+        ),
+        kses.clone().unwrap_or_default(),
+    );
+    let resources = PostTypeResources::new(Arc::clone(&registry))
+        .with_page_templates(theme.page_templates())
+        .with_access(access);
     let menus = match register_nav_menus_resource(theme, menu_object_types(&resources, &registry)) {
         Ok(()) => true,
         Err(e) => {
@@ -290,9 +314,22 @@ pub(crate) async fn mount_panel(
     // The media library (Task 6.4): its screen, upload page and endpoints, and Ignite's media
     // fields' library.
     let (rocket, media_screen) = media::mount_media(rocket);
-    let mut slugs = resources.registered();
+    // Each post type's abilities go to the roles that hold its `edit_posts` (authors and
+    // contributors for `post`), and its policy decides each action (Task A1); the media
+    // library's go to administrators and editors, whose screen the fairing checks.
+    let mut slugs: Vec<(String, Vec<&'static str>)> = resources
+        .registered()
+        .into_iter()
+        .map(|slug| {
+            let roles = resources
+                .post_type(&slug)
+                .map(|def| post_type_roles(&def.caps().edit_posts))
+                .unwrap_or_else(|| GRANTED_ROLES.to_vec());
+            (slug, roles)
+        })
+        .collect();
     if media_screen.registered {
-        slugs.push(media::ATTACHMENT.to_owned());
+        slugs.push((media::ATTACHMENT.to_owned(), GRANTED_ROLES.to_vec()));
     }
     let mut administrator_only: Vec<(String, &[&str])> = settings
         .iter()
@@ -361,11 +398,27 @@ pub(crate) fn unavailable_routes(reason: Unavailable) -> Vec<Route> {
     .collect()
 }
 
-/// Ruling R121: the five WordPress roles as Ignite roles, and each post type resource's
-/// abilities registered and granted to `administrator` and `editor`; Ruling R132: the
-/// `administrator_only` resources' abilities registered and the ones listed granted to
-/// `administrator` only. Logs what fails.
-async fn provision(db: &Database, slugs: &[String], administrator_only: &[(String, &[&str])]) {
+/// The WordPress roles granted a post type resource's abilities: `administrator`, `editor`, and
+/// every role whose default capabilities include the type's `edit_posts` (Task A1). Ignite's
+/// `super-admin` passes every check without a grant.
+fn post_type_roles(edit_posts: &str) -> Vec<&'static str> {
+    let mut roles = GRANTED_ROLES.to_vec();
+    for role in ignite_roles_with_cap(edit_posts) {
+        if role != IGNITE_SUPER_ADMIN && !roles.contains(&role) {
+            roles.push(role);
+        }
+    }
+    roles
+}
+
+/// Ruling R121: the five WordPress roles as Ignite roles, and each resource of `slugs` given its
+/// five abilities, granted to its roles; Ruling R132: the `administrator_only` resources'
+/// abilities registered and the ones listed granted to `administrator` only. Logs what fails.
+async fn provision(
+    db: &Database,
+    slugs: &[(String, Vec<&'static str>)],
+    administrator_only: &[(String, &[&str])],
+) {
     for role in WORDPRESS_ROLES {
         match authz::create_role(db, role).await {
             Ok(()) | Err(AuthzError::Exists(_)) => {}
@@ -374,7 +427,7 @@ async fn provision(db: &Database, slugs: &[String], administrator_only: &[(Strin
     }
     let grants = slugs
         .iter()
-        .map(|slug| (slug.as_str(), &GRANTED_ROLES[..], &ABILITIES[..]))
+        .map(|(slug, roles)| (slug.as_str(), &roles[..], &ABILITIES[..]))
         .chain(
             administrator_only
                 .iter()
@@ -515,13 +568,29 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         }
         return None;
     };
+    let screen = PostScreen::parse(request.method().as_str(), &rest);
+    // A post type's list, forms and Delete are Ignite's, decided by the type's policy and its
+    // user-aware queries (Task A1). The fairing checks only the routes that are not: the New
+    // screen (Mission Control's) and Ignite's create, which the screens do not use.
+    if slug != media::ATTACHMENT && !matches!(screen, PostScreen::New | PostScreen::Create) {
+        return None;
+    }
     let (db, caps) = match signed_in_caps(request).await? {
         Ok(found) => found,
         Err(failed) => return Some(failed),
     };
-    let screen = PostScreen::parse(request.method().as_str(), &rest);
     // The media library's upload page is `media-new.php`: its refusal is WordPress's for it.
     let upload_page = slug == media::ATTACHMENT && rest == ["new"];
+    // The media library's screens stay open only to users with the type's whole capability set
+    // and `unfiltered_html` (Ruling R115): its data layer is not user-aware.
+    if slug == media::ATTACHMENT && !may_use_post_screens(&caps, &def) {
+        let refusal = match screen {
+            _ if upload_page => Refusal::UploadFiles,
+            PostScreen::New => Refusal::NewScreen,
+            _ => Refusal::Screen,
+        };
+        return Some(AdminRefusal::Refused(refusal));
+    }
     match authorize_post_screen(&db, &caps, &def, screen).await {
         Ok(Some(_)) if upload_page => Some(AdminRefusal::Refused(Refusal::UploadFiles)),
         Ok(refused) => refused.map(AdminRefusal::Refused),

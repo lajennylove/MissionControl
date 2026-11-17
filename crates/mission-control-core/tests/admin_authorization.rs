@@ -1,6 +1,6 @@
-//! Who may use the admin screens of a post type (Ruling R115, Task 6.1): the type's whole
-//! capability set and `unfiltered_html`, then `edit_post` or `delete_post` on the post, with the
-//! site's special pages. They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite
+//! Who may use the admin screens of a post type (Task A1), as WordPress's `edit.php`,
+//! `post-new.php` and `post.php` decide: the type's `edit_posts` for the list and New, then
+//! `edit_post` or `delete_post` on the post, with the site's special pages. They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite
 //! file when it is unset.
 
 use std::collections::BTreeMap;
@@ -9,7 +9,7 @@ use mission_control_core::admin::{PostScreen, Refusal, authorize_post_screen};
 use mission_control_core::content::{NewPost, Post, PostStatus, set_option};
 use mission_control_core::migrations::migrator;
 use mission_control_core::types::builtin_post_types;
-use mission_control_core::users::{AUTHOR, EDITOR, SUBSCRIBER, UserCaps};
+use mission_control_core::users::{AUTHOR, CONTRIBUTOR, EDITOR, SUBSCRIBER, UserCaps};
 use mission_control_testing::{create_users_table, database, unique_email};
 use orbit_orm::{Database, raw};
 use serde_json::json;
@@ -127,9 +127,10 @@ async fn editors_use_the_screens_and_the_post_checks_apply() {
     );
     let mut trashed_front = front.clone();
     trashed_front.trash(db).await.unwrap();
+    // Its form saves it out of the trash, so it is refused too.
     assert_eq!(
         check(&editor, &page_def, PostScreen::Edit(front.id)).await,
-        None
+        Some(Refusal::RestorePost)
     );
     assert_eq!(
         check(&editor, &page_def, PostScreen::Update(front.id)).await,
@@ -143,15 +144,42 @@ async fn editors_use_the_screens_and_the_post_checks_apply() {
         None
     );
 
-    // Authors and subscribers do not hold the whole set, even on their own post.
+    // An author: their own posts, not other users' or pages.
     let own = published(db, author_id, "post").await;
+    for screen in [
+        PostScreen::List,
+        PostScreen::New,
+        PostScreen::Edit(own.id),
+        PostScreen::Update(own.id),
+        PostScreen::Delete(own.id),
+    ] {
+        assert_eq!(check(&author, &post_def, screen).await, None, "{screen:?}");
+    }
+    let others = published(db, owner, "post").await;
     assert_eq!(
-        check(&author, &post_def, PostScreen::Edit(own.id)).await,
-        Some(Refusal::Screen)
+        check(&author, &post_def, PostScreen::Edit(others.id)).await,
+        Some(Refusal::EditPost)
     );
     assert_eq!(
-        check(&author, &post_def, PostScreen::New).await,
+        check(&author, &post_def, PostScreen::Delete(others.id)).await,
+        Some(Refusal::TrashPost)
+    );
+    assert_eq!(
+        check(&author, &page_def, PostScreen::New).await,
         Some(Refusal::NewScreen)
+    );
+    // A contributor edits their own draft, not their published post.
+    let contributor = caps(author_id, CONTRIBUTOR);
+    assert_eq!(
+        check(&contributor, &post_def, PostScreen::Edit(own.id)).await,
+        Some(Refusal::EditPost)
+    );
+    let mut draft = own.clone();
+    draft.status = PostStatus::Draft;
+    draft.save(db).await.unwrap();
+    assert_eq!(
+        check(&contributor, &post_def, PostScreen::Update(own.id)).await,
+        None
     );
     assert_eq!(
         check(&caps(author_id, SUBSCRIBER), &page_def, PostScreen::List).await,

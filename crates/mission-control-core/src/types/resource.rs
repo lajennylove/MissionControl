@@ -49,12 +49,24 @@
 //!
 //! # Trust
 //!
-//! [`RuntimeData`]'s methods receive the database and never the signed-in user, so this data
-//! layer applies no per-user rule: it writes HTML as sent (no kses), any author and any status,
-//! as WordPress lets a user with every capability of the type and `unfiltered_html` (an
-//! administrator or editor) write. It must only be served behind the admin authorization that
-//! lets only such users reach the post type screens and checks `edit_post` and `delete_post` on
-//! the post in the URL (Ruling R115, Task 6.1).
+//! Ignite's panel calls the user-aware queries (`list_for`, `find_for`, `update_for`,
+//! `delete_for`, `options_for`) with the signed-in user, and asks the type's
+//! [`PostTypePolicy`](crate::admin::posts::PostTypePolicy) before each action (Task A1). With the
+//! user's capabilities, read through [`Access`], they do what WordPress does for that user:
+//!
+//! - The list and the records leave out the posts of other users for a user without the type's
+//!   `edit_others_posts`, and other users' private posts for one without `read_private_posts`
+//!   (a post they leave out is 404 on its form, its save and its Delete).
+//! - A save runs kses on the title, content, excerpt and rich text fields for a user without
+//!   `unfiltered_html` (`kses_init_filters`); keeps the author for a user without
+//!   `edit_others_posts`; turns Published or Scheduled into Pending, and Private into the post's
+//!   status, for a user without `publish_posts` (`_wp_translate_postdata`); sets sticky only for
+//!   a user with `edit_others_posts` and `publish_posts` (`edit_post`); and moves the post to the
+//!   trash, or out of it, only for a user with `delete_post` on it.
+//!
+//! The methods without a user (`list`, `find`, `update`, `delete`) write as WordPress lets a
+//! user with every capability of the type and `unfiltered_html` write; Ignite's panel does not
+//! call them.
 //!
 //! # Creating, saving and deleting
 //!
@@ -98,11 +110,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, FixedOffset, NaiveDate, NaiveDateTime};
 use ignite_core::{
-    ColumnDef, Direction, FieldDef as IgniteFieldDef, ListQuery, Page, Row, RuntimeData,
-    RuntimeError, RuntimeFuture, RuntimeResource, register_runtime, unregister_runtime,
+    ActingUser, ColumnDef, Direction, FieldDef as IgniteFieldDef, ListQuery, Page, Row,
+    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, register_policy, register_runtime,
+    unregister_policy, unregister_runtime,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -111,17 +125,23 @@ use super::definition::{CapabilityType, FieldDef, FieldKindDef, Origin, PostType
 use super::location::ScreenContext;
 use super::registry::Registry;
 use crate::admin::navigation::{PostTypePositions, place_post_type};
+use crate::admin::posts::PostTypePolicy;
 use crate::content::{
     MetaError, NewPost, Post, PostStatus, SaveError, Taxonomy, delete_post_meta, get_option,
     save_revision, set_post_meta,
 };
+use crate::content::{PostFields, kses_post};
 use crate::front::{escape_like, search_terms};
+use crate::rest::KsesLimiter;
 use crate::rest::id_of;
 use crate::rest::posts::{
     loop_free_parent, set_post_terms, set_sticky, settle_status, sync_publication,
 };
 use crate::theme::{PageTemplate, page_template_name};
-use crate::users::users_with_cap;
+use crate::users::{
+    IgniteUserRoles, Object, PostContext, PostTypeCaps, UserCaps, UserRoles, can, has_cap,
+    users_with_cap,
+};
 
 /// The most rows one list page holds, whatever the list asks for.
 pub const MAX_PER_PAGE: i64 = 100;
@@ -278,6 +298,8 @@ struct TaxonomyField {
     column: Option<String>,
     /// The taxonomy.
     taxonomy: Taxonomy,
+    /// The capability that assigns its terms (`assign_terms`).
+    assign_terms: String,
 }
 
 /// One field group field of a resource.
@@ -311,9 +333,109 @@ pub struct PostTypeData {
     templates: Vec<PageTemplate>,
     taxonomies: Vec<TaxonomyField>,
     custom: Vec<CustomField>,
+    /// The type's capabilities.
+    caps: PostTypeCaps,
+    /// The users' capabilities and the kses limiter, for the user-aware queries.
+    access: Access,
+}
+
+/// What the admin's user-aware queries need (Task A1): where users' roles come from, and the
+/// limiter kses runs under, shared with the REST API.
+#[derive(Clone)]
+pub struct Access {
+    /// The provider of users' roles: the app's (`IgniteUserRoles` by default).
+    pub user_roles: Arc<dyn UserRoles>,
+    /// The app's kses limiter.
+    pub kses: KsesLimiter,
+    /// Capabilities read in the last [`CAPS_TTL`], by user: Ignite asks the policy for each row
+    /// of a list and for each post type on every admin page, and each ask reads the roles.
+    cache: Arc<Mutex<HashMap<i64, (Instant, UserCaps)>>>,
+}
+
+/// How long a user's capabilities are reused: a role change reaches the admin's screens within
+/// it.
+const CAPS_TTL: StdDuration = StdDuration::from_secs(2);
+
+/// The most users whose capabilities are kept; the cache is emptied past it.
+const CAPS_CACHED: usize = 1000;
+
+impl Default for Access {
+    fn default() -> Self {
+        Self::new(Arc::new(IgniteUserRoles), KsesLimiter::default())
+    }
+}
+
+impl fmt::Debug for Access {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Access").finish_non_exhaustive()
+    }
+}
+
+impl Access {
+    /// Reads users' roles from `user_roles`, and runs kses under `kses`.
+    pub fn new(user_roles: Arc<dyn UserRoles>, kses: KsesLimiter) -> Self {
+        Self {
+            user_roles,
+            kses,
+            cache: Arc::default(),
+        }
+    }
+
+    /// The capabilities of the acting `user`, from their roles (reused for [`CAPS_TTL`]).
+    ///
+    /// # Errors
+    ///
+    /// The database's error while reading the roles.
+    pub async fn caps(&self, db: &Database, user: &ActingUser) -> Result<UserCaps, Error> {
+        let id = user.id();
+        {
+            let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((at, caps)) = cache.get(&id)
+                && at.elapsed() < CAPS_TTL
+            {
+                return Ok(caps.clone());
+            }
+        }
+        let caps = self.user_roles.roles(db, id).await?.user_caps(id);
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.len() >= CAPS_CACHED {
+            cache.clear();
+        }
+        cache.insert(id, (Instant::now(), caps.clone()));
+        Ok(caps)
+    }
+}
+
+/// Which posts of the type a user's list and records hold (Task A1): `None` for every post.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Scope {
+    /// The user: only their posts, when they lack `edit_others_posts`.
+    own_only: bool,
+    /// Other users' private posts are left out, when the user lacks `read_private_posts`.
+    no_others_private: bool,
+    /// The user's id.
+    user: i64,
 }
 
 impl PostTypeData {
+    /// What `caps` (user `user`'s) lets them see of the type's posts.
+    fn scope(&self, caps: &UserCaps, user: i64) -> Scope {
+        Scope {
+            own_only: !has_cap(caps, &self.caps.edit_others_posts),
+            no_others_private: !has_cap(caps, &self.caps.read_private_posts),
+            user,
+        }
+    }
+
+    /// Whether `post` is in `scope`.
+    fn in_scope(post: &Post, scope: Scope) -> bool {
+        let own = post.author_id == scope.user;
+        if scope.own_only && !own {
+            return false;
+        }
+        !(scope.no_others_private && post.status == PostStatus::Private && !own)
+    }
+
     /// Whether the type has `parent`: a hierarchical type with `page-attributes`.
     fn has_parent(&self) -> bool {
         self.hierarchical && self.page_attributes
@@ -337,6 +459,17 @@ pub fn post_type_resource_with_templates(
     registry: &Registry,
     templates: &[PageTemplate],
 ) -> RuntimeResource {
+    post_type_resource_with_access(def, registry, templates, Access::default())
+}
+
+/// [`post_type_resource_with_templates`], reading the acting user's capabilities through
+/// `access` (Task A1).
+pub fn post_type_resource_with_access(
+    def: &PostTypeDef,
+    registry: &Registry,
+    templates: &[PageTemplate],
+    access: Access,
+) -> RuntimeResource {
     let slug = def.slug.as_str();
     let supports = |s: Support| def.supports(s);
     let mut data = PostTypeData {
@@ -358,6 +491,8 @@ pub fn post_type_resource_with_templates(
         },
         taxonomies: Vec::new(),
         custom: Vec::new(),
+        caps: def.caps(),
+        access,
     };
     let field = |name: &str, label: &str, kind: FieldKindDef, required: bool| IgniteFieldDef {
         name: name.to_owned(),
@@ -431,7 +566,7 @@ pub fn post_type_resource_with_templates(
     }
 
     let mut names: HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
-    for (taxonomy, label, column) in taxonomies_of(def, registry) {
+    for (taxonomy, label, column, assign_terms) in taxonomies_of(def, registry) {
         let name = taxonomy_field_name(&taxonomy.name);
         if !names.insert(name.clone()) {
             log::warn!(
@@ -446,6 +581,7 @@ pub fn post_type_resource_with_templates(
             column: column.then(|| format!("col_{name}")),
             field: name,
             taxonomy,
+            assign_terms,
         });
     }
 
@@ -536,7 +672,7 @@ pub fn post_type_resource_with_templates(
 /// `register_taxonomy` attaches it. A taxonomy whose `show_ui` is off, or that is not
 /// registered, is left out. Categories and tags have WordPress's labels and always show in the
 /// list; a custom taxonomy shows with `show_admin_column`.
-fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, String, bool)> {
+fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, String, bool, String)> {
     let custom = registry.all_taxonomies();
     let mut names: Vec<&str> = def.taxonomies.iter().map(String::as_str).collect();
     for taxonomy in &custom {
@@ -547,8 +683,19 @@ fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, Strin
     let mut out = Vec::new();
     for name in names {
         match name {
-            "category" => out.push((Taxonomy::CATEGORY, "Categories".to_owned(), true)),
-            "post_tag" => out.push((Taxonomy::POST_TAG, "Tags".to_owned(), true)),
+            // `assign_terms` of categories and tags is `edit_posts`.
+            "category" => out.push((
+                Taxonomy::CATEGORY,
+                "Categories".to_owned(),
+                true,
+                "edit_posts".to_owned(),
+            )),
+            "post_tag" => out.push((
+                Taxonomy::POST_TAG,
+                "Tags".to_owned(),
+                true,
+                "edit_posts".to_owned(),
+            )),
             _ => match custom.iter().find(|t| t.slug == name) {
                 Some(t) if t.effective_show_ui() => {
                     let label = if t.labels.name.is_empty() {
@@ -556,7 +703,12 @@ fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, Strin
                     } else {
                         t.labels.name.clone()
                     };
-                    out.push((t.to_taxonomy(), label, t.show_admin_column));
+                    out.push((
+                        t.to_taxonomy(),
+                        label,
+                        t.show_admin_column,
+                        t.caps().assign_terms,
+                    ));
                 }
                 Some(_) => {}
                 None => log::debug!(
@@ -637,6 +789,8 @@ pub struct PostTypeResources {
     registry: Arc<Registry>,
     /// The page templates of `page`'s Template select.
     page_templates: Vec<PageTemplate>,
+    /// The users' capabilities and kses, for the resources' queries and policies.
+    access: Access,
     /// The slugs this value registered, in order. Held only by synchronous code.
     registered: Mutex<Vec<String>>,
 }
@@ -648,8 +802,17 @@ impl PostTypeResources {
         Self {
             registry,
             page_templates: Vec::new(),
+            access: Access::default(),
             registered: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Reads the acting users' capabilities through `access` (the app's roles provider and kses
+    /// limiter), from the next [`sync`](Self::sync). The default reads Ignite's roles.
+    #[must_use]
+    pub fn with_access(mut self, access: Access) -> Self {
+        self.access = access;
+        self
     }
 
     /// Gives `page` a Template select with `templates`, the active theme's page templates
@@ -700,22 +863,48 @@ impl PostTypeResources {
         for slug in registered.iter() {
             // Ours, so it is there unless something else removed it.
             let _ = unregister_runtime(slug);
+            unregister_policy(slug);
         }
         registered.clear();
         let mut refused = Vec::new();
         let mut positions = PostTypePositions::default();
         for def in &wanted {
-            let mut resource =
-                post_type_resource_with_templates(def, &self.registry, &self.page_templates);
+            let mut resource = post_type_resource_with_access(
+                def,
+                &self.registry,
+                &self.page_templates,
+                self.access.clone(),
+            );
             // The sidebar's WordPress order: the positions are given in the types' order.
             let position = positions.next(def);
             place_post_type(&mut resource, def, position);
+            // Each action on the type's posts is WordPress's for the user (Task A1). The policy
+            // is in place before the resource, so the resource is never served without it; a
+            // slug another registration holds keeps its own policy.
+            if ignite_core::runtime_resource(&def.slug).is_some()
+                || ignite_core::policy(&def.slug).is_some()
+            {
+                if let Err(error) = register_runtime(resource) {
+                    refused.push(RefusedResource {
+                        post_type: def.slug.clone(),
+                        error,
+                    });
+                }
+                continue;
+            }
+            register_policy(
+                def.slug.clone(),
+                PostTypePolicy::new(def.clone(), self.access.clone()),
+            );
             match register_runtime(resource) {
                 Ok(()) => registered.push(def.slug.clone()),
-                Err(error) => refused.push(RefusedResource {
-                    post_type: def.slug.clone(),
-                    error,
-                }),
+                Err(error) => {
+                    unregister_policy(&def.slug);
+                    refused.push(RefusedResource {
+                        post_type: def.slug.clone(),
+                        error,
+                    });
+                }
             }
         }
         refused
@@ -732,7 +921,9 @@ impl PostTypeResources {
             return false;
         };
         registered.remove(index);
-        unregister_runtime(post_type).is_ok()
+        let removed = unregister_runtime(post_type).is_ok();
+        unregister_policy(post_type);
+        removed
     }
 
     /// Whether `slug` is a post type this value would serve, whose Ignite resource is registered
@@ -1165,12 +1356,27 @@ impl PostTypeData {
 
     /// One page of the list: every post of the type but auto-drafts, matching the search on the
     /// title, excerpt and content as `WP_Query::parse_search` splits it.
-    async fn list_page(&self, db: &Database, query: &ListQuery) -> Result<Page<Row>, Error> {
+    async fn list_page(
+        &self,
+        db: &Database,
+        query: &ListQuery,
+        scope: Option<Scope>,
+    ) -> Result<Page<Row>, Error> {
         let per_page = query.per_page.clamp(1, MAX_PER_PAGE);
         let offset_rows = query.page.max(1).saturating_sub(1).saturating_mul(per_page);
         let mut filter = String::from("FROM posts p WHERE p.post_type = ? AND p.status <> ?");
         let mut binds: Vec<Sql> =
             vec![self.post_type.as_str().into(), PostStatus::AutoDraft.into()];
+        if let Some(scope) = scope {
+            if scope.own_only {
+                filter.push_str(" AND p.author_id = ?");
+                binds.push(scope.user.into());
+            } else if scope.no_others_private {
+                filter.push_str(" AND (p.status <> ? OR p.author_id = ?)");
+                binds.push(PostStatus::Private.into());
+                binds.push(scope.user.into());
+            }
+        }
         if let Some(search) = &query.search {
             let mut cut = search.len().min(MAX_SEARCH_BYTES);
             while !search.is_char_boundary(cut) {
@@ -1256,7 +1462,8 @@ impl PostTypeData {
                 .collect());
         }
         if field == PARENT && self.has_parent() {
-            return posts_of(db, &[self.post_type.as_str()]).await;
+            // `page_attributes_meta_box`'s `wp_dropdown_pages` lists published posts only.
+            return published_posts_of(db, &self.post_type).await;
         }
         if let Some(taxonomy) = self.taxonomies.iter().find(|t| t.field == field) {
             return terms_of(db, &taxonomy.taxonomy.name).await;
@@ -1311,6 +1518,35 @@ async fn users(db: &Database) -> Result<Vec<(String, String)>, Error> {
     Ok(rows
         .into_iter()
         .map(|(id, name)| (id.to_string(), name))
+        .collect())
+}
+
+/// The published posts of `post_type`, by order and title: `(id, title)`, "(no title)" for none.
+async fn published_posts_of(
+    db: &Database,
+    post_type: &str,
+) -> Result<Vec<(String, String)>, Error> {
+    let rows: Vec<(i64, String)> = raw::fetch_all(
+        db,
+        "SELECT id, title FROM posts WHERE status = ? AND post_type = ? \
+         ORDER BY menu_order, title, id LIMIT ?",
+        &[
+            PostStatus::Publish.into(),
+            post_type.into(),
+            (MAX_OPTIONS as i64).into(),
+        ],
+    )
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, title)| {
+            let title = if title.trim().is_empty() {
+                "(no title)".to_owned()
+            } else {
+                title
+            };
+            (id.to_string(), title)
+        })
         .collect())
 }
 
@@ -1742,15 +1978,168 @@ impl PostTypeData {
         sync_publication(db, post).await.map_err(scheduler_error)
     }
 
-    /// The update of post `id` from the validated `input`; see the [module](self).
-    async fn update_post(&self, db: &Database, id: i64, input: Row) -> Result<Row, Error> {
+    /// Rewrites the form's `input` for `actor` before the save, as WordPress's `edit_post` and
+    /// `_wp_translate_postdata` treat a user's submission (Task A1): the author is kept for a
+    /// user without `edit_others_posts`, sticky is left alone for a user without
+    /// `edit_others_posts` and `publish_posts`, and a user without `publish_posts` gets Pending
+    /// for Published or Scheduled, and the post's own status for Private.
+    fn for_actor(&self, actor: &Actor, stored: &Post, input: &mut Row) {
+        let caps = &actor.caps;
+        let edit_others = has_cap(caps, &self.caps.edit_others_posts);
+        let publish = has_cap(caps, &self.caps.publish_posts);
+        if !edit_others {
+            input.remove(AUTHOR);
+        }
+        if !(edit_others && publish) {
+            input.remove(STICKY);
+        }
+        // `wp_insert_post` leaves the terms of a taxonomy whose `assign_terms` the user lacks.
+        for taxonomy in &self.taxonomies {
+            if !has_cap(caps, &taxonomy.assign_terms) {
+                input.remove(&taxonomy.field);
+            }
+        }
+        if !publish {
+            // `_wp_translate_postdata` unsets the password of a user who cannot publish.
+            input.remove(PASSWORD);
+        }
+        // A post already published or scheduled keeps its status for a user who may edit it
+        // (`_wp_translate_postdata` checks `publish_posts` only on a new publication).
+        let published = matches!(stored.status, PostStatus::Publish | PostStatus::Future);
+        if !publish && let Some(status) = input.get(STATUS).and_then(Value::as_str) {
+            let demoted = match status {
+                "publish" | "future" if !published => Some(PostStatus::Pending),
+                // `_wp_translate_postdata` keeps the previous status; an auto-draft's form
+                // shows Draft.
+                "private" => Some(match stored.status {
+                    PostStatus::AutoDraft => PostStatus::Draft,
+                    status => status,
+                }),
+                _ => None,
+            };
+            if let Some(status) = demoted {
+                input.insert(STATUS.into(), Value::from(status.as_str()));
+            }
+        }
+    }
+
+    /// The rich text of the field group fields of `input` through kses, for a user without
+    /// `unfiltered_html` (Ruling R139): a rich text field, and each rich text sub-field of a
+    /// repeater, group, flexible content or clone field (their JSON value, walked by the
+    /// field's sub-fields).
+    async fn kses_custom(&self, actor: &Actor, input: &mut Row) -> Result<(), Error> {
+        if has_cap(&actor.caps, "unfiltered_html") {
+            return Ok(());
+        }
+        for custom in &self.custom {
+            if !has_rich_text(&custom.def.kind) {
+                continue;
+            }
+            let Some(text) = input.get(&custom.field).and_then(text_of) else {
+                continue;
+            };
+            if text.len() > crate::content::MAX_FILTERED_BYTES {
+                return Err(refused(
+                    "a rich text field longer than kses filters for a user without \
+                     unfiltered_html",
+                ));
+            }
+            let kind = custom.def.kind.clone();
+            let filtered = self
+                .access
+                .kses
+                .run(move || {
+                    if kind == FieldKindDef::Wysiwyg {
+                        return kses_post(&text);
+                    }
+                    match serde_json::from_str::<Value>(&text) {
+                        Ok(mut value) => {
+                            kses_value(&kind, &mut value);
+                            value.to_string()
+                        }
+                        // Not JSON: Ignite's check refuses it; nothing to filter.
+                        Err(_) => text,
+                    }
+                })
+                .await
+                .map_err(|e| kses_error(&e))?;
+            input.insert(custom.field.clone(), Value::from(filtered));
+        }
+        Ok(())
+    }
+
+    /// The update of post `id` from the validated `input`, for `actor` when the panel gives one;
+    /// see the [module](self).
+    async fn update_post(
+        &self,
+        db: &Database,
+        id: i64,
+        input: Row,
+        actor: Option<&Actor>,
+    ) -> Result<Row, Error> {
         let mut stored = self.post(db, id).await?.ok_or_else(not_found)?;
         let mut input = input;
+        if let Some(actor) = actor {
+            if !Self::in_scope(&stored, self.scope(&actor.caps, actor.id)) {
+                return Err(not_found());
+            }
+            // The policy checked the post Ignite found; the post read here is checked again.
+            if !self.may(db, actor, &stored, "edit_post").await? {
+                return Err(refused("editing a post without edit_post on it"));
+            }
+            self.for_actor(actor, &stored, &mut input);
+            self.kses_custom(actor, &mut input).await?;
+        }
         self.keep_unshown(db, &stored, &mut input).await?;
         let offset = crate::content::gmt_offset(db).await?;
-        let changes = self.changes(db, &stored, &input, offset).await?;
+        let mut changes = self.changes(db, &stored, &input, offset).await?;
+        if let Some(actor) = actor
+            && !has_cap(&actor.caps, "unfiltered_html")
+        {
+            // kses runs on the whole post, as `wp_update_post` filters the merged fields.
+            let fields = self
+                .access
+                .kses
+                .filter(
+                    &actor.caps,
+                    PostFields {
+                        title: changes
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| stored.title.clone()),
+                        content: changes
+                            .content
+                            .clone()
+                            .unwrap_or_else(|| stored.content.clone()),
+                        excerpt: changes
+                            .excerpt
+                            .clone()
+                            .unwrap_or_else(|| stored.excerpt.clone()),
+                    },
+                )
+                .await
+                .map_err(|e| kses_error(&e))?;
+            changes.title = Some(fields.title);
+            changes.content = Some(fields.content);
+            changes.excerpt = Some(fields.excerpt);
+        }
         let wants_trash = changes.status == Some(PostStatus::Trash);
-        if wants_trash && stored.status != PostStatus::Trash && self.is_site_page(db, id).await? {
+        let leaves_trash =
+            stored.status == PostStatus::Trash && changes.status.is_some() && !wants_trash;
+        if let Some(actor) = actor
+            && (leaves_trash || (wants_trash && stored.status != PostStatus::Trash))
+            && !self.may(db, actor, &stored, "delete_post").await?
+        {
+            // `wp_trash_post` and `wp_untrash_post` need `delete_post` on the post.
+            return Err(refused(
+                "moving the post to or out of the trash without delete_post",
+            ));
+        }
+        if actor.is_none()
+            && wants_trash
+            && stored.status != PostStatus::Trash
+            && self.is_site_page(db, id).await?
+        {
             log::warn!(
                 "Post {id} is the front page or the posts page: the form cannot move it to the \
                  trash; Delete can, for a user with `delete_post` on it."
@@ -1765,7 +2154,7 @@ impl PostTypeData {
         // transaction with the save: `Post::untrash`, `save_revision` and `Post::save` each run
         // their own. A save that fails after the restore leaves the post restored, as a draft,
         // with the form's changes lost, as WordPress's two steps (restore, then edit) would.
-        if stored.status == PostStatus::Trash && changes.status.is_some() && !wants_trash {
+        if leaves_trash {
             stored.untrash(db).await?;
         }
         let mut saved = self.save(db, stored, &changes).await?;
@@ -1785,6 +2174,37 @@ impl PostTypeData {
     fn template_named(&self, stored: &str) -> Option<&PageTemplate> {
         let name = page_template_name(stored)?;
         self.templates.iter().find(|t| t.name == name)
+    }
+
+    /// Whether `actor` has the meta capability `cap` (`edit_post`, `delete_post`) on `post`, as
+    /// `map_meta_cap` maps it.
+    async fn may(
+        &self,
+        db: &Database,
+        actor: &Actor,
+        post: &Post,
+        cap: &str,
+    ) -> Result<bool, Error> {
+        let context = PostContext {
+            post,
+            trash_meta_status: crate::admin::posts::trash_status(db, post).await?,
+            parent: None,
+            site_pages: Some(crate::admin::posts::site_pages(db).await?),
+            post_type_caps: Some(&self.caps),
+        };
+        Ok(can(
+            &actor.caps,
+            cap,
+            Some(&Object::PostWithContext(context)),
+        ))
+    }
+
+    /// The acting `user` with their capabilities.
+    async fn actor(&self, db: &Database, user: &ActingUser) -> Result<Actor, Error> {
+        Ok(Actor {
+            caps: self.access.caps(db, user).await?,
+            id: user.id(),
+        })
     }
 
     /// Whether post `id` is the static front page (`page_on_front`) or the posts page
@@ -1823,7 +2243,7 @@ impl PostTypeData {
 
 impl RuntimeData for PostTypeData {
     fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
-        Box::pin(async move { self.list_page(db, query).await })
+        Box::pin(async move { self.list_page(db, query, None).await })
     }
 
     fn find<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, Option<Row>> {
@@ -1849,7 +2269,7 @@ impl RuntimeData for PostTypeData {
     }
 
     fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
-        Box::pin(async move { self.update_post(db, id, input).await })
+        Box::pin(async move { self.update_post(db, id, input, None).await })
     }
 
     fn delete<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, u64> {
@@ -1867,11 +2287,233 @@ impl RuntimeData for PostTypeData {
     ) -> RuntimeFuture<'a, Vec<(String, String)>> {
         Box::pin(async move { self.choices(db, field).await })
     }
+
+    /// The list for `user`: their own posts only without `edit_others_posts`, and without other
+    /// users' private posts without `read_private_posts` (Task A1).
+    fn list_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        query: &'a ListQuery,
+    ) -> RuntimeFuture<'a, Page<Row>> {
+        Box::pin(async move {
+            let actor = self.actor(db, user).await?;
+            let scope = self.scope(&actor.caps, actor.id);
+            self.list_page(db, query, Some(scope)).await
+        })
+    }
+
+    /// Post `id` when it is in `user`'s list; otherwise `None`, which Ignite answers with 404.
+    fn find_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+    ) -> RuntimeFuture<'a, Option<Row>> {
+        Box::pin(async move {
+            let actor = self.actor(db, user).await?;
+            let scope = self.scope(&actor.caps, actor.id);
+            match self.post(db, id).await? {
+                Some(post) if Self::in_scope(&post, scope) => Ok(Some(self.row(db, &post).await?)),
+                _ => Ok(None),
+            }
+        })
+    }
+
+    /// Refused, as [`create`](RuntimeData::create) is (Ruling R116).
+    fn create_for<'a>(
+        &'a self,
+        db: &'a Database,
+        _user: &'a ActingUser,
+        input: Row,
+    ) -> RuntimeFuture<'a, Row> {
+        self.create(db, input)
+    }
+
+    /// The save of post `id` for `user`; see the [module](self)'s Trust section.
+    fn update_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+        input: Row,
+    ) -> RuntimeFuture<'a, Row> {
+        Box::pin(async move {
+            let actor = self.actor(db, user).await?;
+            self.update_post(db, id, input, Some(&actor)).await
+        })
+    }
+
+    /// Delete for `user`: Ignite has found the post with [`find_for`](RuntimeData::find_for)
+    /// and the policy has checked `delete_post` on it.
+    fn delete_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+    ) -> RuntimeFuture<'a, u64> {
+        Box::pin(async move {
+            let actor = self.actor(db, user).await?;
+            match self.post(db, id).await? {
+                Some(post) if Self::in_scope(&post, self.scope(&actor.caps, actor.id)) => {
+                    if !self.may(db, &actor, &post, "delete_post").await? {
+                        return Err(refused("deleting a post without delete_post on it"));
+                    }
+                    self.delete_post(db, id).await
+                }
+                _ => Ok(0),
+            }
+        })
+    }
+
+    /// The choices for `user`: a user without `edit_others_posts` is offered only themselves as
+    /// the author (WordPress shows them no Author box).
+    fn options_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        field: &'a str,
+    ) -> RuntimeFuture<'a, Vec<(String, String)>> {
+        Box::pin(async move {
+            if field == AUTHOR && self.author {
+                let actor = self.actor(db, user).await?;
+                if !has_cap(&actor.caps, &self.caps.edit_others_posts) {
+                    return Ok(vec![(user.id().to_string(), user.name().to_owned())]);
+                }
+            }
+            self.choices(db, field).await
+        })
+    }
+}
+
+/// Whether a field of `kind` holds rich text, itself or in a sub-field.
+fn has_rich_text(kind: &FieldKindDef) -> bool {
+    match kind {
+        FieldKindDef::Wysiwyg => true,
+        FieldKindDef::Repeater(fields)
+        | FieldKindDef::Group(fields)
+        | FieldKindDef::Clone(fields) => fields.iter().any(|f| has_rich_text(&f.kind)),
+        FieldKindDef::FlexibleContent(blocks) => blocks
+            .iter()
+            .any(|b| b.fields.iter().any(|f| has_rich_text(&f.kind))),
+        _ => false,
+    }
+}
+
+/// Runs kses on every rich text value inside `value`, a field of `kind`: a repeater's rows and
+/// a group's or clone's object are keyed by sub-field name; a flexible content row is
+/// `{"type": <block>, "data": {...}}`, as Ignite stores them.
+fn kses_value(kind: &FieldKindDef, value: &mut Value) {
+    let object = |fields: &[IgniteFieldDef], object: &mut serde_json::Map<String, Value>| {
+        for field in fields {
+            if let Some(inner) = object.get_mut(&field.name) {
+                kses_value(&field.kind, inner);
+            }
+        }
+    };
+    match (kind, value) {
+        (FieldKindDef::Wysiwyg, Value::String(text)) => *text = kses_post(text),
+        (FieldKindDef::Repeater(fields), Value::Array(rows)) => {
+            for row in rows {
+                if let Value::Object(row) = row {
+                    object(fields, row);
+                }
+            }
+        }
+        (FieldKindDef::Group(fields) | FieldKindDef::Clone(fields), Value::Object(row)) => {
+            object(fields, row);
+        }
+        (FieldKindDef::FlexibleContent(blocks), Value::Array(rows)) => {
+            for row in rows {
+                let Value::Object(row) = row else { continue };
+                let block = row
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .and_then(|name| blocks.iter().find(|b| b.name == name))
+                    .cloned();
+                if let (Some(block), Some(Value::Object(data))) = (block, row.get_mut("data")) {
+                    object(&block.fields, data);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The acting user of a save, with their capabilities (Task A1).
+#[derive(Debug, Clone)]
+struct Actor {
+    caps: UserCaps,
+    id: i64,
+}
+
+/// A save the acting user may not make: the panel shows a server error, and nothing is written.
+fn refused(operation: &'static str) -> Error {
+    log::warn!("An admin save was refused: {operation}");
+    Error::Unsupported {
+        operation,
+        driver: "Mission Control's post type resources",
+    }
+}
+
+/// kses's error (a field too long to filter, or its thread failing) as a database error.
+fn kses_error(error: &crate::rest::RestError) -> Error {
+    Error::Database(sqlx::Error::Protocol(format!(
+        "the admin's kses filter refused the save: {error}"
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kses_reaches_rich_text_in_nested_fields() {
+        let field = |name: &str, kind: FieldKindDef| IgniteFieldDef {
+            name: name.to_owned(),
+            label: name.to_owned(),
+            kind,
+            required: false,
+        };
+        let group = FieldKindDef::Group(vec![
+            field("body", FieldKindDef::Wysiwyg),
+            field("note", FieldKindDef::Text),
+        ]);
+        let repeater = FieldKindDef::Repeater(vec![
+            field("text", FieldKindDef::Wysiwyg),
+            field("inner", group.clone()),
+        ]);
+        let flexible = FieldKindDef::FlexibleContent(vec![ignite_core::BlockDef {
+            name: "hero".to_owned(),
+            label: "Hero".to_owned(),
+            fields: vec![field("copy", FieldKindDef::Wysiwyg)],
+        }]);
+        assert!(has_rich_text(&repeater) && has_rich_text(&flexible));
+        assert!(!has_rich_text(&FieldKindDef::Group(vec![field(
+            "x",
+            FieldKindDef::Text
+        )])));
+        let bad = "<p>a<script>x()</script></p>";
+        let mut value = json!([{"text": bad, "inner": {"body": bad, "note": bad}}]);
+        kses_value(&repeater, &mut value);
+        assert!(!value[0]["text"].as_str().unwrap().contains("<script"));
+        assert!(
+            !value[0]["inner"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("<script")
+        );
+        // Plain text sub-fields are post meta, as WordPress stores them.
+        assert_eq!(value[0]["inner"]["note"], bad);
+        let mut value = json!([{"type": "hero", "data": {"copy": bad}}]);
+        kses_value(&flexible, &mut value);
+        assert!(
+            !value[0]["data"]["copy"]
+                .as_str()
+                .unwrap()
+                .contains("<script")
+        );
+    }
 
     #[test]
     fn keys_map_to_ignite_names() {

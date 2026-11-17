@@ -25,7 +25,7 @@ pub use field_value::{FieldError, FieldOwner, get_field};
 pub use location::{Rule, ScreenContext, matches};
 pub use registry::{Definition, DefinitionKind, Registry, RegistryError};
 pub use resource::{
-    MAX_OPTIONS, MAX_PER_PAGE, PostTypeData, PostTypeResources, RefusedResource,
+    Access, MAX_OPTIONS, MAX_PER_PAGE, PostTypeData, PostTypeResources, RefusedResource,
     builtin_post_types, create_auto_draft, custom_field_name, post_type_resource,
-    post_type_resource_with_templates,
+    post_type_resource_with_access, post_type_resource_with_templates,
 };

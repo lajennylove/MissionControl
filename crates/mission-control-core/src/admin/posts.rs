@@ -1,18 +1,23 @@
-//! Who may use the admin screens of a post type (Ruling R115).
+//! Who may use the admin screens of a post type, and what each user sees there (Task A1).
 //!
 //! The screens are Ignite's generic list, form and delete flows over the post type's runtime
-//! resource ([`PostTypeResources`](crate::types::PostTypeResources)). Ignite's data layer is
-//! never told who is signed in, so it writes as WordPress lets a user with every capability of
-//! the type write: any author, any status, HTML as sent. The screens are therefore open only to
-//! users who hold the type's whole capability set and `unfiltered_html`
-//! ([`post_screen_caps`]): WordPress's administrators and editors. On one post, editing also
-//! needs `edit_post`, saving a trashed post (a restore) `delete_post` as well, and deleting (or
-//! moving to the trash) `delete_post`, mapped as
-//! `map_meta_cap` maps them, with the site's special pages (an editor may not edit the privacy
-//! policy page, which needs `manage_options`).
+//! resource ([`PostTypeResources`](crate::types::PostTypeResources)). Since Ignite 0.6.0 the
+//! panel passes the signed-in user to the resource's queries and asks a [`Policy`] for each
+//! action, as Filament asks a Laravel policy, so the screens follow WordPress's capabilities
+//! for each user and post:
 //!
-//! Authors and contributors cannot use these screens until Ignite gives its resources the
-//! signed-in user (owner item O8); they write through the REST API meanwhile.
+//! - [`PostTypePolicy`], registered for each post type's slug: the list and the New screen need
+//!   the type's `edit_posts` (`edit.php`, `post-new.php`); editing or saving a post needs
+//!   `edit_post` on it, and on a trashed post `delete_post` too (a save restores it, as
+//!   `wp_untrash_post`); Delete needs `delete_post`. Each is mapped as `map_meta_cap` maps it,
+//!   with the site's special pages (an editor may not edit the privacy policy page).
+//! - The resource's own queries ([`PostTypeData`](crate::types::PostTypeData)'s `list_for` and
+//!   `find_for`) leave out what the user may not see, and its `update_for` writes what WordPress's
+//!   `edit_post` writes for them: kses for a user without `unfiltered_html`, no author change
+//!   without `edit_others_posts`, "pending" for a user without `publish_posts`.
+//!
+//! [`authorize_post_screen`] makes the same checks with WordPress's refusal messages, for the
+//! routes Mission Control serves itself (the New screen) and for the media library's screen.
 //!
 //! ```ignore
 //! let screen = PostScreen::parse("GET", &["12", "edit"]);
@@ -21,12 +26,13 @@
 //! }
 //! ```
 
+use ignite_core::{ActingUser, Policy, Row, RuntimeFuture};
 use orbit_orm::{Database, Error, Model};
 use serde_json::Value;
 
 use crate::content::{MetaError, Post, PostStatus, get_option, get_post_meta};
 use crate::rest::id_of;
-use crate::types::PostTypeDef;
+use crate::types::{Access, PostTypeDef};
 use crate::users::{Object, PostContext, SitePages, UserCaps, can, has_cap};
 
 /// One request on the screens of a post type, read from its method and the path segments after
@@ -150,7 +156,8 @@ impl Refusal {
     }
 }
 
-/// The capabilities a user must hold to use the screens of the post type `def` (Ruling R115):
+/// The capabilities a user must hold to use the media library's screen (Ruling R115, which the
+/// post type screens no longer use since Task A1):
 /// every primitive capability of the type (`edit_posts`, `edit_others_posts`,
 /// `edit_published_posts`, `edit_private_posts`, `publish_posts`, `read_private_posts`,
 /// `delete_posts`, `delete_others_posts`, `delete_published_posts`, `delete_private_posts`, in
@@ -178,8 +185,9 @@ pub fn may_use_post_screens(user: &UserCaps, def: &PostTypeDef) -> bool {
 }
 
 /// Why `user` may not make the request `screen` on the screens of the post type `def`, or `None`
-/// when they may. A post that does not exist, or is of another type, is not refused here: Ignite
-/// answers it with 404, as WordPress says the item does not exist.
+/// when they may, as WordPress's `edit.php`, `post-new.php` and `post.php` decide. A post that
+/// does not exist, or is of another type, is not refused here: Ignite answers it with 404, as
+/// WordPress says the item does not exist.
 ///
 /// # Errors
 ///
@@ -190,17 +198,24 @@ pub async fn authorize_post_screen(
     def: &PostTypeDef,
     screen: PostScreen,
 ) -> Result<Option<Refusal>, Error> {
-    if !may_use_post_screens(user, def) {
-        return Ok(Some(match screen {
-            PostScreen::New => Refusal::NewScreen,
-            _ => Refusal::Screen,
-        }));
-    }
-    let (id, cap) = match screen {
-        PostScreen::List | PostScreen::New | PostScreen::Other => return Ok(None),
+    let caps = def.caps();
+    let (id, edit) = match screen {
+        PostScreen::Other => return Ok(None),
         PostScreen::Create => return Ok(Some(Refusal::Create)),
-        PostScreen::Edit(id) | PostScreen::Update(id) => (id, "edit_post"),
-        PostScreen::Delete(id) => (id, "delete_post"),
+        // `edit.php` and `post-new.php` need the type's `edit_posts` (`create_posts` is
+        // `edit_posts` unless a type maps it).
+        PostScreen::List | PostScreen::New => {
+            if has_cap(user, &caps.edit_posts) {
+                return Ok(None);
+            }
+            return Ok(Some(if screen == PostScreen::New {
+                Refusal::NewScreen
+            } else {
+                Refusal::Screen
+            }));
+        }
+        PostScreen::Edit(id) | PostScreen::Update(id) => (id, true),
+        PostScreen::Delete(id) => (id, false),
     };
     let Some(post) = Post::query()
         .find(db, id)
@@ -209,7 +224,6 @@ pub async fn authorize_post_screen(
     else {
         return Ok(None);
     };
-    let caps = def.caps();
     let context = PostContext {
         post: &post,
         trash_meta_status: trash_status(db, &post).await?,
@@ -218,23 +232,116 @@ pub async fn authorize_post_screen(
         post_type_caps: Some(&caps),
     };
     let object = Object::PostWithContext(context);
-    if !can(user, cap, Some(&object)) {
-        return Ok(Some(match screen {
-            PostScreen::Delete(_) if post.status == PostStatus::Trash => Refusal::DeletePost,
-            PostScreen::Delete(_) => Refusal::TrashPost,
-            _ => Refusal::EditPost,
+    let trashed = post.status == PostStatus::Trash;
+    if !edit {
+        if can(user, "delete_post", Some(&object)) {
+            return Ok(None);
+        }
+        return Ok(Some(if trashed {
+            Refusal::DeletePost
+        } else {
+            Refusal::TrashPost
         }));
     }
-    // A save of a trashed post takes it out of the trash (or keeps it there): WordPress's
-    // `wp_untrash_post` needs `delete_post`. Moving a post to the trash from the form is guarded
-    // by the data layer (see `PostTypeData`), which sees the submitted status.
-    if matches!(screen, PostScreen::Update(_))
-        && post.status == PostStatus::Trash
-        && !can(user, "delete_post", Some(&object))
-    {
+    if !can(user, "edit_post", Some(&object)) {
+        return Ok(Some(Refusal::EditPost));
+    }
+    // A trashed post's form saves it out of the trash (or keeps it there): `wp_untrash_post`
+    // needs `delete_post`.
+    if trashed && !can(user, "delete_post", Some(&object)) {
         return Ok(Some(Refusal::RestorePost));
     }
     Ok(None)
+}
+
+/// The policy of a post type's resource (Task A1): each of Ignite's actions decided by
+/// [`authorize_post_screen`] for the acting user's capabilities, read through `access`. Ignite
+/// asks it after the user's coarse ability (`post.update`, ...), as a Filament Shield policy is
+/// asked after the permission. Register it with [`ignite_core::register_policy`] under the type's
+/// slug ([`PostTypeResources::sync`](crate::types::PostTypeResources::sync) does).
+pub struct PostTypePolicy {
+    def: PostTypeDef,
+    access: Access,
+}
+
+impl PostTypePolicy {
+    /// The policy of the post type `def`, reading users' capabilities through `access`.
+    pub fn new(def: PostTypeDef, access: Access) -> Self {
+        Self { def, access }
+    }
+
+    /// Whether `user` may make the request `screen`.
+    async fn allows(
+        &self,
+        db: &Database,
+        user: &ActingUser,
+        screen: PostScreen,
+    ) -> Result<bool, Error> {
+        let caps = self.access.caps(db, user).await?;
+        Ok(authorize_post_screen(db, &caps, &self.def, screen)
+            .await?
+            .is_none())
+    }
+}
+
+/// The id of a record Ignite gives a policy, when it has one.
+fn record_id(record: &Row) -> Option<i64> {
+    record.get("id").and_then(id_of)
+}
+
+impl Policy for PostTypePolicy {
+    fn view_any<'a>(&'a self, db: &'a Database, user: &'a ActingUser) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.allows(db, user, PostScreen::List))
+    }
+
+    fn view<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(async move {
+            match record_id(record) {
+                Some(id) => self.allows(db, user, PostScreen::Edit(id)).await,
+                // A record without an id is no post: refused.
+                None => Ok(false),
+            }
+        })
+    }
+
+    fn create<'a>(&'a self, db: &'a Database, user: &'a ActingUser) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.allows(db, user, PostScreen::New))
+    }
+
+    fn update<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(async move {
+            match record_id(record) {
+                Some(id) => self.allows(db, user, PostScreen::Update(id)).await,
+                // A record without an id is no post: refused.
+                None => Ok(false),
+            }
+        })
+    }
+
+    fn delete<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(async move {
+            match record_id(record) {
+                Some(id) => self.allows(db, user, PostScreen::Delete(id)).await,
+                // A record without an id is no post: refused.
+                None => Ok(false),
+            }
+        })
+    }
 }
 
 /// The status a trashed post had before (`_wp_trash_meta_status`), as the REST layer reads it.
