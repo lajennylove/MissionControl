@@ -186,7 +186,8 @@ fn the_content_applies_shortcodes_at_priority_eleven() {
     s.register_the_content(&hooks);
     assert_eq!(
         hooks.apply_filters(THE_CONTENT, "x [hello]".to_string()),
-        "x HELLO"
+        // wpautop (priority 10) makes the paragraph first.
+        "<p>x HELLO</p>\n"
     );
 
     // A filter at priority 10 runs first and can emit a shortcode; one at 12 cannot.
@@ -194,15 +195,89 @@ fn the_content_applies_shortcodes_at_priority_eleven() {
     hooks.add_filter(THE_CONTENT, 12, Owner::Core, |c| c.replace("%", "[hello]"));
     assert_eq!(
         hooks.apply_filters(THE_CONTENT, "@ %".to_string()),
-        "HELLO [hello]"
+        "<p>HELLO [hello]</p>\n"
     );
 
     // Shortcodes added later are picked up (the registry is live), and removed ones stop.
     s.add_shortcode("late", Owner::Plugin("p".into()), |_, _| "L".into())
         .unwrap();
-    assert_eq!(hooks.apply_filters(THE_CONTENT, "[late]".into()), "L");
+    // A shortcode alone in its paragraph is taken out of it (shortcode_unautop).
+    assert_eq!(hooks.apply_filters(THE_CONTENT, "[late]".into()), "L\n");
     s.remove_owner(&Owner::Plugin("p".into()));
-    assert_eq!(hooks.apply_filters(THE_CONTENT, "[late]".into()), "[late]");
+    assert_eq!(
+        hooks.apply_filters(THE_CONTENT, "[late]".into()),
+        "<p>[late]</p>\n"
+    );
+}
+
+#[test]
+fn the_content_makes_paragraphs_as_wordpress_does() {
+    let hooks = Hooks::new();
+    let s = Arc::new(registry());
+    s.register_the_content(&hooks);
+    assert_eq!(
+        hooks.apply_filters(THE_CONTENT, "One\n\nTwo\nlines".to_string()),
+        "<p>One</p>\n<p>Two<br />\nlines</p>\n"
+    );
+    // Block markup is left to its blocks, as `do_blocks` removes wpautop.
+    let blocks = "<!-- wp:paragraph -->\n<p>Hi</p>\n<!-- /wp:paragraph -->";
+    assert_eq!(hooks.apply_filters(THE_CONTENT, blocks.to_string()), blocks);
+}
+
+#[test]
+fn shortcodes_inside_html_tags_follow_wordpress() {
+    let s = registry();
+    // In a quoted attribute, the output is kept when kses keeps the attribute.
+    assert_eq!(
+        s.do_shortcodes("<a title=\"[hello]\">x</a>"),
+        "<a title=\"HELLO\">x</a>"
+    );
+    // A bracket elsewhere in a tag is never read as a shortcode.
+    assert_eq!(
+        s.do_shortcodes("<p data-x=]>[hello]</p>"),
+        "<p data-x=]>HELLO</p>"
+    );
+    // A comment's brackets stay as written.
+    assert_eq!(
+        s.do_shortcodes("<!-- [hello] --> [hello]"),
+        "<!-- [hello] --> HELLO"
+    );
+    // Table cells are checked inside a table, as kses reads them.
+    assert_eq!(
+        s.do_shortcodes("<td title=\"[hello]\">x</td>"),
+        "<td title=\"HELLO\">x</td>"
+    );
+    // An attribute kses drops keeps the shortcode text.
+    assert_eq!(
+        s.do_shortcodes("<a onclick=\"[hello]\">x</a>"),
+        "<a onclick=\"[hello]\">x</a>"
+    );
+}
+
+#[test]
+fn hostile_input_stays_linear_through_the_content_filters() {
+    use std::time::Instant;
+    let hooks = Hooks::new();
+    let s = Arc::new(registry());
+    s.register_the_content(&hooks);
+    for unit in [
+        "[hello]\n\n",
+        "<p>[hello ",
+        "<div",
+        "<p><li",
+        "<svg",
+        "<figcaption",
+    ] {
+        let text = unit.repeat(50_000);
+        let started = Instant::now();
+        let _ = hooks.apply_filters(THE_CONTENT, text);
+        // Linear work is well under a second even in a debug build; quadratic work is minutes.
+        assert!(
+            started.elapsed().as_secs() < 20,
+            "{unit:?} took {:?}",
+            started.elapsed()
+        );
+    }
 }
 
 #[test]

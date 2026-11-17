@@ -274,11 +274,8 @@ fn full_item(
             } else {
                 escape_html(&post.excerpt)
             };
-            if text.is_empty() {
-                String::new()
-            } else {
-                format!("<p>{text}</p>\n")
-            }
+            // `the_excerpt`'s wpautop, as WordPress (Task A5).
+            crate::content::wpautop(&text)
         };
         put(
             "excerpt",

@@ -399,7 +399,8 @@ async fn a_post_has_wordpresss_keys() {
     assert_eq!(json["title"], json!({"rendered": "Hello world"}));
     assert_eq!(
         json["content"],
-        json!({"rendered": "<p>The body of Hello world.</p>", "protected": false})
+        // `the_content`'s wpautop, as WordPress renders it (Task A5).
+        json!({"rendered": "<p>The body of Hello world.</p>\n", "protected": false})
     );
     assert_eq!(json["excerpt"]["protected"], json!(false));
     assert_eq!(json["author"], json!(site.user("author").id));
@@ -1355,7 +1356,7 @@ async fn a_protected_post_hides_its_content() {
     // `get_the_title`'s prefix (Ruling R70).
     assert_eq!(json["title"]["rendered"], json!("Protected: Locked"));
     let (_, json) = body(site.get(&format!("{uri}?password=sesame"), None).await).await;
-    assert_eq!(json["content"]["rendered"], json!("Hidden words"));
+    assert_eq!(json["content"]["rendered"], json!("<p>Hidden words</p>\n"));
     assert_eq!(json["title"]["rendered"], json!("Protected: Locked"));
     assert_error(
         site.get(&format!("{uri}?password=wrong"), None).await,

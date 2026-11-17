@@ -22,6 +22,7 @@
 //! ```
 
 mod auto_drafts;
+pub(crate) mod autop;
 mod caption;
 mod future;
 mod kses;
@@ -38,6 +39,7 @@ pub use auto_drafts::{
     AUTO_DRAFT_MAX_AGE, DELETE_AUTO_DRAFTS, MAX_AUTO_DRAFTS_PER_RUN, delete_old_auto_drafts,
     register_delete_auto_drafts, schedule_auto_draft_deletion,
 };
+pub use autop::{shortcode_unautop, wpautop};
 pub use future::{
     PUBLISH_FUTURE_POST, check_and_publish_future_post, register_publish_future_post,
     schedule_future_post,

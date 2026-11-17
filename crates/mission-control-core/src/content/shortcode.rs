@@ -39,10 +39,14 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use super::autop::{shortcode_unautop, wpautop};
 use crate::hooks::{Hooks, Owner, THE_CONTENT};
 
 /// The priority WordPress gives `do_shortcode` on `the_content`.
 const THE_CONTENT_PRIORITY: i32 = 11;
+
+/// The priority WordPress gives `wpautop` and `shortcode_unautop` on `the_content`.
+const AUTOP_PRIORITY: i32 = 10;
 
 /// The attributes of one shortcode call, after WordPress's `shortcode_parse_atts`: named
 /// attributes (`name="v"`, `name='v'` or `name=v`, names lowercased) and positional values
@@ -302,9 +306,23 @@ impl Shortcodes {
         drop(removed);
     }
 
-    /// Adds [`do_shortcodes`](Self::do_shortcodes) to the `the_content` filter on `hooks`, at
-    /// WordPress's priority 11 and owned by [`Owner::Core`].
+    /// Adds WordPress's default `the_content` filters on `hooks`, owned by [`Owner::Core`]:
+    /// [`wpautop`] and then [`shortcode_unautop`] at priority 10, and
+    /// [`do_shortcodes`](Self::do_shortcodes) at 11 (Task A5). As WordPress's `do_blocks` does,
+    /// `wpautop` leaves content with block markup (`<!-- wp:`) alone.
     pub fn register_the_content(self: &Arc<Self>, hooks: &Hooks) {
+        hooks.add_filter(THE_CONTENT, AUTOP_PRIORITY, Owner::Core, |content| {
+            if content.contains("<!-- wp:") {
+                content
+            } else {
+                wpautop(&content)
+            }
+        });
+        let this = Arc::clone(self);
+        hooks.add_filter(THE_CONTENT, AUTOP_PRIORITY, Owner::Core, move |content| {
+            let tags: Vec<String> = this.read().iter().map(|e| e.tag.clone()).collect();
+            shortcode_unautop(&content, &tags)
+        });
         let this = Arc::clone(self);
         hooks.add_filter(THE_CONTENT, THE_CONTENT_PRIORITY, Owner::Core, move |c| {
             this.do_shortcodes(&c)
@@ -313,53 +331,420 @@ impl Shortcodes {
 
     /// Replaces every registered shortcode in `content` with its callback's output, like
     /// WordPress's `do_shortcode`. Unknown tags and malformed brackets stay as text.
+    ///
+    /// As WordPress does, only the registered tags written in `content` (`[tag` followed by a
+    /// character that cannot be in a tag) are looked for, and shortcodes inside HTML tags are
+    /// handled first ([`do_shortcodes_in_html_tags`]): one in a quoted attribute value runs, and
+    /// its output is kept only when kses allows the attribute; every other bracket inside a tag
+    /// is left as written, never read as a shortcode.
     pub fn do_shortcodes(&self, content: &str) -> String {
         if !content.contains('[') {
             return content.to_string();
         }
+        let present = tag_names_in(content);
         let tags: Vec<(String, Callback)> = self
             .read()
             .iter()
+            .filter(|e| present.contains(e.tag.as_str()))
             .map(|e| (e.tag.clone(), Arc::clone(&e.callback)))
             .collect();
         if tags.is_empty() {
             return content.to_string();
         }
+        let content = do_shortcodes_in_html_tags(content, &tags);
+        let (content, _) = replace_shortcodes(&content, &tags);
+        unescape_invalid_shortcodes(&content)
+    }
+}
 
-        let mut out = String::with_capacity(content.len());
-        // Tags with no `[/tag]` anywhere after a point: no later search can find one either.
-        let mut no_closer: HashSet<&str> = HashSet::new();
-        let mut copied = 0;
-        let mut at = 0;
-        while let Some(off) = content[at..].find('[') {
-            let start = at + off;
-            match scan(content, start, &tags, &mut no_closer) {
-                Scan::Found(m) => {
-                    out.push_str(&content[copied..start]);
-                    let (tag_cb, whole_end) = (m.callback, m.end);
-                    if m.lead && m.trail {
-                        // `[[tag]]`: the escape prints the match without its outer brackets.
-                        out.push_str(&content[start + 1..whole_end - 1]);
-                    } else {
-                        if m.lead {
-                            out.push('[');
-                        }
-                        out.push_str(&tag_cb(&Attributes::parse(m.atts), m.content));
-                        if m.trail {
-                            out.push(']');
-                        }
+/// The names written after a `[` in `content`, as WordPress's
+/// `preg_match_all( '@\[([^<>&/\[\]\x00-\x20=]++)@' )` finds them: each the whole run of
+/// characters that can be in a tag.
+fn tag_names_in(content: &str) -> HashSet<&str> {
+    let b = content.as_bytes();
+    let mut names = HashSet::new();
+    let mut i = 0;
+    while let Some(off) = content[i..].find('[') {
+        let start = i + off + 1;
+        let mut end = start;
+        while end < b.len()
+            && !matches!(
+                b[end],
+                b'<' | b'>' | b'&' | b'/' | b'[' | b']' | b'=' | 0..=0x20
+            )
+        {
+            end += 1;
+        }
+        if end > start {
+            names.insert(&content[start..end]);
+        }
+        i = start;
+    }
+    names
+}
+
+/// WordPress's `do_shortcode_tag` pass over `content` with `tags`: every shortcode replaced with
+/// its callback's output. Returns the text and how many shortcodes were found.
+fn replace_shortcodes(content: &str, tags: &[(String, Callback)]) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut found = 0;
+    // Tags with no `[/tag]` anywhere after a point: no later search can find one either.
+    let mut no_closer: HashSet<&str> = HashSet::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(off) = content[at..].find('[') {
+        let start = at + off;
+        match scan(content, start, tags, &mut no_closer) {
+            Scan::Found(m) => {
+                found += 1;
+                out.push_str(&content[copied..start]);
+                let (tag_cb, whole_end) = (m.callback, m.end);
+                if m.lead && m.trail {
+                    // `[[tag]]`: the escape prints the match without its outer brackets.
+                    out.push_str(&content[start + 1..whole_end - 1]);
+                } else {
+                    if m.lead {
+                        out.push('[');
                     }
-                    copied = whole_end;
-                    at = whole_end;
+                    out.push_str(&tag_cb(&Attributes::parse(m.atts), m.content));
+                    if m.trail {
+                        out.push(']');
+                    }
                 }
-                Scan::NoMatch => at = start + 1,
-                // No `]` anywhere after this point, so no later `[` can match.
-                Scan::NoTerminator => break,
+                copied = whole_end;
+                at = whole_end;
+            }
+            Scan::NoMatch => at = start + 1,
+            // No `]` anywhere after this point, so no later `[` can match.
+            Scan::NoTerminator => break,
+        }
+    }
+    out.push_str(&content[copied..]);
+    (out, found)
+}
+
+/// `[` and `]` written as the entities `do_shortcodes_in_html_tags` uses, so the main pass
+/// does not read them.
+fn encode_brackets(text: &str) -> String {
+    text.replace('[', "&#91;").replace(']', "&#93;")
+}
+
+/// WordPress's `unescape_invalid_shortcodes`: the brackets [`encode_brackets`] wrote come back.
+fn unescape_invalid_shortcodes(content: &str) -> String {
+    content.replace("&#91;", "[").replace("&#93;", "]")
+}
+
+/// WordPress's `do_shortcodes_in_html_tags`: inside each HTML element of `content`, a shortcode
+/// in a quoted attribute value runs, kept only when kses allows the attribute it makes
+/// ([`kses_one_attr`]); one written unquoted runs as is (only an `unfiltered_html` user can save
+/// it); every other `[` and `]` in an element is encoded, so the main pass leaves it.
+fn do_shortcodes_in_html_tags(content: &str, tags: &[(String, Callback)]) -> String {
+    // Entities already in the text are normalized first, so they are not decoded at the end.
+    let content = content
+        .replace("&#91;", "&#091;")
+        .replace("&#93;", "&#093;");
+    let parts = crate::content::autop::html_split(&content);
+    let mut out = String::with_capacity(content.len());
+    for part in parts {
+        if !part.starts_with('<') {
+            out.push_str(part);
+            continue;
+        }
+        let noopen = !part.contains('[');
+        let noclose = !part.contains(']');
+        if noopen || noclose {
+            // No shortcode here; a stray bracket is encoded.
+            if noopen != noclose {
+                out.push_str(&encode_brackets(part));
+            } else {
+                out.push_str(part);
+            }
+            continue;
+        }
+        if part.starts_with("<!--") || part.starts_with("<![CDATA[") {
+            out.push_str(&encode_brackets(part));
+            continue;
+        }
+        let Some(attributes) = kses_attr_parse(part) else {
+            // Some plugins write things like `[name] <[email]>`.
+            let element = if starts_with_bracketed_name(part) {
+                replace_shortcodes(part, tags).0
+            } else {
+                part.to_owned()
+            };
+            out.push_str(&encode_brackets(&element));
+            continue;
+        };
+        let (front, rest) = attributes.split_first().expect("a front");
+        let (back, attrs) = rest.split_last().expect("a back");
+        let elname: String = front
+            .chars()
+            .skip_while(|c| !c.is_ascii_alphanumeric())
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        let mut element = front.clone();
+        for attr in attrs {
+            let (Some(open), Some(_)) = (attr.find('['), attr.find(']')) else {
+                element.push_str(attr);
+                continue;
+            };
+            let double = attr.find('"');
+            let single = attr.find('\'');
+            if single.is_none_or(|q| open < q) && double.is_none_or(|q| open < q) {
+                // `[shortcode]` or `name = [shortcode]`: written by a user with
+                // `unfiltered_html`, so the output is kept as is.
+                element.push_str(&replace_shortcodes(attr, tags).0);
+            } else {
+                // `name = "[shortcode]"`: the output goes through kses.
+                let (new_attr, count) = replace_shortcodes(attr, tags);
+                let kept = if count > 0 {
+                    let filtered = kses_one_attr(&new_attr, &elname);
+                    if filtered.trim().is_empty() {
+                        None
+                    } else {
+                        Some(filtered)
+                    }
+                } else {
+                    None
+                };
+                element.push_str(kept.as_deref().unwrap_or(attr));
             }
         }
-        out.push_str(&content[copied..]);
-        out
+        element.push_str(back);
+        out.push_str(&encode_brackets(&element));
     }
+    out
+}
+
+/// `%^<\s*\[\[?[^\[\]]+\]%`: an element that starts with a bracketed name.
+fn starts_with_bracketed_name(element: &str) -> bool {
+    let b = element.as_bytes();
+    let mut i = 1;
+    while i < b.len() && is_space(b[i]) {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'[') {
+        return false;
+    }
+    i += 1;
+    if b.get(i) == Some(&b'[') {
+        i += 1;
+    }
+    let start = i;
+    while i < b.len() && b[i] != b'[' && b[i] != b']' {
+        i += 1;
+    }
+    i > start && b.get(i) == Some(&b']')
+}
+
+/// WordPress's `wp_kses_attr_parse`: an opening element split into its start (`<name`), each
+/// attribute with the whitespace after it, and its end (`>`, or `/>`); `None` for a closing
+/// element or one whose attributes cannot be read.
+fn kses_attr_parse(element: &str) -> Option<Vec<String>> {
+    // `%^(<\s*)(/\s*)?([a-zA-Z0-9]+\s*)([^>]*)(>?)$%`.
+    let b = element.as_bytes();
+    if b.first() != Some(&b'<') {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() && is_space(b[i]) {
+        i += 1;
+    }
+    if b.get(i) == Some(&b'/') {
+        // Closing elements are not parsed.
+        return None;
+    }
+    let name_start = i;
+    while i < b.len() && b[i].is_ascii_alphanumeric() {
+        i += 1;
+    }
+    if i == name_start {
+        return None;
+    }
+    while i < b.len() && is_space(b[i]) {
+        i += 1;
+    }
+    let front = &element[..i];
+    let attr_start = i;
+    while i < b.len() && b[i] != b'>' {
+        i += 1;
+    }
+    let mut attr = &element[attr_start..i];
+    let end = &element[i..];
+    // Only one `>`, at the very end (or before a final line break, as `$` allows).
+    if !(end.is_empty() || end == ">" || end == ">\n") {
+        return None;
+    }
+    let end = if end == ">\n" { ">" } else { end };
+    // `%\s*/\s*$%`: an XHTML slash before the end.
+    let mut xhtml_slash = "";
+    let trimmed = attr.trim_end_matches(|c: char| c.is_ascii() && is_space(c as u8));
+    if let Some(before) = trimmed.strip_suffix('/') {
+        let slash_start = before
+            .trim_end_matches(|c: char| c.is_ascii() && is_space(c as u8))
+            .len();
+        xhtml_slash = &attr[slash_start..];
+        attr = &attr[..slash_start];
+    }
+    let mut parts = vec![front.to_owned()];
+    parts.extend(kses_hair_parse(attr)?);
+    parts.push(format!("{xhtml_slash}{end}"));
+    Some(parts)
+}
+
+/// WordPress's `wp_kses_hair_parse`: the attributes of `attr`, each with the whitespace after
+/// it, or `None` when the whole text is not a run of attributes.
+fn kses_hair_parse(attr: &str) -> Option<Vec<String>> {
+    let b = attr.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let end = hair_attribute(b, i)?;
+        out.push(attr[i..end].to_owned());
+        i = end;
+    }
+    Some(out)
+}
+
+/// One attribute of `wp_kses_hair_parse`'s pattern at `i`: its end, or `None`.
+fn hair_attribute(b: &[u8], i: usize) -> Option<usize> {
+    let at_end = |j: usize| j == b.len() || (j + 1 == b.len() && b[j] == b'\n');
+    // The name: `[_a-zA-Z][-_a-zA-Z0-9:.]*`, or a shortcode `\[\[?[^\[\]]+\]\]?`.
+    let mut j = i;
+    match b.get(j)? {
+        c if c.is_ascii_alphabetic() || *c == b'_' => {
+            j += 1;
+            while j < b.len()
+                && (b[j].is_ascii_alphanumeric() || matches!(b[j], b'-' | b'_' | b':' | b'.'))
+            {
+                j += 1;
+            }
+        }
+        b'[' => {
+            j += 1;
+            if b.get(j) == Some(&b'[') {
+                j += 1;
+            }
+            let start = j;
+            while j < b.len() && b[j] != b'[' && b[j] != b']' {
+                j += 1;
+            }
+            if j == start || b.get(j) != Some(&b']') {
+                return None;
+            }
+            j += 1;
+            if b.get(j) == Some(&b']') {
+                j += 1;
+            }
+        }
+        _ => return None,
+    }
+    let skip = |mut k: usize| {
+        while k < b.len() && is_space(b[k]) {
+            k += 1;
+        }
+        k
+    };
+    // `\s*=\s*` and a value.
+    let eq = skip(j);
+    if b.get(eq) == Some(&b'=') {
+        let v = skip(eq + 1);
+        let value_end = match b.get(v) {
+            Some(q @ (b'"' | b'\'')) => b[v + 1..]
+                .iter()
+                .position(|c| c == q)
+                .map(|k| v + 1 + k + 1),
+            Some(c) if !is_space(*c) => {
+                let mut k = v;
+                while k < b.len() && !is_space(b[k]) && b[k] != b'"' && b[k] != b'\'' {
+                    k += 1;
+                }
+                // `[^\s"']+(?:\s|$)`.
+                if k < b.len() && is_space(b[k]) {
+                    Some(k + 1)
+                } else if at_end(k) {
+                    Some(k)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(end) = value_end {
+            return Some(skip(end));
+        }
+    }
+    // `(?:\s|$)`.
+    if j < b.len() && is_space(b[j]) {
+        Some(skip(j + 1))
+    } else if at_end(j) {
+        Some(skip(j))
+    } else {
+        None
+    }
+}
+
+/// WordPress's `wp_kses_one_attr` for the attribute `attr` of an `element`: the attribute as
+/// kses keeps it (`name="value"`, with the whitespace around it), or empty when kses drops it.
+/// Mission Control's kses ([`kses_post`](crate::content::kses_post)) runs on the element with
+/// this one attribute, and the attribute is read back from what it keeps (Ruling R144).
+fn kses_one_attr(attr: &str, element: &str) -> String {
+    let element = element.to_ascii_lowercase();
+    let trimmed = attr.trim_matches(|c: char| c.is_ascii() && is_space(c as u8));
+    if trimmed.is_empty() || element.is_empty() {
+        return String::new();
+    }
+    let lead = &attr[..attr.len()
+        - attr
+            .trim_start_matches(|c: char| c.is_ascii() && is_space(c as u8))
+            .len()];
+    let trail = &attr[attr
+        .trim_end_matches(|c: char| c.is_ascii() && is_space(c as u8))
+        .len()..];
+    let name: String = trimmed
+        .split(|c: char| c == '=' || (c.is_ascii() && is_space(c as u8)))
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.is_empty() {
+        return String::new();
+    }
+    // Table parts are kept by kses only inside a table, as an HTML parser reads them.
+    let one = format!("<{element} {trimmed}></{element}>");
+    let html = crate::content::kses_post(&match element.as_str() {
+        "td" | "th" => format!("<table><tr>{one}</tr></table>"),
+        "tr" | "tbody" | "thead" | "tfoot" | "caption" | "colgroup" => {
+            format!("<table>{one}</table>")
+        }
+        "col" => format!("<table><colgroup>{one}</colgroup></table>"),
+        _ => one,
+    });
+    let open = format!("<{element}");
+    // The element's own tag: `<col` is not `<colgroup`.
+    let Some(start) = html.match_indices(&open).map(|(at, _)| at).find(|at| {
+        matches!(
+            html.as_bytes().get(at + open.len()),
+            Some(b' ' | b'>' | b'/' | b'\t' | b'\n')
+        )
+    }) else {
+        return String::new();
+    };
+    let Some(end) = html[start..].find('>') else {
+        return String::new();
+    };
+    let tag = &html[start + open.len()..start + end];
+    let needle = format!(" {name}=\"");
+    let Some(at) = tag.find(&needle) else {
+        return String::new();
+    };
+    let value_start = at + needle.len();
+    let Some(len) = tag[value_start..].find('"') else {
+        return String::new();
+    };
+    format!(
+        "{lead}{name}=\"{}\"{trail}",
+        &tag[value_start..value_start + len]
+    )
 }
 
 /// One shortcode found in the text.
