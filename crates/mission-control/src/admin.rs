@@ -2,7 +2,7 @@
 //!
 //! # When it is mounted
 //!
-//! Ignite 0.6.0 runs its sign-in, session and user queries on MySQL and MariaDB only, so the
+//! Ignite 0.6.1 runs its sign-in, session and user queries on MySQL and MariaDB only, so the
 //! panel is mounted only when the site's database is MySQL or MariaDB (Ruling R119). Ignite reads
 //! its database from `DATABASE_URL` in the environment (after loading `.env`), not from the
 //! app's configuration, so the panel is mounted only when that is the configuration's database
@@ -22,7 +22,10 @@
 //! - The sidebar in WordPress's admin menu order: the dashboard, then the
 //!   `Content` group (Posts, Media, Pages, then the custom post types), then the `Site` group
 //!   (Menus, then the settings screens), each entry at its WordPress `menu_position` and with
-//!   its Dashicons class (see `mission_control_core::admin::navigation`).
+//!   its Dashicons class (see `mission_control_core::admin::navigation`). WordPress's Dashicons
+//!   stylesheet is served at `/mc-includes/css/dashicons.css` with its fonts (see
+//!   [`crate::editor`]) and registered with Ignite's `stylesheet`, which links it on every panel
+//!   page. Ignite's own Dashboard entry keeps Ignite's icon: Ignite takes no icon class for it.
 //! - Every post type the admin shows, `post` and `page` included, as an Ignite runtime resource
 //!   at `/mc-admin/<post type>` ([`PostTypeResources`], Ruling R114), with the active theme's page
 //!   templates in the page form. The page `install.php` is reserved (Ruling R120).
@@ -106,7 +109,7 @@ use rocket::response::content::RawHtml;
 use rocket::route::{self, Handler, Route};
 use rocket::{Build, Data, Request, Rocket, State};
 
-use crate::editor::editor_script_url;
+use crate::editor::{dashicons_stylesheet_url, editor_script_url};
 use crate::rest::auth::AuthSettings;
 
 mod locks;
@@ -256,6 +259,7 @@ pub(crate) async fn mount_panel(
         .brand_logo(BRAND_LOGO)
         .brand_logo_height(BRAND_LOGO_HEIGHT)
         .favicon(FAVICON)
+        .stylesheet(dashicons_stylesheet_url())
         .navigation_groups(navigation::GROUPS);
     ignite_core::register_editor(editor_script_url());
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {

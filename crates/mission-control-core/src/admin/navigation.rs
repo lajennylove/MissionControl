@@ -11,7 +11,8 @@
 //!   or below it ([`group_for`]);
 //! - its WordPress position as the sort;
 //! - WordPress's Dashicons class for it (`dashicons dashicons-admin-post` and so on; the base
-//!   class `dashicons` is needed). Ignite ships no icon font: the stylesheet is the app's.
+//!   class `dashicons` is needed). Ignite ships no icon font: the app serves
+//!   WordPress's Dashicons stylesheet and registers it with Ignite's `stylesheet`.
 //!
 //! A custom post type takes its `menu_position`, or the next free position after Comments, as
 //! WordPress's `$_wp_last_object_menu` gives it, and a position already taken moves down to the

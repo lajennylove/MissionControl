@@ -39,6 +39,26 @@ notices.txt also lists PrismJS and prism-themes (MIT), which only TinyMCE's code
 plugin uses; that plugin is not included.
 
 
+Dashicons (WordPress)
+---------------------
+
+Where:     assets/dashicons/ (compiled into the mission-control library and served at
+           /mc-includes/css/dashicons.css and /mc-includes/fonts/): dashicons.css (which embeds
+           the WOFF font as a data URI), dashicons.eot and dashicons.ttf, unchanged. The admin's
+           sidebar uses them for its menu icons.
+Copyright: WordPress - Web publishing software, Copyright 2011-2026 by the contributors.
+Licence:   GNU General Public License, version 2 or later (GPL-2.0-or-later), with a font
+           exception, as stated at https://developer.wordpress.org/resource/dashicons/.
+Home:      https://github.com/WordPress/dashicons
+Source:    WordPress trunk, https://github.com/WordPress/wordpress-develop (commit
+           19379c816819a77e55a2f2f577ac9809340cc407): src/wp-includes/css/dashicons.css and
+           src/wp-includes/fonts/dashicons.eot and dashicons.ttf.
+           SHA-256: dashicons.css f8f1e7953b37419db2b219c272f3abfd011a2ed8d3fa0d3acb97f5a1e7819b21
+                    dashicons.eot c04a6545ea1a3860f6c8eb4b9eed8191d857dbf2716b812c816cae8e40bbea7a
+                    dashicons.ttf cacd900a2587c234c53e9d0108fc51ff6c61420c4f89a1731014b673a7b9a1a8
+Checked:   2026-11-18.
+
+
 Mission Control's own editor files
 ----------------------------------
 

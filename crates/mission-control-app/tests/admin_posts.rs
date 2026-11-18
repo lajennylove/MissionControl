@@ -515,6 +515,41 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "{dashboard}"
     );
     assert!(!dashboard.contains("ignite-mark.png"), "{dashboard}");
+    // WordPress's Dashicons stylesheet is linked on every panel page, the sign-in page too
+    // (Ignite's `stylesheet`), and served with the fonts it names.
+    let dashicons = format!(
+        "<link rel=\"stylesheet\" href=\"/mc-includes/css/dashicons.css?ver={}\">",
+        mission_control::editor_version()
+    );
+    assert!(dashboard.contains(&dashicons), "{dashboard}");
+    assert!(login.contains(&dashicons), "{login}");
+    for (uri, kind) in [
+        (
+            format!(
+                "/mc-includes/css/dashicons.css?ver={}",
+                mission_control::editor_version()
+            ),
+            "text/css; charset=utf-8",
+        ),
+        (
+            "/mc-includes/fonts/dashicons.eot?99ac726223c749443b642ce33df8b800".to_owned(),
+            "application/vnd.ms-fontobject",
+        ),
+        (
+            "/mc-includes/fonts/dashicons.ttf?99ac726223c749443b642ce33df8b800".to_owned(),
+            "font/ttf",
+        ),
+    ] {
+        let response = client.get(uri.as_str()).dispatch().await;
+        assert_eq!(response.status(), Status::Ok, "{uri}");
+        assert_eq!(response.content_type().unwrap().to_string(), kind, "{uri}");
+        if kind.starts_with("text/css") {
+            let css = response.into_string().await.unwrap();
+            assert!(css.contains("font-family: dashicons;"), "{uri}");
+            assert!(css.contains(".dashicons-admin-post::before"), "{uri}");
+            assert!(css.contains("url(\"../fonts/dashicons.ttf?"), "{uri}");
+        }
+    }
     // The favicon and the logo are served.
     for (uri, kind) in [
         ("/mc-includes/images/favicon-32.png", "image/png"),

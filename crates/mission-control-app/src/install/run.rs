@@ -1,7 +1,7 @@
 //! The installer's migrations (Task 11.4, Ruling R78): Ignite's panel migrations, then the core
 //! migrations, on the database at one `DATABASE_URL`, and the rollback of the last run.
 //!
-//! Ignite 0.6.0 and Mission Control are both built on Orbit 0.4. [`run_migrations`] opens a
+//! Ignite 0.6.1 and Mission Control are both built on Orbit 0.4. [`run_migrations`] opens a
 //! connection from the URL, runs the panel's migrations on it and closes it, then opens another
 //! and runs the core migrations. The panel goes first because the core tables reference its
 //! `users` table.

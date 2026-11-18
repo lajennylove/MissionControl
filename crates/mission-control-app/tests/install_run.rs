@@ -11,7 +11,7 @@ use mission_control_core::migrations::migrator;
 use mission_control_testing::{CORE_TABLES, scratch_database, table_exists};
 use orbit_orm::{Database, Migrator, raw};
 
-/// The tables Ignite 0.6.0's panel migrations create.
+/// The tables Ignite 0.6.1's panel migrations create.
 const PANEL_TABLES: &[&str] = &[
     "users",
     "sessions",

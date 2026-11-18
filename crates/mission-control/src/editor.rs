@@ -85,7 +85,8 @@ macro_rules! bundle {
 /// stylesheet, and the parts of TinyMCE that the settings in `editor.js` load: the silver
 /// theme, the DOM model, the default icons, the oxide skin, the default content style and the
 /// `charmap`, `fullscreen`, `help` (with its English keyboard help), `link` and `lists`
-/// plugins; and the admin's brand images, whose files are in `assets/brand/`.
+/// plugins; the admin's brand images, whose files are in `assets/brand/`; and WordPress's
+/// Dashicons stylesheet and fonts, whose files are in `assets/dashicons/`.
 static BUNDLE: &[Asset] = bundle! {
     "js/editor.js" => "editor.js",
     "js/media.js" => "media.js",
@@ -116,6 +117,11 @@ static BUNDLE: &[Asset] = bundle! {
     "images/favicon.ico" => "../brand/favicon.ico",
     "images/favicon-32.png" => "../brand/favicon-32.png",
     "images/apple-touch-icon.png" => "../brand/apple-touch-icon.png",
+    // WordPress's Dashicons for the admin menu, from `assets/dashicons/`: the stylesheet (which
+    // embeds the WOFF font) and the EOT and TrueType fonts it names at `../fonts/`.
+    "css/dashicons.css" => "../dashicons/dashicons.css",
+    "fonts/dashicons.eot" => "../dashicons/dashicons.eot",
+    "fonts/dashicons.ttf" => "../dashicons/dashicons.ttf",
 };
 
 /// The version every editor URL carries: TinyMCE's version and the start of a SHA-256 of the
@@ -156,6 +162,12 @@ pub(crate) fn media_grid_script_url() -> String {
     format!("{INCLUDES_PATH}/js/media-grid.js?ver={}", editor_version())
 }
 
+/// The URL of WordPress's Dashicons stylesheet, `/mc-includes/css/dashicons.css?ver=...`, which
+/// the admin registers with Ignite for the sidebar's icons.
+pub(crate) fn dashicons_stylesheet_url() -> String {
+    format!("{INCLUDES_PATH}/css/dashicons.css?ver={}", editor_version())
+}
+
 /// The `Content-Type` of a file of the bundle, from its extension.
 fn content_type(path: &str) -> ContentType {
     match path.rsplit_once('.').map(|(_, extension)| extension) {
@@ -164,6 +176,8 @@ fn content_type(path: &str) -> ContentType {
         Some("webp") => ContentType::WEBP,
         Some("png") => ContentType::PNG,
         Some("ico") => ContentType::Icon,
+        Some("ttf") => ContentType::new("font", "ttf"),
+        Some("eot") => ContentType::new("application", "vnd.ms-fontobject"),
         _ => ContentType::Plain,
     }
 }
@@ -287,6 +301,11 @@ mod tests {
         assert_eq!(
             content_type("images/favicon.ico").to_string(),
             "image/x-icon"
+        );
+        assert_eq!(content_type("fonts/dashicons.ttf").to_string(), "font/ttf");
+        assert_eq!(
+            content_type("fonts/dashicons.eot").to_string(),
+            "application/vnd.ms-fontobject"
         );
         assert_eq!(
             content_type("js/tinymce/license.md").to_string(),
