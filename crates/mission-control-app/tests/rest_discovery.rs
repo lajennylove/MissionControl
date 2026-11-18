@@ -31,8 +31,9 @@ async fn site() -> (TestDatabase, Client) {
         ("blogdescription", json!("Just another test site")),
         ("siteurl", json!("https://example.test/cms")),
         ("home", json!("https://example.test")),
+        // A stale stored offset: the time zone's own offset wins, read now (Task A10).
         ("gmt_offset", json!("-5")),
-        ("timezone_string", json!("America/Toronto")),
+        ("timezone_string", json!("Asia/Kolkata")),
     ] {
         set_option(db, name, &value).await.expect("sets the option");
     }
@@ -113,8 +114,8 @@ async fn the_index_has_wordpresss_top_level_keys_and_option_values() {
     assert_eq!(index["description"], "Just another test site");
     assert_eq!(index["url"], "https://example.test/cms");
     assert_eq!(index["home"], "https://example.test");
-    assert_eq!(index["gmt_offset"], "-5");
-    assert_eq!(index["timezone_string"], "America/Toronto");
+    assert_eq!(index["gmt_offset"], "5.5");
+    assert_eq!(index["timezone_string"], "Asia/Kolkata");
     assert_eq!(index["page_for_posts"], 0);
     assert_eq!(index["page_on_front"], 0);
     assert_eq!(index["show_on_front"], "posts");

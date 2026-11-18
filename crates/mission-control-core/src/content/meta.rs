@@ -674,15 +674,26 @@ pub async fn get_option(db: &Database, name: &str) -> Result<Option<Value>, Meta
     OPTIONS.get(&mut &*db, 0, name).await
 }
 
-/// The site's offset from UTC: the `gmt_offset` option, in hours (a JSON number or numeric
-/// text), as WordPress's date functions read it. An unset option, one that is not a number or not
-/// JSON, and an offset of a day or more are UTC. The REST API, the front end and the admin's post
-/// type screens all read it here.
+/// The site's offset from UTC now, as WordPress's `get_option( 'gmt_offset' )` gives it with
+/// `wp_timezone_override_offset` (Task A10): the current offset of the `timezone_string` option
+/// when it names an IANA time zone, so daylight saving time applies without a save; otherwise the
+/// `gmt_offset` option, in hours (a JSON number or numeric text). An unset option, one that is not
+/// a number or not JSON, and an offset of a day or more are UTC. The REST API, the front end and
+/// the admin's screens all read it here.
 ///
 /// # Errors
 ///
 /// Fails with the database's error.
 pub(crate) async fn gmt_offset(db: &Database) -> Result<chrono::FixedOffset, Error> {
+    match get_option(db, "timezone_string").await {
+        Ok(Some(Value::String(zone))) => {
+            if let Some(offset) = zone_offset_now(&zone) {
+                return Ok(offset);
+            }
+        }
+        Ok(_) | Err(MetaError::InvalidJson(_)) => {}
+        Err(MetaError::Database(e)) => return Err(e),
+    }
     let hours = match get_option(db, "gmt_offset").await {
         Ok(Some(Value::Number(n))) => n.as_f64(),
         Ok(Some(Value::String(s))) => s.trim().parse().ok(),
@@ -694,6 +705,26 @@ pub(crate) async fn gmt_offset(db: &Database) -> Result<chrono::FixedOffset, Err
         chrono::FixedOffset::east_opt((hours.unwrap_or(0.0) * 3600.0).round() as i32)
             .unwrap_or_else(utc),
     )
+}
+
+/// The current offset of the IANA time zone `zone`, as `wp_timezone_override_offset` computes
+/// it; `None` for a name that is not a time zone (or empty).
+fn zone_offset_now(zone: &str) -> Option<chrono::FixedOffset> {
+    use chrono::Offset;
+    let tz: chrono_tz::Tz = zone.trim().parse().ok()?;
+    Some(chrono::Utc::now().with_timezone(&tz).offset().fix())
+}
+
+/// [`gmt_offset`] in hours, as text the way WordPress prints the number: `"2"`, `"5.5"`,
+/// `"-3.5"`, `"5.75"`.
+pub(crate) fn offset_hours_text(offset: chrono::FixedOffset) -> String {
+    let hours = f64::from(offset.local_minus_utc()) / 3600.0;
+    let rounded = (hours * 100.0).round() / 100.0;
+    if rounded.fract() == 0.0 {
+        format!("{}", rounded as i64)
+    } else {
+        format!("{rounded}")
+    }
 }
 
 /// Sets option `name` to `value`, replacing the stored value, as `update_option` does. A new

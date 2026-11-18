@@ -833,3 +833,28 @@ async fn the_footer_widget_area_renders_its_widgets_in_order() {
     );
     assert!(!body.contains("<script>alert('w')"), "{body}");
 }
+
+/// Task A11: the site name and tagline are stored through `esc_html`, as the settings screens
+/// and the REST API store them, and print escaped once.
+#[rocket::async_test]
+async fn the_site_name_is_escaped_once() {
+    let site = Site::new().await;
+    for (name, value) in [
+        ("blogname", "Tom & Jerry"),
+        ("blogdescription", "Cats & <mice>"),
+    ] {
+        let stored =
+            mission_control_core::content::sanitize_option(name, json!(value)).expect("valid");
+        site.option(name, stored).await;
+    }
+    site.published("Hello world", "hello-world").await;
+    let client = site.client().await;
+    for uri in ["/", "/hello-world/"] {
+        let (status, body) = get(&client, uri).await;
+        assert_eq!(status, Status::Ok, "{body}");
+        assert!(!body.contains("&amp;amp;"), "{uri}: {body}");
+        assert!(!body.contains("&amp;lt;"), "{uri}: {body}");
+        assert!(body.contains(">Tom &amp; Jerry</a>"), "{uri}: {body}");
+        assert!(body.contains("Cats &amp; &lt;mice&gt;"), "{uri}: {body}");
+    }
+}

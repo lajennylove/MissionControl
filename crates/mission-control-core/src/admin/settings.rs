@@ -52,7 +52,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chrono::{Offset, Utc};
 use ignite_core::{
     ColumnDef, FieldDef, FieldKindDef, ListQuery, Page, Row, RuntimeData, RuntimeError,
     RuntimeFuture, RuntimeResource,
@@ -997,18 +996,6 @@ fn permalink_path(value: &str) -> String {
     out
 }
 
-/// The current offset of the IANA time zone `zone`, in hours, as WordPress's
-/// `wp_timezone_override_offset` computes `gmt_offset` from it.
-fn zone_offset_now(zone: &str) -> Option<f64> {
-    let tz: chrono_tz::Tz = zone.parse().ok()?;
-    let seconds = Utc::now()
-        .with_timezone(&tz)
-        .offset()
-        .fix()
-        .local_minus_utc();
-    Some(f64::from(seconds) / 3600.0)
-}
-
 /// What a save of `screen` writes: (field, option, value before `sanitize_option`).
 fn writes_of(screen: SettingsScreen, input: &Row) -> Vec<(&'static str, &'static str, Value)> {
     let mut writes: Vec<(&'static str, &'static str, Value)> = Vec::new();
@@ -1035,14 +1022,9 @@ fn writes_of(screen: SettingsScreen, input: &Row) -> Vec<(&'static str, &'static
                         writes.push(("timezone_string", "gmt_offset", Value::String(offset)));
                         writes.push(("timezone_string", "timezone_string", json!("")));
                     }
+                    // A named zone is stored alone: its offset is read when it is needed
+                    // (Task A10, `wp_timezone_override_offset`).
                     None => {
-                        if let Some(hours) = zone_offset_now(&zone) {
-                            writes.push((
-                                "timezone_string",
-                                "gmt_offset",
-                                Value::String(hours.to_string()),
-                            ));
-                        }
                         writes.push(("timezone_string", "timezone_string", Value::String(zone)));
                     }
                 }

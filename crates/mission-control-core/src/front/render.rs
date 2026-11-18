@@ -59,7 +59,7 @@ use orbit_orm::{Database, Error, Value as Sql, raw};
 use propel_runtime::{AssetSource, Assets, RenderError, render_with_assets};
 use serde::Serialize;
 
-use super::route::{number, option, text};
+use super::route::{option, text};
 use super::{Archive, MainQuery, Query, Resolved, post_links, query_posts, resolve};
 use crate::content::{MetaError, PermalinkStructure, Post, get_post_meta};
 use crate::hooks::{Hooks, THE_CONTENT};
@@ -894,13 +894,10 @@ impl Options {
             log::warn!("The permalink_structure option is not valid ({e}); plain links are used.");
             PermalinkStructure::plain()
         });
-        let hours = option(db, "gmt_offset")
-            .await?
-            .as_ref()
-            .and_then(number)
-            .unwrap_or(0.0);
-        let offset = FixedOffset::east_opt((hours * 3600.0).round() as i32)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero is a valid offset"));
+        // The time zone's current offset, read now (Task A10).
+        let offset = crate::content::gmt_offset(db)
+            .await
+            .map_err(FrontError::Database)?;
         Ok(Self {
             structure,
             home: site_address(&text_option("home").await?),

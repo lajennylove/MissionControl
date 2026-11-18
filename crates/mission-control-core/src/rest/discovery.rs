@@ -189,12 +189,11 @@ async fn integer(db: &Database, name: &str) -> Result<i64, MetaError> {
     })
 }
 
-/// `gmt_offset` as WordPress's index gives it, a string (`"0"`, `"-5"`, `"5.5"`).
+/// `gmt_offset` as WordPress's index gives it (`get_option`, which `timezone_string` overrides
+/// with its current offset), a string (`"0"`, `"-5"`, `"5.5"`).
 async fn offset(db: &Database) -> Result<String, MetaError> {
-    let offset = text(db, "gmt_offset").await?;
-    Ok(if offset.is_empty() {
-        "0".to_owned()
-    } else {
-        offset
-    })
+    let offset = crate::content::gmt_offset(db)
+        .await
+        .map_err(MetaError::Database)?;
+    Ok(crate::content::offset_hours_text(offset))
 }
