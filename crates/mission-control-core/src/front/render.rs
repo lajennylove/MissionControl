@@ -25,7 +25,7 @@
 //! | Variable | What it holds | WordPress |
 //! | --- | --- | --- |
 //! | `site.name`, `site.description`, `site.url`, `site.language` | the site's title, tagline, address and language, as plain text: escape them (`{{ }}`), never output them raw. The title and tagline are stored escaped (`sanitize_option`'s `esc_html`) and decoded here, so `{{ }}` escapes them once, as WordPress's `bloginfo` does | `bloginfo` |
-//! | `head` | the tags that load the theme's built CSS and JavaScript; output raw | `wp_head` |
+//! | `head` | the robots meta tag (WordPress's `wp_robots`), then the tags that load the theme's built CSS and JavaScript; output raw | `wp_head` |
 //! | `document_title` | the `<title>` text | `wp_get_document_title` |
 //! | `body_class` | the classes for `<body>` | `body_class` |
 //! | `is.*` | the conditional tags: `front_page`, `home`, `singular`, `single`, `page`, `attachment`, `archive`, `category`, `tag`, `author`, `date`, `post_type_archive`, `search`, `not_found`, `paged` | `is_*` |
@@ -365,6 +365,8 @@ impl Frontend {
         let posts = self.post_views(options, &main.posts).await?;
         let post = singular_post(resolved).and_then(|_| posts.first().cloned());
         let is = Conditionals::of(resolved);
+        // `wp_robots` runs first in `wp_head` (priority 1), before the styles.
+        let head = format!("{}{}", robots_meta(options.public, is.search), self.head());
         let archive = self.archive_view(resolved).await?;
         let search_query = match resolved {
             Resolved::Search { terms, .. } => terms.clone(),
@@ -413,7 +415,7 @@ impl Frontend {
                 },
                 language: SITE_LANGUAGE.to_owned(),
             },
-            head: self.head(),
+            head,
             document_title,
             body_class,
             is,
@@ -878,6 +880,9 @@ struct Options {
     description: String,
     /// `gmt_offset`, for dates.
     offset: FixedOffset,
+    /// `blog_public`: whether search engines may index the site (Settings > Reading's
+    /// "Discourage search engines" stores 0).
+    public: bool,
 }
 
 impl Options {
@@ -905,8 +910,62 @@ impl Options {
             name: crate::text::decode_entities(&text_option("blogname").await?),
             description: crate::text::decode_entities(&text_option("blogdescription").await?),
             offset,
+            public: option(db, "blog_public")
+                .await?
+                .as_ref()
+                .is_none_or(is_truthy),
         })
     }
+}
+
+/// Whether an option's value is true as PHP reads it: not `0`, `"0"`, `""`, `false` or `null`.
+fn is_truthy(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(s) => !(s.is_empty() || s == "0"),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// The robots meta tag of a front-end page, as WordPress's `wp_robots` prints it with its
+/// default `wp_robots` filters, in their order:
+///
+/// - `wp_robots_noindex`: when the site is not `public` (`blog_public` off), `noindex, nofollow`;
+/// - `wp_robots_noindex_search`: a search results page is `noindex`, with `follow` on a public
+///   site and `nofollow` otherwise;
+/// - `wp_robots_max_image_preview_large`: a public site allows `max-image-preview:large`.
+///
+/// A missing `blog_public` option reads as public, the value WordPress's install and Mission
+/// Control's set. Embeds and comment replies, WordPress's other cases, do not exist here.
+fn robots_meta(public: bool, search: bool) -> String {
+    // Insertion order, as PHP's array keeps it; a directive set again keeps its place.
+    let mut directives: Vec<&str> = Vec::new();
+    let mut set = |directive: &'static str| {
+        if !directives.contains(&directive) {
+            directives.push(directive);
+        }
+    };
+    let mut no_robots = || {
+        set("noindex");
+        set(if public { "follow" } else { "nofollow" });
+    };
+    if !public || search {
+        no_robots();
+    }
+    if public {
+        set("max-image-preview:large");
+    }
+    if directives.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<meta name='robots' content='{}' />\n",
+        directives.join(", ")
+    )
 }
 
 /// The data every template gets. See the module documentation.
@@ -1049,6 +1108,7 @@ impl Conditionals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn pretty() -> PermalinkStructure {
         PermalinkStructure::post_name()
@@ -1143,5 +1203,35 @@ mod tests {
         let excerpt = trim_excerpt(&long);
         assert!(excerpt.ends_with(" [&hellip;]"));
         assert_eq!(excerpt.split_whitespace().count(), 56);
+    }
+
+    #[test]
+    fn the_robots_meta_follows_blog_public_and_search() {
+        assert_eq!(
+            robots_meta(true, false),
+            "<meta name='robots' content='max-image-preview:large' />\n"
+        );
+        assert_eq!(
+            robots_meta(true, true),
+            "<meta name='robots' content='noindex, follow, max-image-preview:large' />\n"
+        );
+        assert_eq!(
+            robots_meta(false, false),
+            "<meta name='robots' content='noindex, nofollow' />\n"
+        );
+        assert_eq!(
+            robots_meta(false, true),
+            "<meta name='robots' content='noindex, nofollow' />\n"
+        );
+    }
+
+    #[test]
+    fn options_are_true_as_php_reads_them() {
+        for falsy in [json!(0), json!("0"), json!(""), json!(false), json!(null)] {
+            assert!(!is_truthy(&falsy), "{falsy}");
+        }
+        for truthy in [json!(1), json!("1"), json!(true), json!("yes")] {
+            assert!(is_truthy(&truthy), "{truthy}");
+        }
     }
 }

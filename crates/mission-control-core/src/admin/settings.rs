@@ -27,9 +27,13 @@
 //!   computes it from the zone on every read; here a daylight saving change is followed when the
 //!   screen is saved again). The date and time formats are WordPress's choices or a custom
 //!   format (`date_format_custom`).
-//! - Reading: "Discourage search engines" stores `blog_public` 0, as WordPress inverts it.
+//! - Reading: "Discourage search engines" stores `blog_public` 0, as WordPress inverts it; the
+//!   front end's pages then carry WordPress's `noindex, nofollow` robots meta tag (see
+//!   `crate::front`). The feed options (`posts_per_rss`, `rss_use_excerpt`) are stored with no
+//!   effect yet: Mission Control has no feeds (Task A9).
 //! - Discussion: "Allow link notifications" and "Allow people to submit comments" store `open`
-//!   or `closed`.
+//!   or `closed`. The Discussion options are stored with no effect yet: Mission Control has no
+//!   comments, pingbacks or avatars (Task A9).
 //! - Media: the sizes are stored and the image size registry ([`ImageSizes`]) takes them at
 //!   once, so the next upload is resized to them ([`apply_media_sizes`] does the same at start).
 //! - Permalinks (`options-permalink.php`): one of WordPress's common structures, or a custom one,

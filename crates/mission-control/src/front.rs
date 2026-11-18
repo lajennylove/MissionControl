@@ -1,12 +1,15 @@
-//! The public site's route: every GET the other routes leave, answered by the active theme.
+//! The public site's routes: `/robots.txt`, and every GET the other routes leave, answered by the
+//! active theme.
 
 use std::sync::Arc;
 
 use mission_control_core::front::{Frontend, Response};
 use mission_control_core::rest::discovery;
 use orbit_orm::Database;
+
+use crate::ADMIN_PATH;
 use rocket::http::uri::Origin;
-use rocket::http::{Header, Status};
+use rocket::http::{ContentType, Header, Status};
 use rocket::response::content::RawHtml;
 use rocket::response::{self, Redirect, Responder};
 use rocket::{Request, Route, State};
@@ -17,7 +20,20 @@ pub(crate) fn routes(rank: isize) -> Vec<Route> {
     for route in &mut routes {
         route.rank = rank;
     }
+    routes.extend(rocket::routes![robots_txt]);
     routes
+}
+
+/// `/robots.txt`, as WordPress's `do_robots` writes it: every user agent kept out of the admin
+/// but its `admin-ajax.php`. WordPress sends the same file whatever `blog_public` says (since
+/// 5.3 a site that discourages search engines says so with its pages' robots meta tag, not
+/// with `Disallow: /`), and so does Mission Control.
+#[rocket::get("/robots.txt")]
+fn robots_txt() -> (ContentType, String) {
+    (
+        ContentType::Plain,
+        format!("User-agent: *\nDisallow: {ADMIN_PATH}/\nAllow: {ADMIN_PATH}/admin-ajax.php\n"),
+    )
 }
 
 /// What the public site sends back: a rendered template with its status, or a redirect (an

@@ -283,6 +283,73 @@ async fn a_search_renders_with_the_search_template() {
     assert!(!body.contains("Boats are slow"), "{body}");
 }
 
+/// `blog_public` (Settings > Reading, "Discourage search engines"), as WordPress's `wp_robots`
+/// prints it in `wp_head`: a public site allows large image previews and keeps search results
+/// out of the index; a discouraged one asks for `noindex, nofollow` on every page.
+#[rocket::async_test]
+async fn the_robots_meta_tag_follows_blog_public() {
+    let site = Site::new().await;
+    site.published("Rockets are fast", "rockets").await;
+    let client = site.client().await;
+    let robots = |body: &str| {
+        let start = body.find("<meta name='robots'").expect("a robots meta tag");
+        body[start..start + body[start..].find('>').unwrap() + 1].to_owned()
+    };
+
+    // No option yet reads as public, as Settings > Reading shows it.
+    let (_, home) = get(&client, "/").await;
+    assert_eq!(
+        robots(&home),
+        "<meta name='robots' content='max-image-preview:large' />"
+    );
+    site.option("blog_public", json!(1)).await;
+    let (_, post) = get(&client, "/rockets/").await;
+    assert_eq!(
+        robots(&post),
+        "<meta name='robots' content='max-image-preview:large' />"
+    );
+    let (_, search) = get(&client, "/?s=rockets").await;
+    assert_eq!(
+        robots(&search),
+        "<meta name='robots' content='noindex, follow, max-image-preview:large' />"
+    );
+    // In the head, before the theme's styles.
+    assert!(post.find("<meta name='robots'").unwrap() < post.find("</head>").unwrap());
+
+    // Discouraged: stored as 0 by the settings screen, "0" by older writers.
+    for discouraged in [json!(0), json!("0")] {
+        site.option("blog_public", discouraged).await;
+        for uri in ["/", "/rockets/", "/?s=rockets", "/no-such-thing/"] {
+            let (_, body) = get(&client, uri).await;
+            assert_eq!(
+                robots(&body),
+                "<meta name='robots' content='noindex, nofollow' />",
+                "{uri}"
+            );
+        }
+    }
+}
+
+/// `/robots.txt`, as WordPress's `do_robots` writes it, whatever `blog_public` says.
+#[rocket::async_test]
+async fn robots_txt_keeps_crawlers_out_of_the_admin() {
+    let site = Site::new().await;
+    let client = site.client().await;
+    for public in [json!(1), json!(0)] {
+        site.option("blog_public", public).await;
+        let response = client.get("/robots.txt").dispatch().await;
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.content_type().unwrap().to_string(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            response.into_string().await.unwrap(),
+            "User-agent: *\nDisallow: /mc-admin/\nAllow: /mc-admin/admin-ajax.php\n"
+        );
+    }
+}
+
 #[rocket::async_test]
 async fn a_missing_page_is_a_404_with_the_404_template() {
     let site = Site::new().await;
