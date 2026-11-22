@@ -258,7 +258,7 @@ mod tests {
         let login = WordPressTheme.view("login").expect("the sign-in page");
         assert!(login.contains(LOGIN_LAYOUT), "{login}");
         for expected in [
-            "<label for=\"user_login\">Username or Email Address</label>",
+            "<label for=\"user_login\">Email Address</label>",
             "name=\"email\"",
             "<label for=\"user_pass\">Password</label>",
             "name=\"password\"",

@@ -17,7 +17,7 @@
   <form name="loginform" id="loginform" method="post" action="{{ $action }}">
     <input type="hidden" name="_token" value="{{ $csrf_token }}">
     <p>
-      <label for="user_login">Username or Email Address</label>
+      <label for="user_login">Email Address</label>
       <input type="text" name="email" id="user_login" class="input" value="{{ $email }}" size="20" autocapitalize="off" autocomplete="username" required>
     </p>
     <div class="user-pass-wrap">

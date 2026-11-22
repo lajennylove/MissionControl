@@ -658,7 +658,7 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "Log In &lsaquo; RocketBoost Mission Control</title>",
         "<img src=\"/mc-includes/images/mission-control-logo.webp\" alt=\"RocketBoost Mission Control\">",
         "<form name=\"loginform\" id=\"loginform\" method=\"post\" action=\"/mc-admin/login\">",
-        "<label for=\"user_login\">Username or Email Address</label>",
+        "<label for=\"user_login\">Email Address</label>",
         "<label for=\"user_pass\">Password</label>",
         "class=\"button button-primary button-large\" value=\"Log In\"",
         "<a href=\"/mc-admin/password/forgot\">Lost your password?</a>",
