@@ -489,12 +489,15 @@ async fn post_locks(client: &Client, db: &Database) {
 /// dashboard, then Content (Posts 5, Media 10, Pages 20), then Site (Menus 60, then the settings
 /// screens from 80), each with its Dashicons class.
 async fn brand_and_sidebar(client: &Client, db: &Database) {
-    // The signed-out bar of the sign-in page shows the logo too.
+    // The signed-out bar of the sign-in page shows the logo too. The site's default admin theme
+    // is Ignite's, so the sign-in page is Ignite's.
     let (_, login) = get(client, "/mc-admin/login").await;
     assert!(
         login.contains("src=\"/mc-includes/images/mission-control-logo.webp\" alt=\"RocketBoost Mission Control\""),
         "{login}"
     );
+    assert!(login.contains(">Sign in</button>"), "{login}");
+    assert!(!login.contains("id=\"loginform\""), "{login}");
     let (_, admin_email) = user(db, "ada", "administrator").await;
     sign_in(client, &admin_email).await;
     let (status, dashboard) = get(client, "/mc-admin").await;
@@ -607,10 +610,24 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     assert_eq!(response.status(), Status::SeeOther, "chooses WordPress");
     let (_, wordpress) = get(client, "/mc-admin").await;
     assert!(wordpress.contains(&dashicons), "{wordpress}");
-    assert!(
-        wordpress.contains("<i class=\"dashicons dashicons-admin-post text-lg\"></i>Posts"),
-        "{wordpress}"
-    );
+    // The theme's own layout: wp-admin's admin bar, admin menu and content area, not Ignite's.
+    for expected in [
+        "<body class=\"wp-admin\">",
+        "<div id=\"wpadminbar\"",
+        "Howdy, <span class=\"display-name\">ada</span>",
+        "<ul id=\"adminmenu\">",
+        "<span class=\"dashicons dashicons-admin-post\"></span></div><div class=\"wp-menu-name\">Posts</div>",
+        "<li class=\"wp-menu-separator\" aria-hidden=\"true\"></li>",
+        "<div id=\"wpbody\" role=\"main\">",
+        "&lsaquo; RocketBoost Mission Control</title>",
+        "--color-primary:#2271b1;",
+    ] {
+        assert!(wordpress.contains(expected), "`{expected}` in {wordpress}");
+    }
+    assert!(!wordpress.contains("ig-nav-link"), "{wordpress}");
+    assert!(!wordpress.contains("aria-label=\"Main\""), "{wordpress}");
+    // The groups are separated, without their headings.
+    assert!(!wordpress.contains(">Content</p>"), "{wordpress}");
     let csrf = token(client).await;
     let response = post(
         client,
@@ -625,7 +642,55 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     );
     let (_, default) = get(client, "/mc-admin").await;
     assert!(!default.contains(&dashicons), "{default}");
+    assert!(default.contains("ig-nav-link"), "{default}");
+    assert!(!default.contains("id=\"wpadminbar\""), "{default}");
     sign_out(client).await;
+    // A signed-out page renders in the site's default admin theme, not a user's choice: with
+    // WordPress's as the default, the sign-in and lost password pages are wp-login.php's. Every
+    // test here holds `LOCK`, so the process-wide default changes for this test only.
+    ignite_panel::set_admin_theme("wordpress").expect("the WordPress theme is registered");
+    let (status, login) = get(client, "/mc-admin/login").await;
+    let (_, forgot) = get(client, "/mc-admin/password/forgot").await;
+    ignite_panel::set_admin_theme(ignite_panel::theme::IGNITE_THEME).unwrap();
+    assert_eq!(status, Status::Ok, "{login}");
+    for expected in [
+        "<body class=\"login\">",
+        "Log In &lsaquo; RocketBoost Mission Control</title>",
+        "<img src=\"/mc-includes/images/mission-control-logo.webp\" alt=\"RocketBoost Mission Control\">",
+        "<form name=\"loginform\" id=\"loginform\" method=\"post\" action=\"/mc-admin/login\">",
+        "<label for=\"user_login\">Username or Email Address</label>",
+        "<label for=\"user_pass\">Password</label>",
+        "class=\"button button-primary button-large\" value=\"Log In\"",
+        "<a href=\"/mc-admin/password/forgot\">Lost your password?</a>",
+        dashicons.as_str(),
+    ] {
+        assert!(login.contains(expected), "`{expected}` in {login}");
+    }
+    assert!(!login.contains(">Sign in</button>"), "{login}");
+    assert!(forgot.contains("id=\"lostpasswordform\""), "{forgot}");
+    assert!(forgot.contains("value=\"Get New Password\""), "{forgot}");
+    // The WordPress sign-in form signs in, as the panel's does.
+    let csrf = token_in(&login);
+    let response = post(
+        client,
+        "/mc-admin/login",
+        &[
+            ("_token", &csrf),
+            ("email", &admin_email),
+            ("password", PASSWORD),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        Status::SeeOther,
+        "signs in from wp-login"
+    );
+    assert_eq!(location(&response), "/mc-admin");
+    sign_out(client).await;
+    // Back on Ignite's default, the sign-in page is Ignite's again.
+    let (_, login) = get(client, "/mc-admin/login").await;
+    assert!(login.contains(">Sign in</button>"), "{login}");
 }
 
 async fn rest_errors_keep_their_json(client: &Client) {

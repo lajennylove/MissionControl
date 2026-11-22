@@ -1,0 +1,25 @@
+{{-- The WordPress admin theme's top bar: wp-admin's admin bar. The brand's logo stands where WordPress's logo is, then the link to the site; on the right, "Howdy" and the user's menu, with the profile and the same sign-out form as Ignite's bar. WordPress has no dark mode, so the bar has no light or dark toggle. --}}@if (signed_in)
+<div id="wpadminbar" role="navigation" aria-label="Toolbar">
+  <ul class="ab-top-menu">
+    <li id="wp-admin-bar-menu-toggle"><label for="mc-wp-menu" class="ab-item" aria-label="Menu"><span class="ab-icon dashicons dashicons-menu" aria-hidden="true"></span></label></li>
+    <li id="wp-admin-bar-wp-logo"><a class="ab-item" href="{{ $home_url }}">@if (brand.has_logo)<img src="{{ $brand.logo }}" alt="{{ $brand.name }}" class="mc-wp-brand">@else{{ $brand.name }}@endif</a></li>
+    <li id="wp-admin-bar-site-name"><a class="ab-item" href="/"><span class="ab-icon dashicons dashicons-admin-home" aria-hidden="true"></span><span class="ab-label">Visit Site</span></a></li>
+  </ul>
+  <ul class="ab-top-secondary">
+    <li id="wp-admin-bar-my-account" class="menupop">
+      <a class="ab-item" href="{{ $profile_url }}" aria-haspopup="true">Howdy, <span class="display-name">{{ $user_name }}</span>@if (has_avatar)<img src="{{ $avatar_url }}" alt="" class="avatar">@endif</a>
+      <div class="ab-sub-wrapper">
+        <ul class="ab-submenu">
+          <li><a class="ab-item" href="{{ $profile_url }}">Edit Profile</a></li>
+          <li>
+            <form method="post" action="{{ $logout_everywhere_url }}">
+              <input type="hidden" name="_token" value="{{ $csrf_token }}">
+              <button type="submit" class="ab-item">Log Out</button>
+            </form>
+          </li>
+        </ul>
+      </div>
+    </li>
+  </ul>
+</div>
+@endif

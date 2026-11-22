@@ -1,0 +1,38 @@
+{{-- The WordPress admin theme's reset password page, as wp-login.php?action=rp: the same form as the panel's (the reset token, the email and the new password twice, posted to the same action) in WordPress's card. --}}@extends('ignite::themes.wordpress.layouts.login')
+
+@section('ignite_favicon')@include('ignite::partials.favicon')@endsection
+
+@section('ignite_stylesheets')@include('ignite::partials.stylesheets')@endsection
+
+@section('ignite_head')@if (theme_style)<style>{!! $theme_style !!}</style>@endif@endsection
+
+@section('ignite_flash')@include('ignite::partials.flash')@endsection
+
+@section('title')Reset Password@endsection
+
+@section('content')
+  <p class="message">Enter your new password below.</p>
+  @if (has_error)
+  <div id="login_error" class="notice notice-error" role="alert"><p><strong>Error:</strong> {{ $error }}</p></div>
+  @endif
+  <form name="resetpassform" id="resetpassform" method="post" action="{{ $action }}">
+    <input type="hidden" name="_token" value="{{ $csrf_token }}">
+    <input type="hidden" name="token" value="{{ $token }}">
+    <p>
+      <label for="user_login">Email Address</label>
+      <input type="email" name="email" id="user_login" class="input" value="{{ $email }}" size="20" autocomplete="username" required>
+    </p>
+    <p>
+      <label for="pass1">New password</label>
+      <input type="password" name="password" id="pass1" class="input password-input" value="" size="24" autocomplete="new-password" spellcheck="false" required>
+    </p>
+    <p>
+      <label for="pass2">Confirm new password</label>
+      <input type="password" name="password_confirmation" id="pass2" class="input" value="" size="24" autocomplete="new-password" spellcheck="false" required>
+    </p>
+    <p class="submit">
+      <input type="submit" name="wp-submit" id="wp-submit" class="button button-primary button-large" value="Save Password">
+    </p>
+  </form>
+  <p id="nav"><a href="{{ $home_url }}">Log in</a></p>
+@endsection

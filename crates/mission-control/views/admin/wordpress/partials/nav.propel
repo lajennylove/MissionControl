@@ -1,0 +1,15 @@
+{{-- The WordPress admin theme's navigation: wp-admin's admin menu. Each navigation group starts after a separator, as WordPress separates its menu's groups, without a heading; the current entry shows its submenu, the others on hover. The checkbox opens the menu from the admin bar's toggle on a narrow screen. --}}@if (signed_in)
+<input id="mc-wp-menu" type="checkbox" class="mc-wp-menu-toggle screen-reader-text" aria-hidden="true" tabindex="-1">
+<div id="adminmenumain" role="navigation" aria-label="Main menu">
+<div id="adminmenuback"></div>
+<div id="adminmenuwrap">
+<ul id="adminmenu">
+@foreach (section in nav_sections)@if (section.has_heading)<li class="wp-menu-separator" aria-hidden="true"></li>
+@endif@foreach (group in section.items)@if (group.active)<li class="menu-top current"><a class="menu-top" href="{{ $group.url }}" aria-current="page">@else<li class="menu-top"><a class="menu-top" href="{{ $group.url }}">@endif<div class="wp-menu-image" aria-hidden="true"><span class="{{ $group.icon }}"></span></div><div class="wp-menu-name">{{ $group.title }}</div></a>
+@if (group.has_add)<ul class="wp-submenu"><li class="wp-submenu-head" aria-hidden="true">{{ $group.title }}</li><li><a href="{{ $group.url }}">All {{ $group.title }}</a></li><li><a href="{{ $group.add_url }}">Add New</a></li></ul>
+@endif</li>
+@endforeach@endforeach
+</ul>
+</div>
+</div>
+@endif

@@ -1,0 +1,3 @@
+{{-- The WordPress admin theme's flash message: a WordPress admin notice. --}}@if (has_flash)
+<div class="notice notice-success" role="status"><p>{{ $flash }}</p></div>
+@endif

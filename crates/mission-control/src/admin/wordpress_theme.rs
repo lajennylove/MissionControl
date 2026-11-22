@@ -1,11 +1,19 @@
-//! The WordPress admin theme: WordPress's Dashicons for the sidebar, with the Dashicons
-//! stylesheet loaded only while this theme is active. Ignite's own theme stays the default and
-//! keeps its Tabler icons; a user chooses this theme on the profile page.
+//! The WordPress admin theme: wp-admin's look around the panel's screens. Ignite's own theme
+//! stays the default; a user chooses this theme on the profile page.
 //!
-//! The layout is Ignite's for now: WordPress's sign-in layout and admin chrome are still to be
-//! built as this theme's own views.
+//! - Its own layout and partials, in `views/admin/wordpress/` and built into the binary: the
+//!   admin bar above the dark admin menu (each navigation group after a separator, without a
+//!   heading, as WordPress separates its menu), the grey content area, WordPress's admin notices
+//!   for the flash message, and WordPress's colours as Ignite's colour tokens, so the screens'
+//!   buttons and links are WordPress's blue. WordPress has no dark mode, so the theme stays light.
+//! - Its own sign-in, lost password and reset pages, as wp-login.php looks, on a layout of their
+//!   own. They post the same fields to the same actions as the panel's pages. A signed-out page
+//!   renders in the site's default admin theme (see `ignite_panel::theme`), so they show while
+//!   this theme is the site's default.
+//! - WordPress's Dashicons for the menu, with the Dashicons stylesheet loaded only while this
+//!   theme is the page's theme.
 
-use ignite_panel::theme::{AdminTheme, IGNITE_LAYOUT, ThemeError};
+use ignite_panel::theme::{AdminTheme, ColorToken, ThemeError};
 
 use crate::editor::dashicons_stylesheet_url;
 
@@ -30,6 +38,89 @@ const DASHICONS: &[(&str, &str)] = &[
 /// WordPress's generic icon, for a resource without one.
 const RESOURCE_ICON: &str = "dashicons dashicons-admin-generic";
 
+/// The theme's layout: wp-admin's chrome around every signed-in page.
+const LAYOUT: &str = "themes.wordpress.layouts.app";
+
+/// The layout of the theme's sign-in, lost password and reset pages, as wp-login.php looks.
+const LOGIN_LAYOUT: &str = "themes.wordpress.layouts.login";
+
+/// The admin menu.
+const NAVIGATION: &str = "themes.wordpress.partials.nav";
+
+/// The admin bar.
+const TOP_BAR: &str = "themes.wordpress.partials.topbar";
+
+/// The flash message, as an admin notice.
+const FLASH: &str = "themes.wordpress.partials.flash";
+
+/// The theme's views by name, built into the binary. `login`, `forgot` and `reset` replace the
+/// panel's pages of those names.
+const VIEWS: &[(&str, &str)] = &[
+    (
+        LAYOUT,
+        include_str!("../../views/admin/wordpress/layouts/app.propel"),
+    ),
+    (
+        LOGIN_LAYOUT,
+        include_str!("../../views/admin/wordpress/layouts/login.propel"),
+    ),
+    (
+        NAVIGATION,
+        include_str!("../../views/admin/wordpress/partials/nav.propel"),
+    ),
+    (
+        TOP_BAR,
+        include_str!("../../views/admin/wordpress/partials/topbar.propel"),
+    ),
+    (
+        FLASH,
+        include_str!("../../views/admin/wordpress/partials/flash.propel"),
+    ),
+    (
+        "login",
+        include_str!("../../views/admin/wordpress/login.propel"),
+    ),
+    (
+        "forgot",
+        include_str!("../../views/admin/wordpress/forgot.propel"),
+    ),
+    (
+        "reset",
+        include_str!("../../views/admin/wordpress/reset.propel"),
+    ),
+];
+
+/// WordPress's admin colours (its `common.css` and `forms.css`), as Ignite's colour tokens, so
+/// the screens' own markup (buttons, links, cards, messages) takes them. The dark values are the
+/// light ones: WordPress has no dark mode, and the theme's layout keeps the page light.
+const COLORS: &[(&str, &str)] = &[
+    ("primary", "#2271b1"),
+    ("primary-emphasis", "#135e96"),
+    ("lightprimary", "#f0f6fc"),
+    ("secondary", "#50575e"),
+    ("secondary-emphasis", "#3c434a"),
+    ("lightsecondary", "#f6f7f7"),
+    ("info", "#72aee6"),
+    ("lightinfo", "#f0f6fc"),
+    ("success", "#00a32a"),
+    ("success-emphasis", "#008a20"),
+    ("lightsuccess", "#edfaef"),
+    ("warning", "#dba617"),
+    ("warning-emphasis", "#996800"),
+    ("lightwarning", "#fcf9e8"),
+    ("error", "#d63638"),
+    ("error-emphasis", "#b32d2e"),
+    ("lighterror", "#fcf0f1"),
+    ("surface", "#ffffff"),
+    ("page", "#f0f0f1"),
+    ("heading", "#1d2327"),
+    ("text", "#3c434a"),
+    ("link", "#2271b1"),
+    ("border", "#c3c4c7"),
+    ("bordergray", "#dcdcde"),
+    ("code-bg", "#f6f7f7"),
+];
+
 /// WordPress's admin theme, registered by [`register`].
 pub(crate) struct WordPressTheme;
 
@@ -43,7 +134,33 @@ impl AdminTheme for WordPressTheme {
     }
 
     fn layout(&self) -> &str {
-        IGNITE_LAYOUT
+        LAYOUT
+    }
+
+    fn navigation(&self) -> &str {
+        NAVIGATION
+    }
+
+    fn top_bar(&self) -> &str {
+        TOP_BAR
+    }
+
+    fn flash(&self) -> &str {
+        FLASH
+    }
+
+    fn colors(&self) -> Vec<ColorToken> {
+        COLORS
+            .iter()
+            .map(|(name, value)| ColorToken::new(*name, *value, *value))
+            .collect()
+    }
+
+    fn view(&self, name: &str) -> Option<String> {
+        VIEWS
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, source)| (*source).to_owned())
     }
 
     fn stylesheets(&self) -> Vec<String> {
@@ -108,6 +225,62 @@ mod tests {
         assert_eq!(WordPressTheme.icon("dashicons-"), None);
         assert_eq!(WordPressTheme.icon("dashicons-x\" onclick"), None);
         assert_eq!(WordPressTheme.resource_icon(), RESOURCE_ICON);
+    }
+
+    #[test]
+    fn the_theme_has_its_own_layout_and_partials() {
+        assert_ne!(WordPressTheme.layout(), ignite_panel::theme::IGNITE_LAYOUT);
+        assert_ne!(
+            WordPressTheme.navigation(),
+            ignite_panel::theme::IGNITE_NAVIGATION
+        );
+        assert_ne!(
+            WordPressTheme.top_bar(),
+            ignite_panel::theme::IGNITE_TOP_BAR
+        );
+        assert_ne!(WordPressTheme.flash(), ignite_panel::theme::IGNITE_FLASH);
+        for name in [
+            WordPressTheme.layout(),
+            WordPressTheme.navigation(),
+            WordPressTheme.top_bar(),
+            WordPressTheme.flash(),
+            LOGIN_LAYOUT,
+        ] {
+            assert!(WordPressTheme.view(name).is_some(), "{name}");
+        }
+        // The panel's other views are its own.
+        assert_eq!(WordPressTheme.view("index"), None);
+        assert_eq!(WordPressTheme.view("partials.field"), None);
+    }
+
+    #[test]
+    fn the_sign_in_page_is_wp_logins() {
+        let login = WordPressTheme.view("login").expect("the sign-in page");
+        assert!(login.contains(LOGIN_LAYOUT), "{login}");
+        for expected in [
+            "<label for=\"user_login\">Username or Email Address</label>",
+            "name=\"email\"",
+            "<label for=\"user_pass\">Password</label>",
+            "name=\"password\"",
+            "name=\"_token\" value=\"{{ $csrf_token }}\"",
+            "action=\"{{ $action }}\"",
+            "value=\"Log In\"",
+            ">Lost your password?</a>",
+        ] {
+            assert!(login.contains(expected), "{expected}");
+        }
+        let layout = WordPressTheme
+            .view(LOGIN_LAYOUT)
+            .expect("the sign-in layout");
+        assert!(layout.contains("background: #f0f0f1"), "{layout}");
+        assert!(layout.contains("background: #2271b1"), "{layout}");
+    }
+
+    #[test]
+    fn the_colours_are_wordpresss() {
+        let colors = WordPressTheme.colors();
+        assert!(colors.contains(&ColorToken::new("primary", "#2271b1", "#2271b1")));
+        assert!(colors.contains(&ColorToken::new("page", "#f0f0f1", "#f0f0f1")));
     }
 
     #[test]

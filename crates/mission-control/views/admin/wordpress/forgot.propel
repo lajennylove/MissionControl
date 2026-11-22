@@ -1,0 +1,29 @@
+{{-- The WordPress admin theme's lost password page, as wp-login.php?action=lostpassword: the same form as the panel's (the email, posted to the same action) in WordPress's card. --}}@extends('ignite::themes.wordpress.layouts.login')
+
+@section('ignite_favicon')@include('ignite::partials.favicon')@endsection
+
+@section('ignite_stylesheets')@include('ignite::partials.stylesheets')@endsection
+
+@section('ignite_head')@if (theme_style)<style>{!! $theme_style !!}</style>@endif@endsection
+
+@section('ignite_flash')@include('ignite::partials.flash')@endsection
+
+@section('title')Lost Password@endsection
+
+@section('content')
+  <p class="message">Please enter your email address. You will receive an email message with instructions on how to reset your password.</p>
+  @if (has_error)
+  <div id="login_error" class="notice notice-error" role="alert"><p><strong>Error:</strong> {{ $error }}</p></div>
+  @endif
+  <form name="lostpasswordform" id="lostpasswordform" method="post" action="{{ $action }}">
+    <input type="hidden" name="_token" value="{{ $csrf_token }}">
+    <p>
+      <label for="user_login">Email Address</label>
+      <input type="email" name="email" id="user_login" class="input" value="{{ $email }}" size="20" autocapitalize="off" autocomplete="username" required>
+    </p>
+    <p class="submit">
+      <input type="submit" name="wp-submit" id="wp-submit" class="button button-primary button-large" value="Get New Password">
+    </p>
+  </form>
+  <p id="nav"><a href="{{ $login_url }}">Log in</a></p>
+@endsection

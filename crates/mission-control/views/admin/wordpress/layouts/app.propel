@@ -1,0 +1,111 @@
+{{-- The WordPress admin theme's layout: wp-admin's chrome, the admin bar above the dark admin menu and the grey content area. It reads no page values, only the sections a page fills (see ignite_panel::theme), so an app's own view can extend it. WordPress has no dark mode, so the page stays light: the layout leaves out the ignite_html section (the light or dark mode). Ignite's CSS is still loaded, for the screens' own markup. --}}<!doctype html>
+<html lang="en" class="wp-toolbar">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@yield('title') &lsaquo; @yield('ignite_brand_name', 'Mission Control')</title>
+@hasSection('ignite_favicon')@yield('ignite_favicon')@endif@sectionMissing('ignite_favicon')<link rel="icon" href="{{ asset('ui::resources/images/favicon.ico') }}" sizes="any">
+@endif@vite(['ui::resources/css/app.css', 'ui::resources/js/app.js'])
+<style>
+html.wp-toolbar { padding-top: 32px; box-sizing: border-box; }
+body.wp-admin { background: #f0f0f1; color: #3c434a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; font-size: 13px; line-height: 1.4em; margin: 0; min-height: 100%; }
+body.wp-admin a { color: #2271b1; }
+body.wp-admin a:hover, body.wp-admin a:active { color: #135e96; }
+.screen-reader-text { border: 0; clip-path: inset(50%); height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; word-wrap: normal; }
+#wpwrap { min-height: 100%; position: relative; width: auto; }
+/* The page's header around the admin bar is Ignite's: only the bar shows. */
+.mc-wp-bar > header { display: contents; }
+/* The admin bar. */
+#wpadminbar { background: #1d2327; color: #f0f0f1; direction: ltr; font-size: 13px; font-weight: 400; height: 32px; left: 0; line-height: 2.46153846; min-width: 600px; position: fixed; top: 0; width: 100%; z-index: 99999; }
+#wpadminbar ul { list-style: none; margin: 0; padding: 0; }
+#wpadminbar .ab-top-menu, #wpadminbar .ab-top-secondary { display: flex; height: 32px; }
+#wpadminbar .ab-top-menu { float: left; }
+#wpadminbar .ab-top-secondary { float: right; }
+#wpadminbar li { position: relative; }
+#wpadminbar .ab-item { align-items: center; background: none; border: 0; color: #f0f0f1; cursor: pointer; display: flex; font: inherit; gap: 6px; height: 32px; padding: 0 8px; text-decoration: none; white-space: nowrap; }
+#wpadminbar li:hover > .ab-item, #wpadminbar li:focus-within > .ab-item { background: #2c3338; color: #72aee6; }
+#wpadminbar .ab-icon { color: #a7aaad; font-size: 20px; height: 20px; width: 20px; }
+#wpadminbar li:hover > .ab-item .ab-icon { color: #72aee6; }
+#wpadminbar .mc-wp-brand { display: block; height: 20px; width: auto; }
+#wpadminbar .avatar { border: 1px solid #8c8f94; height: 16px; width: 16px; }
+#wpadminbar .ab-sub-wrapper { background: #2c3338; box-shadow: 0 3px 5px rgba(0, 0, 0, 0.2); display: none; min-width: 100%; position: absolute; right: 0; top: 32px; }
+#wpadminbar .menupop:hover > .ab-sub-wrapper, #wpadminbar .menupop:focus-within > .ab-sub-wrapper { display: block; }
+#wpadminbar .ab-submenu { padding: 6px 0; }
+#wpadminbar .ab-submenu .ab-item { color: #c3c4c7; height: 26px; padding: 0 1em; width: 100%; }
+#wpadminbar .ab-submenu li:hover > .ab-item, #wpadminbar .ab-submenu li:focus-within > .ab-item { background: none; color: #72aee6; }
+#wpadminbar form { margin: 0; }
+#wp-admin-bar-menu-toggle { display: none; }
+/* The admin menu. */
+#adminmenuback, #adminmenuwrap, #adminmenu { background: #1d2327; width: 160px; }
+#adminmenuback { bottom: -120px; left: 0; position: fixed; top: 0; z-index: 1; }
+#adminmenuwrap { float: left; position: relative; z-index: 9990; }
+#adminmenu { clear: left; list-style: none; margin: 12px 0; padding: 0; }
+#adminmenu li { margin: 0; padding: 0; }
+#adminmenu li.menu-top { min-height: 34px; position: relative; }
+#adminmenu a.menu-top { align-items: flex-start; color: #f0f0f1; display: flex; font-size: 14px; font-weight: 400; line-height: 1.3; min-height: 34px; text-decoration: none; }
+#adminmenu .wp-menu-image { color: rgba(240, 246, 252, 0.6); flex: none; height: 34px; text-align: center; width: 36px; }
+#adminmenu .wp-menu-image .dashicons { font-size: 20px; height: 20px; padding: 7px 0; width: 20px; }
+#adminmenu .wp-menu-name { padding: 8px 8px 8px 0; overflow-wrap: break-word; }
+#adminmenu li.menu-top:hover > a.menu-top, #adminmenu li.menu-top > a.menu-top:focus { background: #2c3338; color: #72aee6; }
+#adminmenu li.menu-top:hover .wp-menu-image, #adminmenu li.menu-top > a.menu-top:focus .wp-menu-image { color: #72aee6; }
+#adminmenu li.current > a.menu-top, #adminmenu li.current:hover > a.menu-top { background: #2271b1; color: #fff; font-weight: 400; }
+#adminmenu li.current .wp-menu-image, #adminmenu li.current:hover .wp-menu-image { color: #fff; }
+#adminmenu .wp-submenu { background: #2c3338; display: none; list-style: none; margin: 0; padding: 7px 0 8px; }
+#adminmenu li.current > .wp-submenu { display: block; }
+#adminmenu li.menu-top:not(.current):hover > .wp-submenu, #adminmenu li.menu-top:not(.current):focus-within > .wp-submenu { box-shadow: 0 3px 5px rgba(0, 0, 0, 0.2); display: block; left: 160px; min-width: 160px; position: absolute; top: 0; z-index: 9999; }
+#adminmenu .wp-submenu a { color: rgba(240, 246, 252, 0.7); display: block; font-size: 13px; line-height: 1.4; padding: 5px 12px; text-decoration: none; }
+#adminmenu .wp-submenu a:hover, #adminmenu .wp-submenu a:focus { color: #72aee6; }
+#adminmenu .wp-submenu-head { display: none; }
+#adminmenu li.wp-menu-separator { height: 5px; margin: 0 0 6px; padding: 0; }
+.mc-wp-menu-toggle { display: none; }
+/* The content. */
+#wpcontent { height: 100%; margin-left: 160px; padding-left: 20px; }
+#wpbody-content { float: left; overflow: visible; padding-bottom: 65px; width: 100%; }
+.wrap { margin: 10px 20px 0 2px; }
+.wrap h1 { color: #1d2327; font-size: 23px; font-weight: 400; line-height: 1.3; margin: 0 0 12px; padding: 9px 0 4px; }
+.notice { background: #fff; border: 1px solid #c3c4c7; border-left-width: 4px; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04); margin: 5px 0 15px; padding: 1px 12px; }
+.notice p { margin: 0.5em 0; padding: 2px; }
+.notice-success { border-left-color: #00a32a; }
+.notice-error { border-left-color: #d63638; }
+#wpfooter { bottom: 0; color: #50575e; left: 0; padding: 10px 20px; position: absolute; right: 0; }
+#wpfooter p { font-size: 13px; line-height: 1.55; margin: 0; }
+#wpfooter { margin-left: 160px; }
+/* Narrow screens: the bar grows to 46px and the menu opens from its toggle, as in WordPress. */
+@media screen and (max-width: 782px) {
+  html.wp-toolbar { padding-top: 46px; }
+  #wpadminbar { height: 46px; min-width: 240px; }
+  #wpadminbar .ab-top-menu, #wpadminbar .ab-top-secondary { height: 46px; }
+  #wpadminbar .ab-item { height: 46px; padding: 0 12px; }
+  #wpadminbar .ab-icon { font-size: 26px; height: 26px; width: 26px; }
+  #wpadminbar .ab-sub-wrapper { top: 46px; }
+  #wpadminbar .display-name, #wp-admin-bar-site-name .ab-label { display: none; }
+  #wp-admin-bar-menu-toggle { display: block; }
+  #adminmenuback, #adminmenuwrap { display: none; }
+  .mc-wp-menu-toggle:checked ~ #adminmenumain #adminmenuback, .mc-wp-menu-toggle:checked ~ #adminmenumain #adminmenuwrap { display: block; width: 190px; }
+  .mc-wp-menu-toggle:checked ~ #adminmenumain #adminmenu { width: 190px; }
+  #adminmenuwrap { position: absolute; }
+  #wpcontent, #wpfooter { margin-left: 0; }
+  #wpcontent { padding-left: 10px; }
+}
+</style>
+@yield('ignite_head')@yield('ignite_stylesheets')</head>
+<body class="wp-admin">
+<div id="wpwrap">
+@yield('ignite_aside')
+<div id="wpcontent">
+  <div class="mc-wp-bar">@yield('ignite_bar')</div>
+  <div id="wpbody" role="main">
+    <div id="wpbody-content">
+      <div class="wrap">
+        @yield('ignite_flash')
+        @yield('content')
+      </div>
+    </div>
+  </div>
+</div>
+<div id="wpfooter" role="contentinfo">
+  <p id="footer-left">Thank you for creating with @yield('ignite_brand_name', 'Mission Control').</p>
+</div>
+</div>
+</body>
+</html>
