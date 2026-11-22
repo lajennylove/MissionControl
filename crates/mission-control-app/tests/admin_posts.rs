@@ -515,14 +515,15 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "{dashboard}"
     );
     assert!(!dashboard.contains("ignite-mark.png"), "{dashboard}");
-    // WordPress's Dashicons stylesheet is linked on every panel page, the sign-in page too
-    // (Ignite's `stylesheet`), and served with the fonts it names.
+    // The default theme is Ignite's, so WordPress's Dashicons stylesheet is not linked on any
+    // panel page, the sign-in page too; it is served with the fonts it names, for the WordPress
+    // theme (which links it while active).
     let dashicons = format!(
         "<link rel=\"stylesheet\" href=\"/mc-includes/css/dashicons.css?ver={}\">",
         mission_control::editor_version()
     );
-    assert!(dashboard.contains(&dashicons), "{dashboard}");
-    assert!(login.contains(&dashicons), "{login}");
+    assert!(!dashboard.contains(&dashicons), "{dashboard}");
+    assert!(!login.contains(&dashicons), "{login}");
     for (uri, kind) in [
         (
             format!(
@@ -567,18 +568,18 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     let order = [
         "href=\"/mc-admin\"",
         ">Content</p>",
-        "<span class=\"dashicons dashicons-admin-post\" aria-hidden=\"true\"></span>Posts",
-        "<span class=\"dashicons dashicons-admin-media\" aria-hidden=\"true\"></span>Media",
-        "<span class=\"dashicons dashicons-admin-page\" aria-hidden=\"true\"></span>Pages",
+        "<i class=\"ti ti-pin text-lg\"></i>Posts",
+        "<i class=\"ti ti-photo text-lg\"></i>Media",
+        "<i class=\"ti ti-file-text text-lg\"></i>Pages",
         ">Site</p>",
-        "<span class=\"dashicons dashicons-admin-appearance\" aria-hidden=\"true\"></span>Menus",
-        "dashicons-admin-settings\" aria-hidden=\"true\"></span>General Settings",
-        "</span>Writing Settings",
-        "</span>Reading Settings",
-        "</span>Discussion Settings",
-        "</span>Media Settings",
-        "</span>Permalink Settings",
-        "</span>Privacy",
+        "<i class=\"ti ti-brush text-lg\"></i>Menus",
+        "<i class=\"ti ti-settings text-lg\"></i>General Settings",
+        "</i>Writing Settings",
+        "</i>Reading Settings",
+        "</i>Discussion Settings",
+        "</i>Media Settings",
+        "</i>Permalink Settings",
+        "</i>Privacy",
     ];
     // Nothing between the dashboard and the Content group: every screen is in a group.
     let dashboard_end = nav.find("href=\"/mc-admin\"").unwrap();
@@ -594,6 +595,36 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
             .unwrap_or_else(|| panic!("`{entry}` after byte {at} of the sidebar: {nav}"));
         at += found + entry.len();
     }
+    // Choosing the WordPress theme on the profile page shows its Dashicons and loads their
+    // stylesheet; an empty choice goes back to the site's default, Ignite's theme.
+    let csrf = token(client).await;
+    let response = post(
+        client,
+        "/mc-admin/profile/admin-theme",
+        &[("_token", &csrf), ("admin_theme", "wordpress")],
+    )
+    .await;
+    assert_eq!(response.status(), Status::SeeOther, "chooses WordPress");
+    let (_, wordpress) = get(client, "/mc-admin").await;
+    assert!(wordpress.contains(&dashicons), "{wordpress}");
+    assert!(
+        wordpress.contains("<i class=\"dashicons dashicons-admin-post text-lg\"></i>Posts"),
+        "{wordpress}"
+    );
+    let csrf = token(client).await;
+    let response = post(
+        client,
+        "/mc-admin/profile/admin-theme",
+        &[("_token", &csrf), ("admin_theme", "")],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        Status::SeeOther,
+        "goes back to the default"
+    );
+    let (_, default) = get(client, "/mc-admin").await;
+    assert!(!default.contains(&dashicons), "{default}");
     sign_out(client).await;
 }
 

@@ -10,9 +10,9 @@
 //! - its group: [`CONTENT`] for an entry above WordPress's separator at 59, [`SITE`] for one at
 //!   or below it ([`group_for`]);
 //! - its WordPress position as the sort;
-//! - WordPress's Dashicons class for it (`dashicons dashicons-admin-post` and so on; the base
-//!   class `dashicons` is needed). Ignite ships no icon font: the app serves
-//!   WordPress's Dashicons stylesheet and registers it with Ignite's `stylesheet`.
+//! - an Ignite icon name for it (`post`, `media`, ...; see `ignite_panel::theme::icons`). Each
+//!   admin theme maps the name to its own icon: the WordPress theme to Dashicons, which it loads
+//!   with its own stylesheet, and the Ignite theme to Tabler.
 //!
 //! A custom post type takes its `menu_position`, or the next free position after Comments, as
 //! WordPress's `$_wp_last_object_menu` gives it, and a position already taken moves down to the
@@ -66,24 +66,27 @@ const CORE_POSITIONS: [i32; 14] = [2, 4, 5, 10, 20, 25, 59, 60, 65, 70, 75, 80, 
 /// position from the others.
 pub const NOT_IN_MENU: i32 = 58;
 
-/// WordPress's default post type icon (`dashicons-admin-post`), with the base class.
-pub const POST_ICON: &str = "dashicons dashicons-admin-post";
+// The icons are Ignite's names (`ignite_panel::theme::icons`): each admin theme maps a name to its
+// own classes, so the WordPress theme shows Dashicons and the Ignite theme its Tabler icons.
+
+/// The post type icon: Posts' icon, and the default for a type without one.
+pub const POST_ICON: &str = "post";
 /// Media's icon.
-pub const MEDIA_ICON: &str = "dashicons dashicons-admin-media";
+pub const MEDIA_ICON: &str = "media";
 /// Pages' icon.
-pub const PAGE_ICON: &str = "dashicons dashicons-admin-page";
+pub const PAGE_ICON: &str = "page";
 /// Comments' icon.
-pub const COMMENTS_ICON: &str = "dashicons dashicons-admin-comments";
+pub const COMMENTS_ICON: &str = "comment";
 /// Appearance's icon, which the Menus screen shows.
-pub const APPEARANCE_ICON: &str = "dashicons dashicons-admin-appearance";
+pub const APPEARANCE_ICON: &str = "appearance";
 /// Plugins' icon.
-pub const PLUGINS_ICON: &str = "dashicons dashicons-admin-plugins";
+pub const PLUGINS_ICON: &str = "plugins";
 /// Users' icon.
-pub const USERS_ICON: &str = "dashicons dashicons-admin-users";
+pub const USERS_ICON: &str = "users";
 /// Tools' icon.
-pub const TOOLS_ICON: &str = "dashicons dashicons-admin-tools";
+pub const TOOLS_ICON: &str = "tools";
 /// Settings' icon.
-pub const SETTINGS_ICON: &str = "dashicons dashicons-admin-settings";
+pub const SETTINGS_ICON: &str = "settings";
 
 /// The group of an entry at `position`: [`CONTENT`] above WordPress's separator at 59, [`SITE`]
 /// from it on.
@@ -102,9 +105,10 @@ pub fn place(resource: &mut RuntimeResource, position: i32, icon: &str) {
     resource.navigation_icon = Some(icon.to_owned());
 }
 
-/// The Dashicons class of a post type's `menu_icon`: a Dashicons name (`dashicons-calendar`)
-/// with the base class. WordPress also takes an image URL, a base64 SVG or `none`; Ignite's
-/// navigation takes CSS classes only, so those show the default post icon.
+/// The icon name of a post type's `menu_icon`: a Dashicons name (`dashicons-calendar`), which
+/// the WordPress theme shows and the Ignite theme replaces with its resource icon. WordPress also
+/// takes an image URL, a base64 SVG or `none`; those are not names, so they show the default
+/// post icon.
 pub fn post_type_icon(def: &PostTypeDef) -> String {
     match def.menu_icon.as_deref().map(str::trim) {
         Some(icon)
@@ -114,7 +118,7 @@ pub fn post_type_icon(def: &PostTypeDef) -> String {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
         {
-            format!("dashicons {icon}")
+            icon.to_owned()
         }
         _ => POST_ICON.to_owned(),
     }
@@ -239,10 +243,10 @@ mod tests {
     }
 
     #[test]
-    fn icons_are_dashicons_classes() {
+    fn icons_are_names() {
         assert_eq!(
             post_type_icon(&def("book", None, Some("dashicons-book"))),
-            "dashicons dashicons-book"
+            "dashicons-book"
         );
         assert_eq!(post_type_icon(&def("book", None, None)), POST_ICON);
         assert_eq!(
