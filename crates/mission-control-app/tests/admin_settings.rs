@@ -115,7 +115,19 @@ async fn post<'c>(client: &'c Client, uri: &str, fields: &[(&str, &str)]) -> Loc
 
 /// The CSRF token of the client's browser session, read from the sign-in page.
 async fn token(client: &Client) -> String {
-    let (status, html) = get(client, "/mc-admin/login").await;
+    // A signed-in client is sent away from the sign-in page, so its token comes from the dashboard.
+    let (mut status, mut html) = get(client, "/mc-admin/login").await;
+    if status == Status::SeeOther {
+        (status, html) = get(client, "/mc-admin").await;
+    }
+    assert_eq!(status, Status::Ok, "{html}");
+    token_in(&html)
+}
+
+/// The CSRF token of a signed-in client's session, read from the dashboard (the sign-in page
+/// redirects a signed-in client).
+async fn dashboard_token(client: &Client) -> String {
+    let (status, html) = get(client, "/mc-admin").await;
     assert_eq!(status, Status::Ok, "{html}");
     token_in(&html)
 }
@@ -132,7 +144,8 @@ async fn sign_in(client: &Client, email: &str) {
 }
 
 async fn sign_out(client: &Client) {
-    let csrf = token(client).await;
+    // Signed in, the sign-in page redirects, so the token comes from the dashboard.
+    let csrf = token_in(&get(client, "/mc-admin").await.1);
     let response = post(client, "/mc-admin/logout", &[("_token", &csrf)]).await;
     assert_eq!(response.status(), Status::SeeOther);
 }
@@ -260,7 +273,7 @@ async fn flows(scratch: &ScratchDatabase) {
         &body,
         "Sorry, you are not allowed to access this page.",
     );
-    let csrf = token(&client).await;
+    let csrf = dashboard_token(&client).await;
     for uri in [
         "/mc-admin/options-reading",
         "/mc-admin/options-reading/1/delete",
@@ -304,7 +317,7 @@ async fn flows(scratch: &ScratchDatabase) {
         &body,
         "Sorry, you are not allowed to manage privacy options on this site.",
     );
-    let csrf = token(&client).await;
+    let csrf = dashboard_token(&client).await;
     let response = post(
         &client,
         "/mc-admin/options-general/1",

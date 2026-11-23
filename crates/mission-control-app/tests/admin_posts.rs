@@ -139,7 +139,11 @@ async fn post<'c>(client: &'c Client, uri: &str, fields: &[(&str, &str)]) -> Loc
 
 /// The CSRF token of the client's browser session, read from the sign-in page.
 async fn token(client: &Client) -> String {
-    let (status, html) = get(client, "/mc-admin/login").await;
+    // A signed-in client is sent away from the sign-in page, so its token comes from the dashboard.
+    let (mut status, mut html) = get(client, "/mc-admin/login").await;
+    if status == Status::SeeOther {
+        (status, html) = get(client, "/mc-admin").await;
+    }
     assert_eq!(status, Status::Ok, "{html}");
     token_in(&html)
 }
@@ -158,7 +162,8 @@ async fn sign_in(client: &Client, email: &str) {
 }
 
 async fn sign_out(client: &Client) {
-    let csrf = token(client).await;
+    // Signed in, the sign-in page redirects, so the token comes from the dashboard.
+    let csrf = token_in(&get(client, "/mc-admin").await.1);
     let response = post(client, "/mc-admin/logout", &[("_token", &csrf)]).await;
     assert_eq!(response.status(), Status::SeeOther);
 }
@@ -660,6 +665,7 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "<form name=\"loginform\" id=\"loginform\" method=\"post\" action=\"/mc-admin/login\">",
         "<label for=\"user_login\">Email Address</label>",
         "<label for=\"user_pass\">Password</label>",
+        "<input name=\"remember\" type=\"checkbox\" id=\"rememberme\" value=\"1\"> <label for=\"rememberme\">Remember Me</label>",
         "class=\"button button-primary button-large\" value=\"Log In\"",
         "<a href=\"/mc-admin/password/forgot\">Lost your password?</a>",
         dashicons.as_str(),

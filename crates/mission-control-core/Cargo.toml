@@ -33,7 +33,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 # The field kinds of custom fields (`FieldKindDef`), shared with the admin panel (MIT). Built on
 # Orbit 0.4, the same Orbit as Mission Control.
-ignite-core = "0.6.2"
+ignite-core = "0.6.3"
 # Detects a file's real type from its magic numbers (MIT; its `cfb` dependency is MIT).
 infer = "0.22"
 # The logging facade Rocket 0.5 logs through.

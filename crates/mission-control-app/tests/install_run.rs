@@ -29,9 +29,10 @@ async fn a_new_database_gets_the_panel_and_core_tables_once() {
     let scratch = scratch_database("install_run").await;
 
     let summary = run_migrations(scratch.url()).await.expect("migrates");
-    assert_eq!(summary.panel.len(), 10, "{:?}", summary.panel);
+    assert_eq!(summary.panel.len(), 11, "{:?}", summary.panel);
     assert_eq!(summary.panel[0], "20261108000000_create_users");
     assert_eq!(summary.panel[9], "20261116000000_add_user_admin_theme");
+    assert_eq!(summary.panel[10], "20261117000000_add_user_remember_token");
     let core: Vec<String> = migrator()
         .expect("the core migrations are valid")
         .migrations()

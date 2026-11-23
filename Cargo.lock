@@ -1427,9 +1427,9 @@ dependencies = [
 
 [[package]]
 name = "ignite-core"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cb3814ebee69f20f6d1f0406648ecd20b79101d566773e3da388305c07f70c4"
+checksum = "9e2aa2b95c4831c55f4efad47ff62c27420fe6bb43f81751c666362e5efdab9a"
 dependencies = [
  "argon2",
  "chrono",
@@ -1443,9 +1443,9 @@ dependencies = [
 
 [[package]]
 name = "ignite-macros"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f996cefdf8dbb51343d9ad5c55b24b10d286c38e1e0fbb50f268d7513d6dadb9"
+checksum = "eae3eaf557aa9c5bf29b518f4474dabb715693df63009e2f27269a1e89b904ac"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1454,9 +1454,9 @@ dependencies = [
 
 [[package]]
 name = "ignite-panel"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd765f4fc69f584119a9d185827fa5b3e9a3b3361dd34aadcc446bf519bcbdf"
+checksum = "7973a409bd80284c67f6ae3c9904675378f92f4f7656ed005ea1f880ed20f277"
 dependencies = [
  "argon2",
  "base64 0.22.1",

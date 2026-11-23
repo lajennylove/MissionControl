@@ -149,7 +149,19 @@ async fn post<'c>(client: &'c Client, uri: &str, fields: &[(&str, &str)]) -> Loc
 }
 
 async fn token(client: &Client) -> String {
-    let (status, html) = get(client, "/mc-admin/login").await;
+    // A signed-in client is sent away from the sign-in page, so its token comes from the dashboard.
+    let (mut status, mut html) = get(client, "/mc-admin/login").await;
+    if status == Status::SeeOther {
+        (status, html) = get(client, "/mc-admin").await;
+    }
+    assert_eq!(status, Status::Ok, "{html}");
+    token_in(&html)
+}
+
+/// The CSRF token of a signed-in client's session, read from the dashboard (the sign-in page
+/// redirects a signed-in client).
+async fn dashboard_token(client: &Client) -> String {
+    let (status, html) = get(client, "/mc-admin").await;
     assert_eq!(status, Status::Ok, "{html}");
     token_in(&html)
 }
@@ -166,7 +178,8 @@ async fn sign_in(client: &Client, email: &str) {
 }
 
 async fn sign_out(client: &Client) {
-    let csrf = token(client).await;
+    // Signed in, the sign-in page redirects, so the token comes from the dashboard.
+    let csrf = token_in(&get(client, "/mc-admin").await.1);
     let response = post(client, "/mc-admin/logout", &[("_token", &csrf)]).await;
     assert_eq!(response.status(), Status::SeeOther);
 }
@@ -288,7 +301,7 @@ async fn flow(scratch: &ScratchDatabase) {
     let (status, dashboard) = get(&client, "/mc-admin").await;
     assert_eq!(status, Status::Ok);
     assert!(dashboard.contains("Media"), "{dashboard}");
-    let csrf = token(&client).await;
+    let csrf = dashboard_token(&client).await;
 
     // A post to attach uploads to (the editor's Add Media sends its id).
     let edit = header(
@@ -749,7 +762,7 @@ async fn flow(scratch: &ScratchDatabase) {
     // An author may upload (upload_files) but not use the screens (Ruling R127), nor attach to
     // the editor's post.
     sign_in(&client, &author).await;
-    let csrf = token(&client).await;
+    let csrf = dashboard_token(&client).await;
     let response = upload(&client, Some(&csrf), &[], Some(("mine.jpg", &jpeg))).await;
     assert_eq!(json_of(response).await.0, Status::Ok);
     let response = upload(
@@ -798,7 +811,7 @@ async fn flow(scratch: &ScratchDatabase) {
 
     // A subscriber may not upload or list.
     sign_in(&client, &subscriber).await;
-    let csrf = token(&client).await;
+    let csrf = dashboard_token(&client).await;
     let before = attachments(&db).await;
     let response = upload(&client, Some(&csrf), &[], Some(("nope.jpg", &jpeg))).await;
     let (status, body, _) = json_of(response).await;
@@ -836,7 +849,7 @@ async fn flow(scratch: &ScratchDatabase) {
         assert_eq!(status, Status::ServiceUnavailable, "{uri}: {body}");
         assert!(body.contains("not available"), "{uri}: {body}");
     }
-    let csrf = token(&second).await;
+    let csrf = dashboard_token(&second).await;
     let response = post(
         &second,
         &format!("/mc-admin/attachment/{lighthouse}/delete"),
