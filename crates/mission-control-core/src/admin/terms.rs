@@ -1,0 +1,586 @@
+//! The admin's Categories and Tags screens: WordPress's Posts > Categories and Posts > Tags
+//! (`edit-tags.php?taxonomy=category` and `?taxonomy=post_tag`) as the Ignite runtime resources
+//! [`CATEGORY_SCREEN`] and [`POST_TAG_SCREEN`], over the terms API ([`Term`]). Nothing here needs
+//! Rocket: the `mission-control` crate registers the resources ([`register_term_resources`]) and
+//! grants their abilities.
+//!
+//! - The list: each term's name, description, slug and count, as `WP_Terms_List_Table` shows
+//!   them. The search matches the name and the slug, as `get_terms`' `search` does. Categories
+//!   are listed as a tree (children under their parent, the name prefixed with one "— " per
+//!   level) when the list is neither searched nor sorted, as WordPress shows them; otherwise, and
+//!   always for tags, the list is flat, ordered by name unless a column is sorted.
+//! - New and edit: the name (required), the slug, the parent (categories only, as tags are flat)
+//!   and the description. The rules are the terms API's, as `wp_insert_term` and
+//!   `wp_update_term` apply them: an empty slug is made from the name; a new term's taken slug
+//!   is made unique (`rust-2`), and a taken slug given on edit is refused; a name that exists
+//!   under the same parent (anywhere, for tags) is refused on create. The refusals show on the
+//!   form, as Ignite shows a unique violation: "Name is already taken." and "Slug is already
+//!   taken.". The name passes through `sanitize_text_field` and the description through
+//!   `wp_filter_kses`, for every user, as the REST API stores them.
+//! - Delete is `wp_delete_term`: the term leaves the posts that had it, its children move to its
+//!   parent, and a post left with no category gets the default one. The default category (the
+//!   `default_category` option, WordPress's "Uncategorized") is never deleted: the policy
+//!   refuses it (403) and Ignite hides its Delete button.
+//! - Who may use them ([`TermsPolicy`]): the list needs the taxonomy's `manage_terms`
+//!   (`manage_categories` for categories, `manage_post_tags` for tags, which `map_meta_cap` maps
+//!   to `manage_categories`); New needs `edit_terms`; editing a term `edit_term` and deleting it
+//!   `delete_term`, mapped as `map_meta_cap` maps them. With WordPress's roles, administrators
+//!   and editors hold `manage_categories`.
+//!
+//! Not served yet, because Ignite 0.6.3 has no list bulk actions: WordPress's bulk Delete.
+
+use std::collections::{BTreeSet, HashMap};
+
+use ignite_core::{
+    ActingUser, ColumnDef, Direction, FieldDef, FieldKindDef, ListQuery, Page, Policy, Row,
+    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource,
+};
+use orbit_orm::{Database, Error, Value as Sql, raw};
+use serde_json::{Value, json};
+
+use super::navigation;
+use super::settings::refused_save;
+use crate::content::{
+    MAX_FILTERED_BYTES, NewTerm, Taxonomy, Term, TermChanges, TermError, default_term_ids,
+    kses_data, sanitize_text_field, terms_by_term_id,
+};
+use crate::front::escape_like;
+use crate::rest::{KsesLimiter, id_of};
+use crate::types::Access;
+use crate::users::{Object, TaxonomyCaps, TermContext, UserCaps, can};
+
+/// The slug of the Categories screen: the taxonomy's name, as `edit-tags.php?taxonomy=category`.
+pub const CATEGORY_SCREEN: &str = "category";
+
+/// The slug of the Tags screen: the taxonomy's name, as `edit-tags.php?taxonomy=post_tag`.
+pub const POST_TAG_SCREEN: &str = "post_tag";
+
+/// Both screens' slugs.
+pub const TERM_SCREENS: [&str; 2] = [CATEGORY_SCREEN, POST_TAG_SCREEN];
+
+/// Where Categories is listed in the sidebar: in Content, right after Posts (5). WordPress has it
+/// in the Posts submenu (`edit.php`, at 15).
+pub const CATEGORIES_SORT: i32 = navigation::POSTS + 1;
+
+/// Where Tags is listed: right after Categories. WordPress has it in the Posts submenu, at 16.
+pub const TAGS_SORT: i32 = navigation::POSTS + 2;
+
+/// The most terms a page of the list shows.
+const MAX_PER_PAGE: i64 = 100;
+
+/// The longest search, in characters.
+const MAX_SEARCH: usize = 200;
+
+const NAME: &str = "name";
+const SLUG: &str = "slug";
+const PARENT: &str = "parent";
+const DESCRIPTION: &str = "description";
+
+const COL_NAME: &str = "col_name";
+const COL_DESCRIPTION: &str = "col_description";
+const COL_SLUG: &str = "col_slug";
+const COL_COUNT: &str = "col_count";
+
+/// The taxonomy a term screen's slug serves, if `slug` is one.
+pub fn term_screen_taxonomy(slug: &str) -> Option<Taxonomy> {
+    match slug {
+        CATEGORY_SCREEN => Some(Taxonomy::CATEGORY),
+        POST_TAG_SCREEN => Some(Taxonomy::POST_TAG),
+        _ => None,
+    }
+}
+
+/// The screen of `taxonomy` as an Ignite runtime resource, its description filtered under
+/// `kses`.
+pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource {
+    let field = |name: &str, label: &str, kind: FieldKindDef, required: bool| FieldDef {
+        name: name.to_owned(),
+        label: label.to_owned(),
+        kind,
+        required,
+    };
+    let column = |key: &str, label: &str, sortable: bool, searchable: bool| ColumnDef {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        sortable,
+        searchable,
+    };
+    let category = taxonomy.name == Taxonomy::CATEGORY.name;
+    let (slug, title, singular, sort) = if category {
+        (CATEGORY_SCREEN, "Categories", "Category", CATEGORIES_SORT)
+    } else {
+        (POST_TAG_SCREEN, "Tags", "Tag", TAGS_SORT)
+    };
+    let mut fields = vec![
+        field(NAME, "Name", FieldKindDef::Text, true),
+        field(SLUG, "Slug", FieldKindDef::Text, false),
+    ];
+    if taxonomy.hierarchical {
+        fields.push(field(
+            PARENT,
+            "Parent Category",
+            FieldKindDef::Lookup,
+            false,
+        ));
+    }
+    fields.push(field(
+        DESCRIPTION,
+        "Description",
+        FieldKindDef::Textarea,
+        false,
+    ));
+    let mut resource = RuntimeResource::new(
+        slug,
+        title,
+        singular,
+        TermsData {
+            taxonomy: taxonomy.clone(),
+            kses,
+        },
+    );
+    resource.fields = fields;
+    resource.columns = vec![
+        column(COL_NAME, "Name", true, true),
+        column(COL_DESCRIPTION, "Description", true, false),
+        column(COL_SLUG, "Slug", true, true),
+        column(COL_COUNT, "Count", true, false),
+    ];
+    navigation::place(&mut resource, sort, navigation::POST_ICON);
+    // PARENT MENU: Categories and Tags belong under Posts (WordPress's `edit.php` submenu). Set
+    // the parent here once Ignite has sub-items; until then they are top-level entries of the
+    // Content group, right after Posts.
+    resource
+}
+
+/// Registers the Categories and Tags screens with Ignite, each with its [`TermsPolicy`] reading
+/// users' capabilities through `access`. Returns the slugs registered, and Ignite's refusal of
+/// each other one (such as its slug taken by another registration, whose policy is then left
+/// alone).
+pub fn register_term_resources(access: &Access) -> (Vec<&'static str>, Vec<RuntimeError>) {
+    let mut registered = Vec::new();
+    let mut refused = Vec::new();
+    for (slug, taxonomy) in [
+        (CATEGORY_SCREEN, Taxonomy::CATEGORY),
+        (POST_TAG_SCREEN, Taxonomy::POST_TAG),
+    ] {
+        match ignite_core::register_runtime(terms_resource(&taxonomy, access.kses.clone())) {
+            Ok(()) => {
+                ignite_core::register_policy(slug, TermsPolicy::new(taxonomy, access.clone()));
+                registered.push(slug);
+            }
+            Err(e) => refused.push(e),
+        }
+    }
+    (registered, refused)
+}
+
+/// Where a term screen's records live: the terms of one taxonomy, by `term_id`. See the
+/// [module](self).
+#[derive(Clone)]
+pub struct TermsData {
+    taxonomy: Taxonomy,
+    kses: KsesLimiter,
+}
+
+/// The error Ignite shows on the form as "<label> is already taken.": a violation of the index
+/// its rule names (`{slug}_{field}_unique`).
+fn taken(screen: &str, field: &str) -> Error {
+    Error::UniqueViolation {
+        index: Some(format!("{screen}_{field}_unique")),
+    }
+}
+
+/// A text value of the form's row: `None` when the key is missing, `Some("")` when it is null.
+fn text(input: &Row, key: &str) -> Option<String> {
+    match input.get(key)? {
+        Value::String(s) => Some(s.clone()),
+        Value::Null => Some(String::new()),
+        other => Some(other.to_string()),
+    }
+}
+
+impl TermsData {
+    /// The screen's slug.
+    fn screen(&self) -> &'static str {
+        if self.taxonomy.name == Taxonomy::CATEGORY.name {
+            CATEGORY_SCREEN
+        } else {
+            POST_TAG_SCREEN
+        }
+    }
+
+    /// The Ignite error for a refusal of the terms API: the name or slug taken show on the form;
+    /// the other refusals are logged and answered with Ignite's error page.
+    fn term_error(&self, e: TermError) -> Error {
+        match e {
+            TermError::Exists { .. } => taken(self.screen(), NAME),
+            TermError::DuplicateSlug { .. } => taken(self.screen(), SLUG),
+            TermError::Database(e) => e,
+            other => {
+                log::warn!("The {} term was not saved: {other}", self.taxonomy.name);
+                refused_save(&other.to_string())
+            }
+        }
+    }
+
+    /// The term with this `term_id`, if it is one of the taxonomy's.
+    async fn term(&self, db: &Database, term_id: i64) -> Result<Option<Term>, Error> {
+        Ok(terms_by_term_id(db, &self.taxonomy, &[term_id])
+            .await?
+            .pop())
+    }
+
+    /// The name and description as they are stored: `sanitize_text_field` and `wp_filter_kses`,
+    /// as the REST API filters them for every user, on a blocking thread behind the limiter.
+    async fn sanitize(
+        &self,
+        name: Option<String>,
+        description: Option<String>,
+    ) -> Result<(Option<String>, Option<String>), Error> {
+        for (field, value) in [(NAME, &name), (DESCRIPTION, &description)] {
+            if value.as_ref().is_some_and(|v| v.len() > MAX_FILTERED_BYTES) {
+                return Err(refused_save(&format!("the {field} is too long")));
+            }
+        }
+        self.kses
+            .run(move || {
+                (
+                    name.map(|n| sanitize_text_field(&n)),
+                    description.map(|d| kses_data(&d)),
+                )
+            })
+            .await
+            .map_err(|e| refused_save(&e.to_string()))
+    }
+
+    /// The parent the form asks for: `None` when it sent none (or the taxonomy is flat),
+    /// `Some(None)` for "None", and `Some(Some(term_id))`.
+    fn parent(&self, input: &Row) -> Option<Option<i64>> {
+        if !self.taxonomy.hierarchical {
+            return None;
+        }
+        let value = input.get(PARENT)?;
+        Some(id_of(value).filter(|id| *id > 0))
+    }
+
+    /// The categories in tree order with their depth: each term followed by its children, by
+    /// name, as WordPress lists them. A term whose parent is missing is listed at the top level.
+    fn tree(terms: Vec<Term>) -> Vec<(Term, usize)> {
+        let ids: BTreeSet<i64> = terms.iter().map(|t| t.term_id).collect();
+        let mut children: HashMap<Option<i64>, Vec<Term>> = HashMap::new();
+        for term in terms {
+            let parent = term.parent_id.filter(|p| ids.contains(p));
+            children.entry(parent).or_default().push(term);
+        }
+        let mut out = Vec::new();
+        let mut stack: Vec<(Term, usize)> = children
+            .remove(&None)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .map(|t| (t, 0))
+            .collect();
+        while let Some((term, depth)) = stack.pop() {
+            if let Some(kids) = children.remove(&Some(term.term_id)) {
+                stack.extend(kids.into_iter().rev().map(|t| (t, depth + 1)));
+            }
+            out.push((term, depth));
+        }
+        // Terms on a parent loop never reach the top level: listed last, so none is lost.
+        let mut rest: Vec<Term> = children.into_values().flatten().collect();
+        rest.sort_by_cached_key(|t| (t.name.to_lowercase(), t.term_id));
+        out.extend(rest.into_iter().map(|t| (t, 0)));
+        out
+    }
+
+    /// The list's row of `term`, its name prefixed with one "— " per level of `depth`.
+    fn row_of(term: &Term, depth: usize) -> Row {
+        let mut row = Row::new();
+        row.insert("id".into(), json!(term.term_id));
+        row.insert(NAME.into(), json!(term.name));
+        row.insert(SLUG.into(), json!(term.slug));
+        row.insert(DESCRIPTION.into(), json!(term.description));
+        row.insert(
+            PARENT.into(),
+            json!(term.parent_id.map(|p| p.to_string()).unwrap_or_default()),
+        );
+        row.insert(
+            COL_NAME.into(),
+            json!(format!("{}{}", "— ".repeat(depth), term.name)),
+        );
+        row.insert(COL_DESCRIPTION.into(), json!(term.description));
+        row.insert(COL_SLUG.into(), json!(term.slug));
+        row.insert(COL_COUNT.into(), json!(term.count.to_string()));
+        row
+    }
+
+    async fn list_page(&self, db: &Database, query: &ListQuery) -> Result<Page<Row>, Error> {
+        let per_page = query.per_page.clamp(1, MAX_PER_PAGE);
+        let page = query.page.max(1);
+        let offset = page.saturating_sub(1).saturating_mul(per_page);
+        let search = query
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(MAX_SEARCH).collect::<String>());
+        if self.taxonomy.hierarchical && search.is_none() && query.sort.is_none() {
+            let tree = Self::tree(Term::all(db, &self.taxonomy).await?);
+            let total = i64::try_from(tree.len()).unwrap_or(i64::MAX);
+            let rows = tree
+                .iter()
+                .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                .take(usize::try_from(per_page).unwrap_or(0))
+                .map(|(term, depth)| Self::row_of(term, *depth))
+                .collect();
+            return Ok(Page { rows, total });
+        }
+        let mut filter = String::from("tt.taxonomy = ?");
+        let mut binds: Vec<Sql> = vec![(&*self.taxonomy.name).into()];
+        if let Some(search) = search {
+            let like = format!("%{}%", escape_like(&search.to_lowercase()));
+            filter.push_str(
+                " AND (LOWER(t.name) LIKE ? ESCAPE '!' OR LOWER(t.slug) LIKE ? ESCAPE '!')",
+            );
+            binds.push(like.clone().into());
+            binds.push(like.into());
+        }
+        let total: i64 = raw::fetch_scalar(
+            db,
+            &format!(
+                "SELECT COUNT(*) FROM term_taxonomy tt INNER JOIN terms t ON t.id = tt.term_id \
+                 WHERE {filter}"
+            ),
+            &binds,
+        )
+        .await?;
+        let (column, order) = match &query.sort {
+            Some((key, direction)) => (
+                match key.as_str() {
+                    COL_SLUG => "t.slug",
+                    COL_COUNT => "tt.count",
+                    COL_DESCRIPTION => "tt.description",
+                    _ => "t.name",
+                },
+                match direction {
+                    Direction::Desc => "DESC",
+                    Direction::Asc => "ASC",
+                },
+            ),
+            None => ("t.name", "ASC"),
+        };
+        binds.push(per_page.into());
+        binds.push(offset.into());
+        let ids: Vec<(i64,)> = raw::fetch_all(
+            db,
+            &format!(
+                "SELECT t.id FROM term_taxonomy tt INNER JOIN terms t ON t.id = tt.term_id \
+                 WHERE {filter} ORDER BY {column} {order}, t.id {order} LIMIT ? OFFSET ?"
+            ),
+            &binds,
+        )
+        .await?;
+        let ids: Vec<i64> = ids.into_iter().map(|(id,)| id).collect();
+        let by_id: HashMap<i64, Term> = terms_by_term_id(db, &self.taxonomy, &ids)
+            .await?
+            .into_iter()
+            .map(|t| (t.term_id, t))
+            .collect();
+        let rows = ids
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .map(|term| Self::row_of(term, 0))
+            .collect();
+        Ok(Page { rows, total })
+    }
+
+    async fn row(&self, db: &Database, term_id: i64) -> Result<Option<Row>, Error> {
+        Ok(self
+            .term(db, term_id)
+            .await?
+            .map(|term| Self::row_of(&term, 0)))
+    }
+
+    /// The parent choices: "None", then every category in tree order, indented by level.
+    async fn parent_choices(&self, db: &Database) -> Result<Vec<(String, String)>, Error> {
+        let mut choices = vec![(String::new(), "None".to_owned())];
+        for (term, depth) in Self::tree(Term::all(db, &self.taxonomy).await?) {
+            choices.push((
+                term.term_id.to_string(),
+                format!("{}{}", "\u{a0}\u{a0}\u{a0}".repeat(depth), term.name),
+            ));
+        }
+        Ok(choices)
+    }
+}
+
+impl RuntimeData for TermsData {
+    fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
+        Box::pin(async move { self.list_page(db, query).await })
+    }
+
+    fn find<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, Option<Row>> {
+        Box::pin(async move { self.row(db, id).await })
+    }
+
+    /// `wp_insert_term`.
+    fn create<'a>(&'a self, db: &'a Database, input: Row) -> RuntimeFuture<'a, Row> {
+        Box::pin(async move {
+            let (name, description) = self
+                .sanitize(text(&input, NAME), text(&input, DESCRIPTION))
+                .await?;
+            let new = NewTerm {
+                name: name.unwrap_or_default(),
+                slug: text(&input, SLUG).unwrap_or_default(),
+                description: description.unwrap_or_default(),
+                parent_id: self.parent(&input).flatten(),
+            };
+            let term = Term::create(db, &self.taxonomy, new)
+                .await
+                .map_err(|e| self.term_error(e))?;
+            Ok(Self::row_of(&term, 0))
+        })
+    }
+
+    /// `wp_update_term`: an empty slug is made from the name.
+    fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
+        Box::pin(async move {
+            let Some(term) = self.term(db, id).await? else {
+                return Err(Error::NotFound { table: "terms" });
+            };
+            let (name, description) = self
+                .sanitize(text(&input, NAME), text(&input, DESCRIPTION))
+                .await?;
+            let changes = TermChanges {
+                name,
+                slug: text(&input, SLUG),
+                description,
+                parent_id: self.parent(&input),
+            };
+            let term = term
+                .update(db, &self.taxonomy, changes)
+                .await
+                .map_err(|e| self.term_error(e))?;
+            Ok(Self::row_of(&term, 0))
+        })
+    }
+
+    /// `wp_delete_term`. The default category is refused by the policy first.
+    fn delete<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, u64> {
+        Box::pin(async move {
+            let Some(term) = self.term(db, id).await? else {
+                return Ok(0);
+            };
+            let deleted = term.delete(db).await.map_err(|e| self.term_error(e))?;
+            Ok(u64::from(deleted))
+        })
+    }
+
+    fn options<'a>(
+        &'a self,
+        db: &'a Database,
+        field: &'a str,
+    ) -> RuntimeFuture<'a, Vec<(String, String)>> {
+        Box::pin(async move {
+            if field == PARENT && self.taxonomy.hierarchical {
+                self.parent_choices(db).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
+    }
+}
+
+/// Who may use a term screen, as WordPress's `edit-tags.php` and `term.php` decide: the list
+/// needs the taxonomy's `manage_terms`, New `edit_terms`, a term's form and save `edit_term`, and
+/// Delete `delete_term`, which nobody holds on the taxonomy's default term. Registered for the
+/// screen's slug by [`register_term_resources`].
+pub struct TermsPolicy {
+    taxonomy: Taxonomy,
+    caps: TaxonomyCaps,
+    access: Access,
+}
+
+impl TermsPolicy {
+    /// The policy of `taxonomy`'s screen, reading users' capabilities through `access`.
+    pub fn new(taxonomy: Taxonomy, access: Access) -> Self {
+        let caps = TaxonomyCaps::for_taxonomy(&taxonomy.name);
+        Self {
+            taxonomy,
+            caps,
+            access,
+        }
+    }
+
+    async fn user_caps(&self, db: &Database, user: &ActingUser) -> Result<UserCaps, Error> {
+        self.access.caps(db, user).await
+    }
+
+    /// Whether `user` holds the taxonomy capability `cap`.
+    async fn has(&self, db: &Database, user: &ActingUser, cap: &str) -> Result<bool, Error> {
+        Ok(can(&self.user_caps(db, user).await?, cap, None))
+    }
+
+    /// Whether `user` may do the term meta capability `cap` (`edit_term`, `delete_term`) on the
+    /// term of `record`. A record without an id is refused.
+    async fn on_term(
+        &self,
+        db: &Database,
+        user: &ActingUser,
+        cap: &str,
+        record: &Row,
+    ) -> Result<bool, Error> {
+        let Some(term_id) = record.get("id").and_then(id_of) else {
+            return Ok(false);
+        };
+        let defaults = default_term_ids(db, &self.taxonomy.name).await?;
+        let context = TermContext {
+            term_id,
+            taxonomy: &self.taxonomy.name,
+            default_terms: &defaults,
+            caps: Some(&self.caps),
+        };
+        Ok(can(
+            &self.user_caps(db, user).await?,
+            cap,
+            Some(&Object::Term(context)),
+        ))
+    }
+}
+
+impl Policy for TermsPolicy {
+    fn view_any<'a>(&'a self, db: &'a Database, user: &'a ActingUser) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.has(db, user, &self.caps.manage_terms))
+    }
+
+    fn view<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.on_term(db, user, "edit_term", record))
+    }
+
+    fn create<'a>(&'a self, db: &'a Database, user: &'a ActingUser) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.has(db, user, &self.caps.edit_terms))
+    }
+
+    fn update<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.on_term(db, user, "edit_term", record))
+    }
+
+    fn delete<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.on_term(db, user, "delete_term", record))
+    }
+}

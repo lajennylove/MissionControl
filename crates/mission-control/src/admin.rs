@@ -66,6 +66,11 @@
 //!   and Delete with WordPress's message for a page it does not have.
 //! - The Menus screen (Task 6.5, Ruling R133) at `/mc-admin/nav-menus`: the `nav_menu` terms,
 //!   their theme locations and their items; the fairing checks `edit_theme_options`.
+//! - The Categories and Tags screens (WordPress's Posts > Categories and Posts > Tags) at
+//!   `/mc-admin/category` and `/mc-admin/post_tag` (see `mission_control_core::admin::terms`):
+//!   their policy checks the taxonomy's `manage_terms`, `edit_terms`, `edit_term` and
+//!   `delete_term`, so the default category is never deleted. A term slug another registration
+//!   holds answers 503 (fail closed).
 //!
 //! At start the five WordPress roles are made sure to exist as Ignite roles, and each post type
 //! resource's five abilities are registered and granted to `administrator`, `editor` and the
@@ -73,7 +78,9 @@
 //! checks let them reach the type's policy; the media library's go to `administrator` and
 //! `editor`. The settings screens' `viewAny`,
 //! `view` and `update` and the Menus screen's five abilities are granted to `administrator`
-//! only (Ruling R132). Errors are logged, and the site starts anyway.
+//! only (Ruling R132). The Categories and Tags screens' five abilities go to the roles whose
+//! defaults hold `manage_categories` (`administrator` and `editor`). Errors are logged, and the
+//! site starts anyway.
 //!
 //! The post types are read once, at start: a post type, taxonomy or field group saved or removed
 //! later (by the admin or a plugin) reaches the admin's screens at the next start.
@@ -86,8 +93,9 @@ use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_typ
 use mission_control_core::admin::navigation;
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
-    attachment_post_type, authorize_menus_screen, authorize_post_screen, authorize_settings_screen,
-    may_use_post_screens, register_nav_menus_resource, register_settings_resources,
+    TERM_SCREENS, attachment_post_type, authorize_menus_screen, authorize_post_screen,
+    authorize_settings_screen, may_use_post_screens, register_nav_menus_resource,
+    register_settings_resources, register_term_resources,
 };
 use mission_control_core::config::Config;
 use mission_control_core::media::ImageSizes;
@@ -158,6 +166,10 @@ const GRANTED_ROLES: [&str; 2] = [ADMINISTRATOR, EDITOR];
 /// The suffixes of a resource's five Ignite abilities (`post.viewAny`, ...).
 const ABILITIES: [&str; 5] = ["viewAny", "view", "create", "update", "delete"];
 
+/// The capability the Categories and Tags screens' roles hold: both taxonomies' `manage_terms`
+/// map to it.
+const TERMS_CAP: &str = "manage_categories";
+
 /// The abilities of a settings screen granted to `administrator`: no create or delete, as a
 /// screen has one record (Ruling R132).
 const SETTINGS_ABILITIES: [&str; 3] = ["viewAny", "view", "update"];
@@ -170,6 +182,8 @@ pub(crate) struct AdminScreens {
     settings: Vec<&'static str>,
     /// Whether the Menus screen is registered.
     menus: bool,
+    /// The slugs of the Categories and Tags screens registered.
+    terms: Vec<&'static str>,
 }
 
 /// Whether the admin can be mounted for this site, and why not.
@@ -286,6 +300,12 @@ pub(crate) async fn mount_panel(
         ),
         kses.clone().unwrap_or_default(),
     );
+    // The Categories and Tags screens, before the post types, so a post type cannot take their
+    // slugs.
+    let (terms, refused_terms) = register_term_resources(&access);
+    for e in refused_terms {
+        log::error!("A term screen is not served by this app: {e}");
+    }
     let resources = PostTypeResources::new(Arc::clone(&registry))
         .with_page_templates(theme.page_templates())
         .with_access(access);
@@ -335,6 +355,11 @@ pub(crate) async fn mount_panel(
     if media_screen.registered {
         slugs.push((media::ATTACHMENT.to_owned(), GRANTED_ROLES.to_vec()));
     }
+    // The term screens' abilities go to the roles that hold `manage_categories`, which both
+    // taxonomies' capabilities map to; their policy decides each action.
+    for slug in &terms {
+        slugs.push(((*slug).to_owned(), post_type_roles(TERMS_CAP)));
+    }
     let mut administrator_only: Vec<(String, &[&str])> = settings
         .iter()
         .map(|slug| ((*slug).to_owned(), &SETTINGS_ABILITIES[..]))
@@ -351,7 +376,11 @@ pub(crate) async fn mount_panel(
         .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))
-        .manage(AdminScreens { settings, menus })
+        .manage(AdminScreens {
+            settings,
+            menus,
+            terms,
+        })
 }
 
 /// What a menu item can link to (Ruling R133): a custom link, a page, a post, a category and a
@@ -545,6 +574,9 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
     if let Some(refusal) = theme_or_settings_refusal(request, slug, &rest).await {
         return refusal;
     }
+    if TERM_SCREENS.contains(&slug) {
+        return term_screen_refusal(request, slug);
+    }
     let resources = rocket.state::<Arc<PostTypeResources>>()?;
     let def = if slug == media::ATTACHMENT {
         // The media library's screen (Ruling R127), when this app registered it; otherwise,
@@ -670,6 +702,24 @@ async fn theme_or_settings_refusal(
         None => authorize_menus_screen(&caps, screen),
     };
     Some(refusal.map(AdminRefusal::Refused))
+}
+
+/// The fairing's answer for the Categories and Tags screens: their policy decides each action,
+/// unless this app did not register the screen while Ignite has a resource at its slug, which
+/// answers 503 (fail closed).
+fn term_screen_refusal(request: &Request<'_>, slug: &str) -> Option<AdminRefusal> {
+    let ours = request
+        .rocket()
+        .state::<AdminScreens>()
+        .is_some_and(|screens| screens.terms.contains(&slug));
+    if !ours && ignite_core::runtime_resource(slug).is_some() {
+        log::error!(
+            "Refused `{}`: Ignite's resource `{slug}` was not registered by this app.",
+            request.uri().path()
+        );
+        return Some(AdminRefusal::NotServed);
+    }
+    None
 }
 
 #[rocket::async_trait]
