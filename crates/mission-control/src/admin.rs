@@ -97,8 +97,7 @@ use mission_control_core::types::{
     Access, PostTypeDef, PostTypeResources, Registry, create_auto_draft,
 };
 use mission_control_core::users::{
-    ADMINISTRATOR, AUTHOR, CONTRIBUTOR, EDITOR, IGNITE_SUPER_ADMIN, SUBSCRIBER,
-    ignite_roles_with_cap,
+    ADMINISTRATOR, EDITOR, IGNITE_SUPER_ADMIN, WORDPRESS_ROLES, ignite_roles_with_cap,
 };
 use orbit_orm::{Database, Driver};
 use rocket::fairing::{Fairing, Info, Kind};
@@ -151,9 +150,6 @@ const NEW_RANK: isize = -20;
 /// The rank of the routes that answer under the admin path when the panel is not mounted:
 /// before the public site's catch-all.
 const UNAVAILABLE_RANK: isize = -20;
-
-/// The WordPress roles the admin makes sure exist as Ignite roles (Ruling R121).
-const WORDPRESS_ROLES: [&str; 5] = [ADMINISTRATOR, EDITOR, AUTHOR, CONTRIBUTOR, SUBSCRIBER];
 
 /// The roles granted every ability of the post type resources, so Ignite's coarse check lets
 /// them in; the fine checks are [`authorize_post_screen`]'s.

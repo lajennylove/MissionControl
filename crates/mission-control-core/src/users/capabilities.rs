@@ -26,6 +26,10 @@ pub const CONTRIBUTOR: &str = "contributor";
 /// The `subscriber` role: reads, and manages their profile.
 pub const SUBSCRIBER: &str = "subscriber";
 
+/// The five WordPress roles, as the admin makes sure they exist as Ignite roles (Ruling R121)
+/// and the installer creates them before it gives the first user `administrator`.
+pub const WORDPRESS_ROLES: [&str; 5] = [ADMINISTRATOR, EDITOR, AUTHOR, CONTRIBUTOR, SUBSCRIBER];
+
 /// The capability nobody has, whatever their roles or own capabilities say. A meta capability
 /// maps to it when the check cannot be allowed, such as `edit_post` with no post.
 pub const DO_NOT_ALLOW: &str = "do_not_allow";

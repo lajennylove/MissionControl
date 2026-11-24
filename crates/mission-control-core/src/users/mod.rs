@@ -27,7 +27,7 @@ pub use app_password::{
 };
 pub use capabilities::{
     ADMINISTRATOR, AUTHOR, CONTRIBUTOR, DO_NOT_ALLOW, EDITOR, EXIST, Role, SUBSCRIBER, UserCaps,
-    default_role, default_roles, has_cap,
+    WORDPRESS_ROLES, default_role, default_roles, has_cap,
 };
 pub use ignite_roles::{
     IGNITE_SUPER_ADMIN, IgniteUserRoles, ignite_roles_with_cap, mission_control_role,

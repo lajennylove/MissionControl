@@ -57,9 +57,11 @@ Discourage search engines from indexing this site</label>
 <span class="description">It is up to search engines to honor this request.</span></fieldset></td>
 </tr>
 </table>
+@if ($admin_pending)
 <div class="notice notice-warning" id="admin-pending">
-<p><strong>The administrator account is not created yet.</strong> Creating the first user is still being built, so Mission Control does not save the username or the password you enter here. The site title, your email address and the search engine setting are saved. You will create the administrator account when that step is ready.</p>
+<p><strong>The administrator account is not created on this database.</strong> The admin needs a MySQL or MariaDB database for now, so Mission Control does not save the username or the password you enter here. The site title, your email address and the search engine setting are saved.</p>
 </div>
+@endif
 <p><button type="submit" class="button">Install Mission Control</button></p>
 </form>
 @endsection

@@ -1,6 +1,7 @@
 //! The installer wizard (Task 11.2), through its HTTP forms: the steps in WordPress's order, a
-//! full run on SQLite, a database that refuses the login, an existing `.env` at the finish, and
-//! forms without the token.
+//! full run on SQLite, the administrator fields' checks, a database that refuses the login, an
+//! existing `.env` at the finish, and forms without the token. The server run also checks the
+//! administrator account the finish creates; `install_admin.rs` signs it in.
 //!
 //! The full run uses SQLite, the wizard's default. When `MC_TEST_DATABASE_URL` names a MySQL,
 //! MariaDB or PostgreSQL server, the server test also runs the wizard against a new database of
@@ -10,12 +11,13 @@
 //! when that server is not running, the connection is refused, which the step reports the same
 //! way.
 
+use ignite_panel::{authz, users};
 use mission_control_app::install::wizard::{SQLITE_FILE_NAME, TOKEN_FIELD};
 use mission_control_app::restart::RestartHandle;
 use mission_control_app::setup::{INSTALL_PATH, Mode, setup_rocket_with_restart};
 use mission_control_core::content::get_option;
 use mission_control_testing::{CORE_TABLES, scratch_database, table_exists};
-use orbit_orm::Database;
+use orbit_orm::{Database, raw};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use rocket::http::uri::Host;
 use rocket::http::{ContentType, Status};
@@ -191,7 +193,7 @@ async fn steps_render_in_order() {
     assert_eq!(response.headers().get_one("Location"), Some(INSTALL_PATH));
 
     // Step 2: site title, the administrator, then search engine visibility, as WordPress's
-    // install.php orders them, with the pending note for the account.
+    // install.php orders them. On SQLite the account is not created, and the form says so.
     choose_sqlite(&client, &token).await;
     let response = client
         .get(format!("{INSTALL_PATH}?step=2"))
@@ -205,10 +207,11 @@ async fn steps_render_in_order() {
         ">Site Title</label>",
         ">Username</label>",
         ">Password</label>",
+        ">Repeat Password</label>",
         ">Your Email</label>",
         "Search engine visibility",
         "Discourage search engines from indexing this site",
-        "The administrator account is not created yet.",
+        "The administrator account is not created on this database.",
         "Install Mission Control",
     ];
     for pair in order.windows(2) {
@@ -240,7 +243,11 @@ async fn full_run_on_sqlite_installs_and_restarts() {
     assert!(page.contains("Success!"), "{page}");
     assert!(page.contains("Database: SQLite"), "{page}");
     assert!(page.contains("href=\"http://example.test:8080\""), "{page}");
-    assert!(page.contains("The administrator account is not created yet."));
+    assert!(page.contains("The administrator account is not created on this database."));
+    assert!(
+        !page.contains("Log In"),
+        "no account to sign in with: {page}"
+    );
     assert!(!page.contains(ADMIN_PASSWORD));
     assert!(handle.requested(), "the finish asks for the restart");
 
@@ -341,10 +348,117 @@ async fn check_options(db: &Database, address: &str) {
     assert_eq!(option("posts_per_page").await, Some(json!(10)));
     assert_eq!(option("show_on_front").await, Some(json!("posts")));
     assert_eq!(option("permalink_structure").await, Some(json!("")));
-    // The account is pending: no option or value holds the username or password.
+    // No option holds the username or the password.
     for name in ["admin_user", "admin_password", "user_login"] {
         assert_eq!(option(name).await, None::<Value>);
     }
+}
+
+/// Posts the site form with `fields` in place of the test's values, and checks it comes back
+/// refused with `message`, the username and email typed kept, and neither password.
+async fn refused_site_form(client: &Client, token: &str, fields: &[(&str, &str)], message: &str) {
+    let choice = choice(client).await;
+    let mut form = site_fields(token, &choice);
+    for (name, value) in fields {
+        match form.iter_mut().find(|(n, _)| n == name) {
+            Some(field) => field.1 = value,
+            None => form.push((name, value)),
+        }
+    }
+    let response = post(client, 2, &form).await;
+    assert_eq!(response.status(), Status::UnprocessableEntity, "{fields:?}");
+    let page = body(response).await;
+    assert!(page.contains(message), "`{message}` in {page}");
+    assert!(page.contains("<li class=\"current\">2. Site and administrator</li>"));
+    let typed = |name: &str| form.iter().find(|(n, _)| *n == name).unwrap().1;
+    assert!(
+        page.contains(&format!("value=\"{}\"", typed("user_name"))),
+        "the username is kept: {page}"
+    );
+    assert!(
+        page.contains(&format!("value=\"{}\"", typed("admin_email"))),
+        "the email is kept: {page}"
+    );
+    for name in ["admin_password", "admin_password2"] {
+        let password = typed(name);
+        assert!(
+            password.is_empty() || !page.contains(password),
+            "{name} is not echoed"
+        );
+    }
+    assert!(page.contains("name=\"admin_password\" id=\"pass1\" type=\"password\" value=\"\""));
+}
+
+#[rocket::async_test]
+async fn the_site_step_checks_the_administrator() {
+    let (dir, handle, client) = wizard().await;
+    let token = first_token(&client).await;
+    choose_sqlite(&client, &token).await;
+
+    // A missing password, and both fields missing.
+    refused_site_form(
+        &client,
+        &token,
+        &[("admin_password", ""), ("admin_password2", "")],
+        "Please enter a password.",
+    )
+    .await;
+    // A confirmation that is not the password.
+    refused_site_form(
+        &client,
+        &token,
+        &[("admin_password2", "admin-pw-Do-Not-Store-7732")],
+        "Your passwords do not match. Please try again.",
+    )
+    .await;
+    // Shorter than Ignite's minimum.
+    refused_site_form(
+        &client,
+        &token,
+        &[("admin_password", "short7"), ("admin_password2", "short7")],
+        "The password must be at least 8 characters.",
+    )
+    .await;
+    // An email that is not one.
+    refused_site_form(
+        &client,
+        &token,
+        &[("admin_email", "owner-at-example")],
+        "Sorry, that is not a valid email address.",
+    )
+    .await;
+    // A missing username.
+    refused_site_form(
+        &client,
+        &token,
+        &[("user_name", "")],
+        "Please provide a valid username.",
+    )
+    .await;
+    // A username sanitize_user would change.
+    refused_site_form(
+        &client,
+        &token,
+        &[("user_name", "ad/min")],
+        "The username you provided has invalid characters.",
+    )
+    .await;
+    // A missing email.
+    refused_site_form(
+        &client,
+        &token,
+        &[("admin_email", "")],
+        "You must provide an email address.",
+    )
+    .await;
+
+    // Nothing was installed, and the corrected form installs.
+    assert!(!dir.path().join(".env").exists());
+    assert!(!handle.requested());
+    let choice = choice(&client).await;
+    let response = finish(&client, &token, &choice, "example.test").await;
+    assert_eq!(response.status(), Status::Ok);
+    assert!(handle.requested());
 }
 
 #[rocket::async_test]
@@ -591,6 +705,19 @@ async fn full_run_on_the_test_server() {
     assert!(!dir.path().join(SQLITE_FILE_NAME).exists());
 
     let choice = choice(&client).await;
+    let page = body(
+        client
+            .get(format!("{INSTALL_PATH}?step=2"))
+            .dispatch()
+            .await,
+    )
+    .await;
+    let creates_account = server.driver == "mysql";
+    assert_eq!(
+        !page.contains("The administrator account is not created on this database."),
+        creates_account,
+        "{page}"
+    );
     let response = finish(&client, &token, &choice, "site.example").await;
     assert_eq!(response.status(), Status::Ok);
     let page = body(response).await;
@@ -599,6 +726,13 @@ async fn full_run_on_the_test_server() {
         "{page}"
     );
     assert!(server.password.is_empty() || !page.contains(&server.password));
+    assert!(!page.contains(ADMIN_PASSWORD));
+    if creates_account {
+        // WordPress's success page: the username, and the sign-in link.
+        assert!(page.contains("<td>admin</td>"), "{page}");
+        assert!(page.contains("<em>Your chosen password.</em>"), "{page}");
+        assert!(page.contains("href=\"/mc-admin/login\""), "{page}");
+    }
     assert!(handle.requested());
     let env_path = dir.path().join(".env");
     let config = match Mode::from_lookup(Some(&env_path), |_| None) {
@@ -610,8 +744,85 @@ async fn full_run_on_the_test_server() {
             .database_url
             .starts_with(&format!("{}://", server.driver))
     );
+    let env = std::fs::read_to_string(&env_path).unwrap();
+    assert!(!env.contains(ADMIN_PASSWORD));
     let db = Database::connect(scratch.url()).await.expect("connects");
     check_tables(&db).await;
     check_options(&db, "http://site.example").await;
+    if creates_account {
+        check_administrator(&db).await;
+    } else {
+        assert_eq!(
+            user_count(&db).await,
+            0,
+            "PostgreSQL: the account is not created"
+        );
+    }
+
+    // A second install on the same database is refused, and makes no second user.
+    let (other_dir, other_handle, other) = wizard().await;
+    let other_token = first_token(&other).await;
+    let response = post(
+        &other,
+        1,
+        &[
+            (TOKEN_FIELD, &other_token),
+            ("driver", server.driver),
+            ("dbname", &server.name),
+            ("uname", &server.user),
+            ("pwd", &server.password),
+            ("dbhost", &server.host),
+            ("dbport", &server.port),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    assert!(body(response).await.contains("Already installed"));
+    assert!(!other_dir.path().join(".env").exists());
+    assert!(!other_handle.requested());
+    // The first wizard refuses its own form again too.
+    let response = finish(&client, &token, &choice, "site.example").await;
+    assert_eq!(response.status(), Status::Conflict);
+    assert_eq!(
+        user_count(&db).await,
+        u64::from(creates_account),
+        "no second user"
+    );
     db.close().await;
+}
+
+async fn user_count(db: &Database) -> u64 {
+    let count: i64 = raw::fetch_scalar(db, "SELECT COUNT(*) FROM users", &[])
+        .await
+        .expect("counts the users");
+    u64::try_from(count).unwrap()
+}
+
+/// The account the finish creates: one user, named with the username, with the email, the
+/// password hashed by Ignite, and the `administrator` role; and the five WordPress roles.
+async fn check_administrator(db: &Database) {
+    assert_eq!(user_count(db).await, 1);
+    let user = users::find_by_email(db, "owner@example.com")
+        .await
+        .expect("reads the user")
+        .expect("the administrator exists");
+    assert_eq!(user.name, "admin");
+    assert_ne!(user.password_hash, ADMIN_PASSWORD);
+    assert!(
+        ignite_panel::ignite_core::verify_password(&user.password_hash, ADMIN_PASSWORD),
+        "the hash is of the password typed"
+    );
+    assert_eq!(
+        authz::user_roles(db, "owner@example.com").await.unwrap(),
+        vec!["administrator".to_owned()]
+    );
+    for role in mission_control_core::users::WORDPRESS_ROLES {
+        assert!(
+            matches!(
+                authz::create_role(db, role).await,
+                Err(authz::AuthzError::Exists(_))
+            ),
+            "the role {role} exists"
+        );
+    }
 }

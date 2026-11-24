@@ -15,15 +15,23 @@
 //!    visibility.
 //! 3. **Finished**: the wizard checks that `.env` is still absent, runs Ignite's panel migrations
 //!    and the core migrations ([`run_migrations`]), stores the options WordPress's installer
-//!    sets that Mission Control has, writes `.env` (`DATABASE_URL` and a generated
-//!    `IGNITE_SECRET_KEY`, owner-only, never over an existing file), and asks for the restart into normal mode ([`RestartHandle::request`]).
+//!    sets that Mission Control has, creates the administrator, stores `siteurl` last, writes
+//!    `.env` (`DATABASE_URL` and a generated `IGNITE_SECRET_KEY`, owner-only, never over an
+//!    existing file), and asks for the restart into normal mode ([`RestartHandle::request`]).
 //!
-//! **The administrator account is pending (Ruling R71).** Ignite's user creation runs on
-//! MariaDB and MySQL only, and creating the first user is a later task (Task 11.4b). The form
-//! shows the administrator fields as WordPress does, with a note that the account is not created
-//! yet. The username and password are never read into the wizard's state, stored, logged or
-//! echoed back; the email is stored as the `admin_email` option, as WordPress stores it. The rest
-//! of the install does not wait for the account.
+//! **The administrator account.** The site step asks for a username, a password typed twice and
+//! an email, as WordPress's `install.php` does, and checks them as WordPress does (the password
+//! must be at least Ignite's minimum length). The finish creates the five WordPress roles
+//! (an existing one is kept), creates the user with Ignite's [`users::create_user`] (the path of
+//! `ignite user create`: the username is the user's name, the email signs in, and Ignite hashes
+//! the password), and gives it `administrator`. A failure there refuses the finish before
+//! `siteurl` is stored, so the site does not look installed. The password is never kept in the
+//! wizard's state, stored in an option, logged or echoed back; the email is also stored as the
+//! `admin_email` option, as WordPress stores it.
+//!
+//! Ignite's role grants run on MySQL and MariaDB only, and the admin is not mounted on SQLite or
+//! PostgreSQL (Rulings R71 and R119). On those databases the account is not created: the form
+//! and the finished page say so, and the rest of the install does not wait for it.
 //!
 //! `.env` is written last, after the migrations and options. A failure before it (a migration
 //! that fails, a database that goes away) leaves no `.env`, so the binary stays in setup mode and
@@ -47,12 +55,16 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use ignite_panel::authz::{self, AuthzError};
+use ignite_panel::users;
+use mission_control::ADMIN_PATH;
 use mission_control_core::content::{get_option, set_option};
 use mission_control_core::install::env_file::{
     self, ENV_FILE_NAME, EnvFile, EnvFileError, generate_secret_key,
 };
 use mission_control_core::rest::settings::Settings;
-use orbit_orm::Database;
+use mission_control_core::users::{ADMINISTRATOR, WORDPRESS_ROLES};
+use orbit_orm::{Database, Driver};
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use propel_runtime::Loader;
 use rocket::form::{Form, FromForm};
@@ -73,6 +85,10 @@ pub const SQLITE_FILE_NAME: &str = "database.sqlite";
 
 /// The name of the token field every wizard form carries, WordPress's nonce field.
 pub const TOKEN_FIELD: &str = "mc_nonce";
+
+/// The fewest characters an administrator password may have: Ignite's minimum, the one
+/// `ignite user create`, the profile page and the password reset check.
+pub const MIN_PASSWORD_CHARS: usize = 8;
 
 /// The characters kept as they are in a URL's user name, password and database name: RFC 3986's
 /// unreserved characters. Everything else is percent-encoded.
@@ -197,8 +213,13 @@ enum Phase {
     Open,
     /// A finish is running: other requests are told so instead of waiting for it.
     Installing,
-    /// The install finished: the site's address and the database it used.
-    Installed { home: String, database: String },
+    /// The install finished: the site's address, the database it used, and the administrator's
+    /// username when the account was created.
+    Installed {
+        home: String,
+        database: String,
+        account: Option<String>,
+    },
 }
 
 /// The wizard's state in Rocket: the install folder, the form token, the database chosen at the
@@ -298,11 +319,12 @@ struct InstallingGuard<'a> {
 
 impl InstallingGuard<'_> {
     /// Marks the install finished.
-    fn finished(mut self, home: &str, database: &str) {
+    fn finished(mut self, home: &str, database: &str, account: Option<String>) {
         self.done = true;
         self.wizard.set_phase(Phase::Installed {
             home: home.to_owned(),
             database: database.to_owned(),
+            account,
         });
     }
 }
@@ -496,7 +518,11 @@ impl<'r> FromRequest<'r> for SiteAddress {
 async fn show(step: Option<&str>, wizard: &State<Wizard>, setup: &State<SetupState>) -> Reply {
     match wizard.phase() {
         Phase::Open => {}
-        Phase::Installed { home, database } => return finished_page(&home, &database),
+        Phase::Installed {
+            home,
+            database,
+            account,
+        } => return finished_page(&home, &database, account.as_deref()),
         installing => return Refusal::not_open(&installing).reply(),
     }
     let chosen = wizard.chosen();
@@ -513,13 +539,21 @@ async fn show(step: Option<&str>, wizard: &State<Wizard>, setup: &State<SetupSta
     }
 }
 
-/// The finished page, also shown to a visit after the install finished: the site's address
-/// and the database it was installed on (type and where, never the password).
-fn finished_page(home: &str, database: &str) -> Reply {
+/// The finished page, also shown to a visit after the install finished: the site's address,
+/// the database it was installed on (type and where, never the password), and the
+/// administrator's username with the sign-in link, as WordPress shows them, when the account
+/// was created.
+fn finished_page(home: &str, database: &str, account: Option<&str>) -> Reply {
     page(
         Status::Ok,
         "install.finished",
-        &json!({ "page_title": "Installed", "home": home, "database": database }),
+        &json!({
+            "page_title": "Installed",
+            "home": home,
+            "database": database,
+            "account": account,
+            "login": format!("{ADMIN_PATH}/login"),
+        }),
     )
 }
 
@@ -925,9 +959,8 @@ fn connection_error(
     }
 }
 
-/// The site form a step-2 `POST` carries. The administrator's password fields
-/// (`admin_password`, `admin_password2`) are deliberately not read: the account is not created
-/// yet (Ruling R71), so the password is never kept.
+/// The site form a step-2 `POST` carries, with WordPress's field names. The two password
+/// fields are never echoed back.
 #[derive(FromForm)]
 struct SiteForm {
     #[field(name = "mc_nonce")]
@@ -936,8 +969,52 @@ struct SiteForm {
     database_choice: Option<String>,
     weblog_title: Option<String>,
     user_name: Option<String>,
+    admin_password: Option<String>,
+    admin_password2: Option<String>,
     admin_email: Option<String>,
     blog_public: Option<String>,
+}
+
+/// The administrator the finish creates. `Debug` hides the password.
+struct Administrator {
+    /// The username, stored as the Ignite user's name.
+    name: String,
+    /// The sanitized email, which signs in.
+    email: String,
+    password: Zeroizing<String>,
+}
+
+impl fmt::Debug for Administrator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Administrator")
+            .field("name", &self.name)
+            .field("email", &self.email)
+            .field("password", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Whether `name` is a username WordPress's `sanitize_user` keeps as it is in strict mode:
+/// letters and digits, spaces, `_`, `-`, `.` and `@`.
+fn valid_username(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '@'))
+}
+
+/// What is wrong with the administrator's password and its confirmation, as WordPress and
+/// Ignite say it, or `None`.
+fn password_error(password: &str, confirmation: &str) -> Option<String> {
+    if password.is_empty() {
+        Some("Please enter a password.".to_owned())
+    } else if password != confirmation {
+        Some("Your passwords do not match. Please try again.".to_owned())
+    } else if password.chars().count() < MIN_PASSWORD_CHARS {
+        Some(format!(
+            "The password must be at least {MIN_PASSWORD_CHARS} characters."
+        ))
+    } else {
+        None
+    }
 }
 
 /// The site step's values echoed back into the form. Never a password.
@@ -973,8 +1050,15 @@ fn site_page(
             "errors": errors,
             "fields": values,
             "discourage": values.discourage,
+            "admin_pending": !creates_accounts(chosen.kind),
         }),
     )
+}
+
+/// Whether the finish creates the administrator on a database of `kind`: on MySQL and MariaDB,
+/// where Ignite's role grants run and the admin is mounted (Rulings R71 and R119).
+fn creates_accounts(kind: DatabaseKind) -> bool {
+    matches!(kind, DatabaseKind::MySql | DatabaseKind::MariaDb)
 }
 
 /// The value WordPress's `sanitize_option` gives option `name` (the registered setting's
@@ -1014,6 +1098,9 @@ async fn site_step(
         admin_email: form.admin_email.unwrap_or_default().trim().to_owned(),
         discourage: form.blog_public.is_some(),
     };
+    // WordPress does not trim the password.
+    let password = Zeroizing::new(form.admin_password.unwrap_or_default());
+    let confirmation = Zeroizing::new(form.admin_password2.unwrap_or_default());
 
     // A snapshot of the chosen database, taken only when it is the one this form was opened
     // for: the finish installs on this URL, even if step 1 is submitted again meanwhile.
@@ -1028,24 +1115,45 @@ async fn site_step(
         }
     };
 
+    // The checks of WordPress's install.php, in the form's order, all reported at once.
     let settings = Settings::new();
+    let mut errors = Vec::new();
+    if values.user_name.is_empty() {
+        errors.push("Please provide a valid username.".to_owned());
+    } else if !valid_username(&values.user_name) {
+        errors.push("The username you provided has invalid characters.".to_owned());
+    }
+    if let Some(message) = password_error(&password, &confirmation) {
+        errors.push(message);
+    }
     let email = if values.admin_email.is_empty() {
-        Err("You must provide an email address.")
+        errors.push("You must provide an email address.".to_owned());
+        None
     } else {
-        sanitize(&settings, "admin_email", &values.admin_email).ok_or(
-            "Sorry, that is not a valid email address. Email addresses look like \
-             username@example.com.",
-        )
+        let email = sanitize(&settings, "admin_email", &values.admin_email);
+        if email.is_none() {
+            errors.push(
+                "Sorry, that is not a valid email address. Email addresses look like \
+                 username@example.com."
+                    .to_owned(),
+            );
+        }
+        email
     };
     let email = match email {
-        Ok(email) => email,
-        Err(message) => {
+        Some(email) if errors.is_empty() => email,
+        _ => {
             let chosen = wizard.chosen();
             return match chosen.as_ref() {
-                Some(c) if c.id == id => site_page(wizard, c, &values, &[message.to_owned()]),
+                Some(c) if c.id == id => site_page(wizard, c, &values, &errors),
                 _ => Refusal::database_changed().reply(),
             };
         }
+    };
+    let admin = Administrator {
+        name: values.user_name.clone(),
+        email: email.as_str().unwrap_or_default().to_owned(),
+        password,
     };
     let Some(site_url) = sanitize(&settings, "siteurl", &address.0) else {
         return Refusal::failed(
@@ -1059,11 +1167,11 @@ async fn site_step(
     let options = site_options(site_url.clone(), blogname, email, values.discourage);
 
     let home = site_url.as_str().unwrap_or("/").to_owned();
-    match finish(wizard, &url, &options, &home, &summary).await {
-        Ok(()) => {
+    match finish(wizard, &url, &options, &admin, &home, &summary).await {
+        Ok(account) => {
             log::info!("Mission Control is installed; restarting into normal mode.");
             restart.request();
-            finished_page(&home, &summary)
+            finished_page(&home, &summary, account.as_deref())
         }
         Err(refusal) => refusal.reply(),
     }
@@ -1097,17 +1205,20 @@ fn site_options(
 }
 
 /// Installs on the database at `url`: checks `.env` is absent, runs the panel and core
-/// migrations, stores `options`, and writes `.env` with the URL and a new secret key. `.env` is
-/// written last, so a failure before it leaves the wizard able to run again. Two finishes never
-/// run at once (the second is told an install is in progress); once one succeeds, the wizard
-/// remembers `home` and `database` and refuses every later form.
+/// migrations, stores `options` and creates `admin` (see [`install_database`]), and writes
+/// `.env` with the URL and a new secret key. `.env` is written last, so a failure before it
+/// leaves the wizard able to run again. Two finishes never run at once (the second is told an
+/// install is in progress); once one succeeds, the wizard remembers `home`, `database` and the
+/// account and refuses every later form. Returns the administrator's username when the
+/// account was created.
 async fn finish(
     wizard: &Wizard,
     url: &str,
     options: &[(&str, Value)],
+    admin: &Administrator,
     home: &str,
     database: &str,
-) -> Result<(), Refusal> {
+) -> Result<Option<String>, Refusal> {
     let installing = wizard.start_installing()?;
     let env_path = wizard.install_dir.join(ENV_FILE_NAME);
     if env_path.symlink_metadata().is_ok() {
@@ -1126,14 +1237,14 @@ async fn finish(
              saved.",
         )
     })?;
-    let result = install_database(&db, url, options).await;
+    let result = install_database(&db, url, options, admin).await;
     db.close().await;
-    result?;
+    let account = result?.then(|| admin.name.clone());
 
     match env_file::write_new(&wizard.install_dir, &env) {
         Ok(_) => {
-            installing.finished(home, database);
-            Ok(())
+            installing.finished(home, database, account.clone());
+            Ok(account)
         }
         Err(EnvFileError::AlreadyExists { path }) => Err(env_exists(&path)),
         Err(e) => {
@@ -1160,13 +1271,16 @@ fn env_exists(path: &Path) -> Refusal {
 }
 
 /// Runs the panel and core migrations on the database at `url` (each on its own connection, see
-/// [`run_migrations`]) and stores `options` on `db`, its connection, unless it already holds a
-/// site.
+/// [`run_migrations`]), then on `db`, its connection, stores `options` but the last, creates
+/// `admin` (see [`create_administrator`]) and stores the last option, `siteurl`, the marker of
+/// an installed site; unless the database already holds a site. True when the account was
+/// created.
 async fn install_database(
     db: &Database,
     url: &str,
     options: &[(&str, Value)],
-) -> Result<(), Refusal> {
+    admin: &Administrator,
+) -> Result<bool, Refusal> {
     if holds_a_site(db).await {
         return Err(Refusal {
             status: Status::Conflict,
@@ -1197,17 +1311,84 @@ async fn install_database(
             ));
         }
     }
-    for (name, value) in options {
-        if let Err(e) = set_option(db, name, value).await {
+    let store = async |name: &str, value: &Value| {
+        set_option(db, name, value).await.map_err(|e| {
             log::error!("The installer could not store the {name} option: {e}");
-            return Err(Refusal::failed(
+            Refusal::failed(
                 "Mission Control created its tables but could not store the site's settings. \
                  Nothing was written to .env, so you can fix the problem (the log has the \
                  details) and submit the form again.",
-            ));
+            )
+        })
+    };
+    let Some(((marker, marker_value), rest)) = options.split_last() else {
+        return create_administrator(db, admin).await;
+    };
+    for (name, value) in rest {
+        store(name, value).await?;
+    }
+    // Before the marker: a failed account leaves a database that does not look installed.
+    let created = create_administrator(db, admin).await?;
+    store(marker, marker_value).await?;
+    Ok(created)
+}
+
+/// Creates the five WordPress roles (an existing one is kept, as the admin's start does), then
+/// `admin` with Ignite's user creation, and gives it `administrator`. When the grant fails, the
+/// new user is deleted again, so the form can be submitted again. On a database other than
+/// MySQL or MariaDB nothing is created (see the [module](self)) and the answer is false.
+async fn create_administrator(db: &Database, admin: &Administrator) -> Result<bool, Refusal> {
+    if db.driver() != Driver::MySql {
+        log::warn!(
+            "The installer did not create the administrator account: the admin needs a MySQL \
+             or MariaDB database."
+        );
+        return Ok(false);
+    }
+    let failed = || {
+        Refusal::failed(
+            "Mission Control created its tables but could not create the administrator \
+             account. Nothing was written to .env, so you can fix the problem (the log has the \
+             details) and submit the form again.",
+        )
+    };
+    for role in WORDPRESS_ROLES {
+        match authz::create_role(db, role).await {
+            Ok(()) | Err(AuthzError::Exists(_)) => {}
+            Err(e) => {
+                log::error!("The installer could not create the role `{role}`: {e}");
+                return Err(failed());
+            }
         }
     }
-    Ok(())
+    let user = match users::create_user(db, &admin.name, &admin.email, &admin.password).await {
+        Ok(user) => user,
+        Err(orbit_orm::Error::UniqueViolation { .. }) => {
+            return Err(Refusal::failed(format!(
+                "A user with the email {} already exists in this database, so the \
+                 administrator account was not created. Nothing was written to .env: use \
+                 another email address, or clear the database's tables, and submit the form \
+                 again.",
+                admin.email
+            )));
+        }
+        Err(e) => {
+            log::error!("The installer could not create the administrator account: {e}");
+            return Err(failed());
+        }
+    };
+    if let Err(e) = authz::assign_role(db, &admin.email, ADMINISTRATOR).await {
+        log::error!("The installer could not give the administrator its role: {e}");
+        if let Err(e) = users::delete_user(db, user.id).await {
+            log::error!("The installer could not remove the account it created: {e}");
+        }
+        return Err(failed());
+    }
+    log::info!(
+        "The installer created the administrator account #{}.",
+        user.id
+    );
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1342,6 +1523,48 @@ mod tests {
                 .iter()
                 .any(|(n, v)| *n == "blog_public" && *v == json!(0))
         );
+    }
+
+    #[test]
+    fn passwords_are_checked_as_wordpress_and_ignite_check_them() {
+        assert_eq!(
+            password_error("", ""),
+            Some("Please enter a password.".to_owned())
+        );
+        assert_eq!(
+            password_error("long-enough-1", "long-enough-2"),
+            Some("Your passwords do not match. Please try again.".to_owned())
+        );
+        assert_eq!(
+            password_error("short", "short"),
+            Some("The password must be at least 8 characters.".to_owned())
+        );
+        assert_eq!(
+            password_error("éééééééé", "éééééééé"),
+            None,
+            "characters, not bytes"
+        );
+        assert_eq!(password_error(" spaces ok ", " spaces ok "), None);
+    }
+
+    #[test]
+    fn usernames_are_wordpress_strict() {
+        for name in ["admin", "Jane Doe", "j.doe-2_x@site"] {
+            assert!(valid_username(name), "{name}");
+        }
+        for name in ["<b>", "jané", "a/b", "x;y"] {
+            assert!(!valid_username(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn administrator_debug_hides_the_password() {
+        let admin = Administrator {
+            name: "admin".to_owned(),
+            email: "a@b.test".to_owned(),
+            password: Zeroizing::new("hunter2-secret".to_owned()),
+        };
+        assert!(!format!("{admin:?}").contains("hunter2-secret"));
     }
 
     #[test]

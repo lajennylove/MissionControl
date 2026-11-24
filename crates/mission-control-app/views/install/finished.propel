@@ -6,8 +6,22 @@
 <h2>Success!</h2>
 <p class="installed">Mission Control has been installed. Thank you, and enjoy!</p>
 <p class="installed-database">Database: {{ $database }}.</p>
+@if ($account)
+<table class="form-table install-success" role="presentation">
+<tr>
+<th scope="row">Username</th>
+<td>{{ $account }}</td>
+</tr>
+<tr>
+<th scope="row">Password</th>
+<td><p><em>Your chosen password.</em></p></td>
+</tr>
+</table>
+<p>Mission Control is restarting with its new configuration. In a few seconds, visit <a href="{{ $home }}">{{ $home }}</a>, or <a href="{{ $login }}" class="button">Log In</a> with your email address and password.</p>
+@else
 <div class="notice notice-warning" id="admin-pending">
-<p><strong>The administrator account is not created yet.</strong> Mission Control did not save a username or password. You will create the administrator account when that step is ready.</p>
+<p><strong>The administrator account is not created on this database.</strong> The admin needs a MySQL or MariaDB database for now, so Mission Control did not save a username or password.</p>
 </div>
 <p>Mission Control is restarting with its new configuration. In a few seconds, visit <a href="{{ $home }}">{{ $home }}</a>.</p>
+@endif
 @endsection
