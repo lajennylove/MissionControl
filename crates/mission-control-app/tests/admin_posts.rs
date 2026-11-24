@@ -803,6 +803,14 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
         list.contains(&format!("/mc-admin/post/{id}/edit")),
         "{list}"
     );
+    // The saved draft is listed with its state after the title, as `_post_states` writes it;
+    // the published post has none.
+    assert!(
+        list.contains("<td>Written in the admin — Draft</td>"),
+        "{list}"
+    );
+    assert!(list.contains("<td>Hello from the seed</td>"), "{list}");
+    assert!(!list.contains("Hello from the seed —"), "{list}");
 
     // An empty title is refused on the edit form too.
     let csrf = token(client).await;
@@ -883,6 +891,9 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
     let title = ("title", "Written in the admin");
     save(client, "post", id, &[title, ("status", "publish")]).await;
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Publish);
+    let (_, list) = get(client, "/mc-admin/post").await;
+    assert!(list.contains("<td>Written in the admin</td>"), "{list}");
+    assert!(!list.contains("Written in the admin —"), "{list}");
     let (status, page) = get(client, &front).await;
     assert_eq!(status, Status::Ok);
     assert!(page.contains("Written in the admin"), "{page}");
@@ -921,6 +932,10 @@ async fn pages(client: &Client, db: &Database) {
     assert!(edit.contains("name=\"menu_order\""), "{edit}");
     let parent_id = parent.to_string();
     let id = new_post(client, "page", &[("title", "Team")]).await;
+    // A draft page is in the Pages list, tagged; the published one is not.
+    let (_, list) = get(client, "/mc-admin/page").await;
+    assert!(list.contains("<td>Team — Draft</td>"), "{list}");
+    assert!(list.contains("<td>About</td>"), "{list}");
     save(
         client,
         "page",

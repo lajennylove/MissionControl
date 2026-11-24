@@ -45,7 +45,10 @@
 //! The list's columns are the title (sortable, searchable), the author, the status, the terms
 //! of `category`, `post_tag` and each custom taxonomy with `show_admin_column`, and the date
 //! (sortable). Their keys start with `col_`, which no field name does, so a column is never read
-//! as a field's stored value.
+//! as a field's stored value. The title cell ends with the post's state as `_post_states` writes
+//! it after the title: "Hello — Draft" (also Pending, Private and Scheduled; a published or
+//! trashed post has none). Ignite's cells are text, so the state is text, not WordPress's
+//! `<span class="post-state">`; there is no Drafts view, as Ignite's list takes no filter.
 //!
 //! # Trust
 //!
@@ -1151,6 +1154,19 @@ fn status_label(status: PostStatus) -> &'static str {
     }
 }
 
+/// The state `_get_post_states` names for a post of `status` in the list, shown after its title:
+/// none for a published or trashed post. Password protected, Sticky and the front page's states
+/// are not statuses and are not shown.
+fn post_state(status: PostStatus) -> Option<&'static str> {
+    match status {
+        PostStatus::Draft => Some("Draft"),
+        PostStatus::Pending => Some("Pending"),
+        PostStatus::Private => Some("Private"),
+        PostStatus::Future => Some("Scheduled"),
+        _ => None,
+    }
+}
+
 /// Question marks for `n` binds.
 fn marks(n: usize) -> String {
     vec!["?"; n].join(", ")
@@ -1235,8 +1251,9 @@ impl PostTypeData {
         Ok(out)
     }
 
-    /// The column values of `post`: the title ("(no title)" when empty), the author's name, the
-    /// status, the term names and the date (published, or last modified when it has none).
+    /// The column values of `post`: the title ("(no title)" when empty) followed by its state
+    /// (" — Draft", as `_post_states`), the author's name, the status, the term names and the
+    /// date (published, or last modified when it has none).
     fn columns(
         &self,
         row: &mut Row,
@@ -1245,11 +1262,15 @@ impl PostTypeData {
         terms: &HashMap<(i64, String), Vec<(i64, String)>>,
         offset: FixedOffset,
     ) {
-        let title = if post.title.trim().is_empty() || post.status == PostStatus::AutoDraft {
+        let mut title = if post.title.trim().is_empty() || post.status == PostStatus::AutoDraft {
             "(no title)".to_owned()
         } else {
             post.title.clone()
         };
+        if let Some(state) = post_state(post.status) {
+            title.push_str(" — ");
+            title.push_str(state);
+        }
         row.insert(COL_TITLE.into(), Value::from(title));
         if self.author {
             row.insert(

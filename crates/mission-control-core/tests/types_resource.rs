@@ -402,7 +402,8 @@ async fn create_writes_the_post_and_an_auto_draft_is_hidden_from_the_list() {
     assert_eq!(saved["status"], "draft");
     let page = resource.data.list(db, &first_page(None)).await.unwrap();
     assert_eq!(ids(&page.rows), [draft.id]);
-    assert_eq!(page.rows[0]["col_title"], "First");
+    // The title ends with the draft's state, as `_post_states` writes it.
+    assert_eq!(page.rows[0]["col_title"], "First — Draft");
     assert_eq!(page.rows[0]["col_status"], "Draft");
 
     // A post of another type is not found.
