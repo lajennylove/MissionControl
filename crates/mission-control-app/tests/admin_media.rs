@@ -503,6 +503,17 @@ async fn flow(scratch: &ScratchDatabase) {
         "{grid}"
     );
     assert!(grid.contains("data-token=\""), "{grid}");
+    // The grid is inside the admin layout, as every screen: the sidebar, the top bar and the
+    // main wrapper, once each, and it is the default view.
+    assert!(grid.contains("aria-label=\"Main\""), "{grid}");
+    assert!(grid.contains("<aside"), "{grid}");
+    assert!(grid.contains("<main"), "{grid}");
+    assert_eq!(grid.matches("<html").count(), 1, "{grid}");
+    assert!(grid.contains("<header"), "{grid}");
+    assert!(grid.contains("class=\"mc-view-switch\""), "{grid}");
+    assert!(!grid.contains("<table"), "{grid}");
+    let (_, explicit) = get(&client, "/mc-admin/attachment?mode=grid").await;
+    assert!(explicit.contains("id=\"mc-media-grid\""), "{explicit}");
     let response = client
         .get(format!(
             "/mc-includes/js/media-grid.js?ver={}",
@@ -515,6 +526,15 @@ async fn flow(scratch: &ScratchDatabase) {
     let (status, list) = get(&client, "/mc-admin/attachment?mode=list").await;
     assert_eq!(status, Status::Ok);
     assert!(!list.contains("mc-media-grid"), "{list}");
+    // The list is inside the same layout and has the switch back to the grid.
+    assert!(list.contains("aria-label=\"Main\""), "{list}");
+    assert!(list.contains("<main"), "{list}");
+    assert!(list.contains("class=\"mc-view-switch\""), "{list}");
+    assert!(
+        list.contains("href=\"/mc-admin/attachment?mode=grid\""),
+        "{list}"
+    );
+    assert!(list.contains("<table"), "{list}");
     let (_, sorted) = get(&client, "/mc-admin/attachment?sort=col_title&dir=asc").await;
     assert!(!sorted.contains("mc-media-grid"), "{sorted}");
     // The mode is not remembered (Ruling R147): the plain address is the grid again, kept out

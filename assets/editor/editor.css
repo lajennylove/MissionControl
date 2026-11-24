@@ -302,12 +302,11 @@
 }
 
 /* The media library's grid (Task A8), as WordPress's Media Library grid mode. */
-.mc-media-grid-page {
-  margin: 0;
-  padding: 1rem 1.5rem;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: #1d2327;
-  background: #f0f0f1;
+.mc-view-switch {
+  margin: 0 0 1rem;
+}
+.mc-view-switch [aria-current="page"] {
+  font-weight: 600;
 }
 .mc-grid-toolbar {
   display: flex;

@@ -50,7 +50,8 @@ use mission_control_core::media::{ImageSizes, Storage, validate};
 use mission_control_core::types::PostTypeResources;
 use mission_control_core::users::{PostTypeCaps, UserCaps};
 use orbit_orm::Database;
-use rocket::http::{ContentType, Header, Status};
+use rocket::fairing::{Fairing, Info, Kind};
+use rocket::http::{ContentType, Header, Method, Status};
 use rocket::request::{FromRequest, Outcome};
 use rocket::response::{self, Redirect, Responder, content::RawHtml};
 use rocket::{Build, Data, Request, Response, Rocket, Route};
@@ -102,18 +103,18 @@ pub(crate) fn mount_media(rocket: Rocket<Build>) -> (Rocket<Build>, MediaScreen)
         "{ADMIN_PATH}/{ATTACHMENT}"
     ))));
     let screen = MediaScreen { registered };
-    (rocket.mount(ADMIN_PATH, routes()).manage(screen), screen)
+    (
+        rocket
+            .mount(ADMIN_PATH, routes())
+            .manage(screen)
+            .attach(MediaViews),
+        screen,
+    )
 }
 
 /// The media routes, at [`MEDIA_RANK`].
 fn routes() -> Vec<Route> {
-    let mut routes = rocket::routes![
-        async_upload,
-        admin_ajax,
-        upload_page_route,
-        browser_upload,
-        grid_page
-    ];
+    let mut routes = rocket::routes![async_upload, admin_ajax, upload_page_route, browser_upload];
     for route in &mut routes {
         route.rank = MEDIA_RANK;
     }
@@ -752,62 +753,135 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The grid (Task A8)
+// The grid and the list (Task A8)
 
-/// The media library's view a request asks for (Ruling R147): the grid, unless it asks for the
-/// list (`mode=list`) or carries the list's own search, sort or page, which forwards to Ignite's
-/// list. WordPress remembers the mode per user (`media_library_mode`); here it is not
-/// remembered, because Ignite's list has no link back to the grid: a remembered list would
-/// leave no way back but typing `?mode=grid`. So the Media menu always opens the grid, and so
-/// do Ignite's redirects after a save or delete and the list's first page without a search or
-/// sort.
-struct GridMode;
+/// The grid, the list and the switch between them, inside the admin layout.
+///
+/// Both views are Ignite's own screen at `/mc-admin/attachment`, so both render in the active
+/// admin theme's layout (sidebar, top bar, content wrapper). This fairing changes the answer
+/// of that one `GET`: it adds the grid/list switch under the heading, and in the grid mode,
+/// the default, it puts the grid (`assets/editor/grid.js`) where Ignite's table is. WordPress
+/// keeps the mode in `media_library_mode`; here it is in the address, `?mode=grid` or
+/// `?mode=list`, so the switch is two links and works without JavaScript. Without `mode`, the
+/// list's own search, sort and page mean the list, as Ignite's links to them carry no `mode`;
+/// the plain address is the grid.
+struct MediaViews;
 
 #[rocket::async_trait]
-impl<'r> FromRequest<'r> for GridMode {
-    type Error = ();
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, ()> {
-        let list = request.query_value::<&str>("mode").and_then(Result::ok) == Some("list")
-            || ["q", "sort", "dir", "page"]
-                .iter()
-                .any(|name| request.query_value::<&str>(name).is_some());
-        let ours = request
-            .rocket()
-            .state::<MediaScreen>()
-            .is_some_and(|screen| screen.registered);
-        if list || !ours {
-            Outcome::Forward(Status::NotFound)
-        } else {
-            Outcome::Success(Self)
+impl Fairing for MediaViews {
+    fn info(&self) -> Info {
+        Info {
+            name: "Mission Control media library views",
+            kind: Kind::Response,
         }
+    }
+
+    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
+        let screen = format!("{ADMIN_PATH}/{ATTACHMENT}");
+        if request.method() != Method::Get
+            || request.uri().path().as_str().trim_end_matches('/') != screen
+            || response.status() != Status::Ok
+            || response.content_type() != Some(ContentType::HTML)
+            || !request
+                .rocket()
+                .state::<MediaScreen>()
+                .is_some_and(|screen| screen.registered)
+        {
+            return;
+        }
+        let Some(token) = request.guard::<CsrfToken>().await.succeeded() else {
+            return;
+        };
+        let Ok(html) = response.body_mut().to_string().await else {
+            return;
+        };
+        let html = with_views(&html, wants_grid(request), token.value());
+        response.set_header(Header::new("Cache-Control", "no-store"));
+        response.set_sized_body(html.len(), Cursor::new(html));
     }
 }
 
-/// `GET /mc-admin/attachment`: WordPress's Media Library in its grid mode, the default: the
-/// attachments as thumbnails, a search, "Load more", and the attachment details panel
-/// (`assets/editor/grid.js`), with a link to the list view. The fairing has checked the
-/// screen's capabilities; a visitor fails [`AdminUser`] with 401, which Ignite sends to its
-/// sign-in page.
-#[rocket::get("/attachment")]
-fn grid_page(_mode: GridMode, _user: AdminUser, token: CsrfToken) -> NoStore<RawHtml<String>> {
-    NoStore(RawHtml(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Media Library</title>
-<link rel="icon" href="/mc-includes/images/favicon-32.png">
-<link rel="stylesheet" href="{stylesheet}">
-</head>
-<body class="mc-media-grid-page">
-<main id="mc-media-grid" data-ajax="{admin}/admin-ajax.php" data-admin="{admin}" data-token="{token}">
-<p><a href="{admin}">Dashboard</a></p>
-<h1>Media Library <a class="mc-grid-add" href="{admin}/{slug}/new">Add New Media File</a></h1>
+/// Whether the request asks for the grid: `mode=grid`, or no `mode` and none of the list's own
+/// search, sort or page.
+fn wants_grid(request: &Request<'_>) -> bool {
+    match request.query_value::<&str>("mode").and_then(Result::ok) {
+        Some("grid") => true,
+        Some("list") => false,
+        _ => !["q", "sort", "dir", "page"]
+            .iter()
+            .any(|name| request.query_value::<&str>(name).is_some()),
+    }
+}
+
+/// The marker of the content that Ignite's list view starts with after its heading.
+const LIST_START: &str = r#"<section class="ig-card p-0">"#;
+
+/// The grid/list switch: the current view is text, the other a link.
+fn view_switch(grid: bool) -> String {
+    let (admin, slug) = (ADMIN_PATH, ATTACHMENT);
+    let (grid_view, list_view) = if grid {
+        (
+            "<span aria-current=\"page\">Grid view</span>".to_owned(),
+            format!("<a href=\"{admin}/{slug}?mode=list\">List view</a>"),
+        )
+    } else {
+        (
+            format!("<a href=\"{admin}/{slug}?mode=grid\">Grid view</a>"),
+            "<span aria-current=\"page\">List view</span>".to_owned(),
+        )
+    };
+    format!(
+        "<p class=\"mc-view-switch\" role=\"navigation\" aria-label=\"Media view\">{grid_view} | {list_view}</p>\n"
+    )
+}
+
+/// Ignite's list page `html` with the switch added and, for the `grid`, the grid in place of
+/// the table and its pager. A page without the list's markup is returned as it is.
+fn with_views(html: &str, grid: bool, token: &str) -> String {
+    let Some(start) = html.find(LIST_START) else {
+        return html.to_owned();
+    };
+    let mut out = String::with_capacity(html.len() + 2048);
+    out.push_str(&html[..start]);
+    out.push_str(&view_switch(grid));
+    if grid {
+        let after = &html[start..];
+        let Some(table_end) = after.find("</section>").map(|i| i + "</section>".len()) else {
+            return html.to_owned();
+        };
+        // The pager, a `div` without nested ones, follows the table.
+        let rest = &after[table_end..];
+        let rest = match rest.find("<div class=\"mt-5") {
+            Some(at) => rest[at..]
+                .find("</div>")
+                .map_or(rest, |end| &rest[at + end + "</div>".len()..]),
+            None => rest,
+        };
+        out.push_str(&grid_markup(token));
+        out.push_str(rest);
+    } else {
+        out.push_str(&html[start..]);
+    }
+    let head = format!(
+        "<link rel=\"stylesheet\" href=\"{}\">\n</head>",
+        escape(&editor_stylesheet_url())
+    );
+    let script = format!(
+        "<script src=\"{}\"></script>\n</body>",
+        escape(&media_grid_script_url())
+    );
+    let mut out = out.replacen("</head>", &head, 1);
+    if grid {
+        out = out.replacen("</body>", &script, 1);
+    }
+    out
+}
+
+/// The grid's markup, which `assets/editor/grid.js` fills.
+fn grid_markup(token: &str) -> String {
+    format!(
+        r#"<div id="mc-media-grid" data-ajax="{admin}/admin-ajax.php" data-admin="{admin}" data-token="{token}">
 <div class="mc-grid-toolbar">
-<span class="mc-grid-modes"><span aria-current="page">Grid view</span> | <a href="{admin}/{slug}?mode=list">List view</a></span>
 <label for="mc-grid-search">Search media</label>
 <input type="search" id="mc-grid-search">
 </div>
@@ -817,25 +891,45 @@ fn grid_page(_mode: GridMode, _user: AdminUser, token: CsrfToken) -> NoStore<Raw
 <aside class="mc-grid-details" hidden aria-label="Attachment details"></aside>
 </div>
 <p><button type="button" class="mc-grid-more" hidden>Load more</button></p>
-</main>
-<script src="{script}"></script>
-</body>
-</html>"#,
-        stylesheet = escape(&editor_stylesheet_url()),
-        script = escape(&media_grid_script_url()),
+</div>
+"#,
         admin = ADMIN_PATH,
-        slug = ATTACHMENT,
-        token = escape(token.value()),
-    )))
+        token = escape(token),
+    )
 }
 
-/// A page that carries the session's CSRF token: not stored by caches.
-struct NoStore<R>(R);
+#[cfg(test)]
+mod view_tests {
+    use super::*;
 
-impl<'r, R: Responder<'r, 'static>> Responder<'r, 'static> for NoStore<R> {
-    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
-        let mut response = self.0.respond_to(request)?;
-        response.set_header(Header::new("Cache-Control", "no-store"));
-        Ok(response)
+    const PAGE: &str = "<html><head></head><body><main><h1>Media</h1>\
+        <section class=\"ig-card p-0\"><table></table></section>\
+        <div class=\"mt-5 flex\"><span>Page 1</span></div><footer></footer></main></body></html>";
+
+    #[test]
+    fn the_grid_replaces_the_table_and_the_pager() {
+        let page = with_views(PAGE, true, "t\"k");
+        assert!(page.contains("id=\"mc-media-grid\""), "{page}");
+        assert!(page.contains("data-token=\"t&quot;k\""), "{page}");
+        assert!(page.contains("?mode=list\">List view</a>"), "{page}");
+        assert!(
+            !page.contains("<table") && !page.contains("Page 1"),
+            "{page}"
+        );
+        assert!(page.contains("<footer></footer>"), "{page}");
+        assert!(page.contains("media-grid.js"), "{page}");
+    }
+
+    #[test]
+    fn the_list_keeps_its_table_and_gets_the_switch() {
+        let page = with_views(PAGE, false, "t");
+        assert!(page.contains("<table") && page.contains("Page 1"), "{page}");
+        assert!(page.contains("?mode=grid\">Grid view</a>"), "{page}");
+        assert!(!page.contains("mc-media-grid"), "{page}");
+    }
+
+    #[test]
+    fn another_page_is_left_alone() {
+        assert_eq!(with_views("<html></html>", true, "t"), "<html></html>");
     }
 }
