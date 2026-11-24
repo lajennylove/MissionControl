@@ -312,25 +312,16 @@ async fn form_flow(scratch: &ScratchDatabase) {
     .await;
     assert_eq!(response.status(), Status::SeeOther, "signs in");
 
-    // New opens the edit form of an auto-draft: the content is a textarea marked for the
+    // New shows the create form, with no post yet: the content is a textarea marked for the
     // editor, and the form loads the registered editor script.
-    let response = client.get("/mc-admin/post/new").dispatch().await;
-    assert_eq!(response.status(), Status::SeeOther);
-    let edit = header(&response, "Location").to_owned();
-    let id: i64 = edit
-        .strip_prefix("/mc-admin/post/")
-        .and_then(|rest| rest.strip_suffix("/edit"))
-        .unwrap_or_else(|| panic!("redirects to the edit form: {edit}"))
-        .parse()
-        .unwrap();
-    let (status, page) = get(&client, &edit).await;
-    assert_eq!(status, Status::Ok, "{page}");
+    let (status, new) = get(&client, "/mc-admin/post/new").await;
+    assert_eq!(status, Status::Ok, "{new}");
     assert!(
-        page.contains(r#"id="content" name="content" data-ignite-editor="wysiwyg""#),
-        "{page}"
+        new.contains(r#"id="content" name="content" data-ignite-editor="wysiwyg""#),
+        "{new}"
     );
     let script = format!(r#"<script src="{}" defer></script>"#, editor_script_url());
-    assert!(page.contains(&script), "{script} in {page}");
+    assert!(new.contains(&script), "{script} in {new}");
 
     // The script it names is served, cached for a year.
     let response = client.get(editor_script_url()).dispatch().await;
@@ -353,12 +344,12 @@ async fn form_flow(scratch: &ScratchDatabase) {
                 <iframe src=\"https://www.youtube.com/embed/x\" width=560 allowfullscreen>\
                 </iframe>\r\n<script>console.log(1)</script>\r\n\
                 <p style=\"text-align: center;\">  spaced  </p>\r\n";
-    let (_, page) = get(&client, &edit).await;
+    // The New screen's save creates the post and opens its edit form.
     let response = post(
         &client,
-        &format!("/mc-admin/post/{id}"),
+        "/mc-admin/post",
         &[
-            ("_token", &token_in(&page)),
+            ("_token", &token_in(&new)),
             ("title", "Written in the editor"),
             ("content", html),
             ("status", "draft"),
@@ -366,8 +357,15 @@ async fn form_flow(scratch: &ScratchDatabase) {
     )
     .await;
     let status = response.status();
+    let edit = header(&response, "Location").to_owned();
     let body = response.into_string().await.unwrap_or_default();
     assert_eq!(status, Status::SeeOther, "saves: {body}");
+    let id: i64 = edit
+        .strip_prefix("/mc-admin/post/")
+        .and_then(|rest| rest.strip_suffix("/edit"))
+        .unwrap_or_else(|| panic!("redirects to the edit form: {edit}"))
+        .parse()
+        .unwrap();
     let saved = Post::query()
         .find(&*db, id)
         .await

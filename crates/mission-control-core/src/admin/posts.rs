@@ -43,7 +43,8 @@ pub enum PostScreen {
     List,
     /// `GET <slug>/new`: the New screen (`post-new.php`).
     New,
-    /// `POST <slug>`: Ignite's create, which the post type screens do not use (Ruling R116).
+    /// `POST <slug>`: Ignite's create, the New screen's first save (`post.php`'s `post` action,
+    /// `wp_write_post`).
     Create,
     /// `GET <slug>/<id>/edit`: the edit form (`post.php?action=edit`).
     Edit(i64),
@@ -84,7 +85,8 @@ pub enum Refusal {
     Screen,
     /// The user lacks the type's capability set, on the New screen (`post-new.php`'s refusal).
     NewScreen,
-    /// Ignite's create form is not used: a new post starts as an auto-draft on the New screen.
+    /// The user lacks the type's capability set, on the New screen's save (`wp_write_post`'s
+    /// refusal).
     Create,
     /// `edit_post` is refused on the post.
     EditPost,
@@ -138,7 +140,7 @@ impl Refusal {
         match self {
             Self::Screen => "Sorry, you are not allowed to edit posts in this post type.",
             Self::NewScreen => "Sorry, you are not allowed to create posts as this user.",
-            Self::Create => "Sorry, posts are not created from this form. Use Add New.",
+            Self::Create => "Sorry, you are not allowed to create posts as this user.",
             Self::EditPost => "Sorry, you are not allowed to edit this item.",
             Self::TrashPost => "Sorry, you are not allowed to move this item to the Trash.",
             Self::DeletePost => "Sorry, you are not allowed to delete this item.",
@@ -201,17 +203,16 @@ pub async fn authorize_post_screen(
     let caps = def.caps();
     let (id, edit) = match screen {
         PostScreen::Other => return Ok(None),
-        PostScreen::Create => return Ok(Some(Refusal::Create)),
-        // `edit.php` and `post-new.php` need the type's `edit_posts` (`create_posts` is
-        // `edit_posts` unless a type maps it).
-        PostScreen::List | PostScreen::New => {
+        // `edit.php`, `post-new.php` and its save (`wp_write_post`) need the type's
+        // `edit_posts` (`create_posts` is `edit_posts` unless a type maps it).
+        PostScreen::List | PostScreen::New | PostScreen::Create => {
             if has_cap(user, &caps.edit_posts) {
                 return Ok(None);
             }
-            return Ok(Some(if screen == PostScreen::New {
-                Refusal::NewScreen
-            } else {
-                Refusal::Screen
+            return Ok(Some(match screen {
+                PostScreen::New => Refusal::NewScreen,
+                PostScreen::Create => Refusal::Create,
+                _ => Refusal::Screen,
             }));
         }
         PostScreen::Edit(id) | PostScreen::Update(id) => (id, true),

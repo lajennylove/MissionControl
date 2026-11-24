@@ -22,7 +22,7 @@
 //!
 //! | `supports`        | field            | kind                                         |
 //! |-------------------|------------------|----------------------------------------------|
-//! | `title`           | `title`          | text                                         |
+//! | `title`           | `title`          | text, required                               |
 //! | always            | `slug`           | text: WordPress's Slug box, through the save's slug rules |
 //! | `editor`          | `content`        | rich text                                    |
 //! | `excerpt`         | `excerpt`        | textarea                                     |
@@ -31,7 +31,7 @@
 //! | `page` only       | `template`       | select: "Default template" and the theme's page templates, when it has any (`_wp_page_template`) |
 //! | `page-attributes` | `menu_order`     | number                                       |
 //! | `thumbnail`       | `featured_media` | image (`_thumbnail_id`)                      |
-//! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash |
+//! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash; blank keeps the post's (Draft on a new post) |
 //! | always            | `date`           | date and time, in the site's time zone; blank is "Publish immediately" |
 //! | always            | `password`       | text (stored as written, as `post_password`) |
 //! | `post` only       | `sticky`         | checkbox                                     |
@@ -70,10 +70,15 @@
 //!
 //! # Creating, saving and deleting
 //!
-//! - A new post is created as an `auto-draft` when the admin opens the New screen, as
-//!   `post-new.php` does, with [`create_auto_draft`]; the form then only updates it. So
-//!   [`RuntimeData::create`] refuses (Ruling R116). An `auto-draft` reads as `draft` on the form
-//!   and is left out of the list.
+//! - A new post gets no id until it is saved (the owner's rule, which departs from WordPress:
+//!   `post-new.php` creates an `auto-draft` with an id when the New screen opens). The New screen
+//!   is Ignite's create form, with no record; its first save is [`RuntimeData::create`], which
+//!   writes the post with the save's rules and returns it with its id. A blank Status saves a
+//!   Draft, and a blank Author makes the user saving it the author, as WordPress's New screen
+//!   starts. The title is required, on the New screen and on every save. A save that fails
+//!   leaves no post behind.
+//! - Auto-drafts made before this rule (or by [`create_auto_draft`]) read as `draft` on the form
+//!   and are left out of the list; the daily cleanup deletes them after 7 days (Ruling R125).
 //! - A save is the last write (WordPress's classic editor without post locks). One that changes
 //!   the title, content or excerpt of a type that supports `revisions` records a revision, as
 //!   `wp_save_post_revision` does (Ruling R118).
@@ -350,6 +355,10 @@ pub struct Access {
     /// Capabilities read in the last [`CAPS_TTL`], by user: Ignite asks the policy for each row
     /// of a list and for each post type on every admin page, and each ask reads the roles.
     cache: Arc<Mutex<HashMap<i64, (Instant, UserCaps)>>>,
+    /// The post each user's last New screen save created, by user and post type, until the
+    /// admin takes it to send the browser to the post's edit form
+    /// ([`PostTypeResources::take_created`]).
+    created: Arc<Mutex<HashMap<(i64, String), i64>>>,
 }
 
 /// How long a user's capabilities are reused: a role change reaches the admin's screens within
@@ -378,7 +387,26 @@ impl Access {
             user_roles,
             kses,
             cache: Arc::default(),
+            created: Arc::default(),
         }
+    }
+
+    /// Records that `user`'s New screen save created post `id` of `post_type`.
+    fn record_created(&self, user: i64, post_type: &str, id: i64) {
+        let mut created = self.created.lock().unwrap_or_else(PoisonError::into_inner);
+        // Bounded: an entry the admin never takes (a save outside its routes) is dropped.
+        if created.len() >= CAPS_CACHED {
+            created.clear();
+        }
+        created.insert((user, post_type.to_owned()), id);
+    }
+
+    /// The post `user`'s last New screen save of `post_type` created, taken once.
+    fn take_created(&self, user: i64, post_type: &str) -> Option<i64> {
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(user, post_type.to_owned()))
     }
 
     /// The capabilities of the acting `user`, from their roles (reused for [`CAPS_TTL`]).
@@ -502,7 +530,8 @@ pub fn post_type_resource_with_access(
     };
     let mut fields = Vec::new();
     if data.title {
-        fields.push(field(TITLE, "Title", FieldKindDef::Text, false));
+        // Required (the owner's rule): WordPress saves an empty title and shows "(no title)".
+        fields.push(field(TITLE, "Title", FieldKindDef::Text, true));
     }
     fields.push(field(SLUG, "Slug", FieldKindDef::Text, false));
     if data.editor {
@@ -548,11 +577,14 @@ pub fn post_type_resource_with_access(
         .iter()
         .map(|(status, label)| (status.as_str().to_owned(), (*label).to_owned()))
         .collect();
+    // Not required: Ignite's create form has no default value, so the New screen's select starts
+    // blank, and a blank Status saves a Draft as WordPress's New screen does (an edit keeps the
+    // post's status).
     fields.push(field(
         STATUS,
         "Status",
         FieldKindDef::Select(statuses),
-        true,
+        false,
     ));
     fields.push(field(DATE, "Date", FieldKindDef::DateTime, false));
     fields.push(field(PASSWORD, "Password", FieldKindDef::Text, false));
@@ -721,13 +753,16 @@ fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, Strin
     out
 }
 
-/// Creates the `auto-draft` the admin's New screen edits, as `get_default_post_to_edit` does
-/// with `$create_in_db`: a post of `post_type` by `author_id`, titled "Auto Draft", with no date.
-/// The form shows it with a blank title and the status `draft`; its first save makes it what the
-/// form says. The list leaves auto-drafts out.
+/// Creates an `auto-draft`, as `get_default_post_to_edit` does with `$create_in_db`: a post of
+/// `post_type` by `author_id`, titled "Auto Draft", with no date. The form shows it with a blank
+/// title and the status `draft`; its first save makes it what the form says. The list leaves
+/// auto-drafts out, and the daily cleanup deletes them after 7 days.
 ///
-/// The caller decides who may create one: the admin checks the type's `edit_posts` first
-/// (Ruling R116, Task 6.1).
+/// The admin's New screen no longer creates one when it opens (a new post gets no id until it is
+/// saved); its first save uses one as the row it writes, within the save, and deletes it when the
+/// save fails.
+///
+/// The caller decides who may create one: the admin checks the type's `edit_posts` first.
 ///
 /// # Errors
 ///
@@ -934,6 +969,15 @@ impl PostTypeResources {
         !self.registered().iter().any(|s| s == slug)
             && ignite_core::runtime_resource(slug).is_some()
             && self.post_types().iter().any(|def| def.slug == slug)
+    }
+
+    /// The id of the post that `user`'s last save of the New screen of `post_type` created, once:
+    /// a second call returns `None`. Ignite's create answers with a redirect to the list; the
+    /// admin uses this to send the browser to the new post's edit form instead, as WordPress
+    /// does after the first save. When the same user saves two New screens of one type at the
+    /// same moment, one of the two saves may be sent to the other's post, or to the list.
+    pub fn take_created(&self, user: i64, post_type: &str) -> Option<i64> {
+        self.access.take_created(user, post_type)
     }
 
     /// The post types whose resource this value has registered, in order.
@@ -2169,6 +2213,45 @@ impl PostTypeData {
         self.row(db, &saved).await
     }
 
+    /// The New screen's first save, from the validated `input`, for `actor` when the panel gives
+    /// one: the post is written as an `auto-draft` by the author (the actor, or the `author` of
+    /// `input` without one) and saved at once with [`update_post`](Self::update_post), so it
+    /// goes through the same rules as every later save (slug, status, kses, terms, revisions).
+    /// A blank status is Draft. When the save fails, the row is deleted, so a refused save leaves
+    /// no post behind.
+    async fn create_post(
+        &self,
+        db: &Database,
+        mut input: Row,
+        actor: Option<&Actor>,
+    ) -> Result<Row, Error> {
+        let author = match actor {
+            Some(actor) => actor.id,
+            None => input
+                .get(AUTHOR)
+                .and_then(id_of)
+                .ok_or_else(|| refused("creating a post without an author"))?,
+        };
+        // WordPress's New screen starts as a draft: "Save Draft" unless another status is chosen.
+        if input.get(STATUS).and_then(Value::as_str).is_none() {
+            input.insert(STATUS.into(), Value::from(PostStatus::Draft.as_str()));
+        }
+        let draft = create_auto_draft(db, &self.post_type, author).await?;
+        match self.update_post(db, draft.id, input, actor).await {
+            Ok(row) => Ok(row),
+            Err(error) => {
+                if let Err(e) = draft.delete(db).await {
+                    log::error!(
+                        "Could not delete post {} after its first save failed: {e}; the daily \
+                         auto-draft cleanup will.",
+                        draft.id
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// The theme's page template a stored `_wp_page_template` value names: compared by template
     /// name ([`page_template_name`]: the file extension dropped), as the front end loads it.
     fn template_named(&self, stored: &str) -> Option<&PageTemplate> {
@@ -2255,17 +2338,11 @@ impl RuntimeData for PostTypeData {
         })
     }
 
-    /// Refuses: a new post is an auto-draft made when the New screen opens
-    /// ([`create_auto_draft`]), which the form then updates, as `post-new.php` does (Ruling
-    /// R116). The panel shows the refusal as a server error.
-    fn create<'a>(&'a self, _db: &'a Database, _input: Row) -> RuntimeFuture<'a, Row> {
-        Box::pin(async {
-            Err(Error::Unsupported {
-                operation: "creating a post from the form (the New screen creates an \
-                            auto-draft with create_auto_draft, and the form updates it)",
-                driver: "Mission Control's post type resources",
-            })
-        })
+    /// The New screen's first save, with every capability of the type and `unfiltered_html`:
+    /// the post, by the `author` of `input` (required here, as no user is given), written with
+    /// the save's rules; see [`create_for`](RuntimeData::create_for).
+    fn create<'a>(&'a self, db: &'a Database, input: Row) -> RuntimeFuture<'a, Row> {
+        Box::pin(async move { self.create_post(db, input, None).await })
     }
 
     fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
@@ -2320,14 +2397,24 @@ impl RuntimeData for PostTypeData {
         })
     }
 
-    /// Refused, as [`create`](RuntimeData::create) is (Ruling R116).
+    /// The New screen's first save for `user`: the post gets its id now, with `user` as its
+    /// author unless the form names another they may choose, and the save's rules for them (see
+    /// the [module](self)'s Trust section). The policy has checked the type's `edit_posts`.
+    /// Records the new post for [`PostTypeResources::take_created`].
     fn create_for<'a>(
         &'a self,
         db: &'a Database,
-        _user: &'a ActingUser,
+        user: &'a ActingUser,
         input: Row,
     ) -> RuntimeFuture<'a, Row> {
-        self.create(db, input)
+        Box::pin(async move {
+            let actor = self.actor(db, user).await?;
+            let row = self.create_post(db, input, Some(&actor)).await?;
+            if let Some(id) = row.get("id").and_then(id_of) {
+                self.access.record_created(actor.id, &self.post_type, id);
+            }
+            Ok(row)
+        })
     }
 
     /// The save of post `id` for `user`; see the [module](self)'s Trust section.

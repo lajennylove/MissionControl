@@ -21,7 +21,7 @@ use mission_control_core::content::{
 };
 use mission_control_core::migrations::migrator;
 use mission_control_testing::{ScratchDatabase, create_users_table, scratch_database};
-use orbit_orm::{Database, Model};
+use orbit_orm::{Database, Model, Operator};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use rocket::http::{ContentType, Status};
 use rocket::local::asynchronous::{Client, LocalResponse};
@@ -184,18 +184,20 @@ async fn find(db: &Database, id: i64) -> Option<Post> {
     Post::query().find(db, id).await.expect("reads the post")
 }
 
-/// Opens the New screen of `post_type` and returns the auto-draft's id.
-async fn new_draft(client: &Client, post_type: &str) -> i64 {
-    let response = client
-        .get(format!("/mc-admin/{post_type}/new"))
-        .dispatch()
-        .await;
-    assert_eq!(
-        response.status(),
-        Status::SeeOther,
-        "New answers with a redirect"
-    );
+/// Opens the New screen of `post_type` (a form with no post yet), saves it with `fields` and
+/// the session's token, and returns the new post's id, read from the redirect to its edit form,
+/// which is then opened.
+async fn new_post(client: &Client, post_type: &str, fields: &[(&str, &str)]) -> i64 {
+    let (status, form) = get(client, &format!("/mc-admin/{post_type}/new")).await;
+    assert_eq!(status, Status::Ok, "New shows the form: {form}");
+    let mut all = vec![("_token", token_in(&form))];
+    all.extend(fields.iter().map(|(k, v)| (*k, (*v).to_owned())));
+    let all: Vec<(&str, &str)> = all.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let response = post(client, &format!("/mc-admin/{post_type}"), &all).await;
+    let status = response.status();
     let to = location(&response);
+    let body = response.into_string().await.unwrap_or_default();
+    assert_eq!(status, Status::SeeOther, "creates: {body}");
     let id = to
         .strip_prefix(&format!("/mc-admin/{post_type}/"))
         .and_then(|rest| rest.strip_suffix("/edit"))
@@ -361,7 +363,7 @@ async fn post_locks(client: &Client, db: &Database) {
     let (first, first_email) = user(db, "lena", "editor").await;
     let (second, second_email) = user(db, "otto", "editor").await;
     sign_in(client, &first_email).await;
-    let id = new_draft(client, "post").await;
+    let id = new_post(client, "post", &[("title", "Locked")]).await;
     let lock = get_post_meta(db, id, "_edit_lock").await.unwrap();
     let lock = lock.and_then(|v| v.as_str().map(str::to_owned)).unwrap();
     assert!(lock.ends_with(&format!(":{first}")), "{lock}");
@@ -450,7 +452,13 @@ async fn post_locks(client: &Client, db: &Database) {
     let (_, page) = get(client, &edit).await;
     assert!(page.contains("otto is currently editing"), "{page}");
     // A save locks the post for the one who saves, as WordPress's `edit_post`.
-    save(client, "post", id, &[("status", "draft")]).await;
+    save(
+        client,
+        "post",
+        id,
+        &[("title", "Locked"), ("status", "draft")],
+    )
+    .await;
     let lock = get_post_meta(db, id, "_edit_lock").await.unwrap();
     let lock = lock.and_then(|v| v.as_str().map(str::to_owned)).unwrap();
     assert!(lock.ends_with(&format!(":{first}")), "{lock}");
@@ -737,27 +745,53 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
     .await
     .unwrap();
 
-    // HEAD on New creates nothing (Ruling R125).
+    // New shows the form and creates nothing: a post gets its id when it is saved (the
+    // owner's rule; WordPress creates an auto-draft here). HEAD creates nothing either.
+    // The posts, revisions aside (the first save records one, as `wp_save_post_revision`).
     let count = || async {
         Post::query()
-            .where_eq("status", PostStatus::AutoDraft)
+            .where_op("post_type", Operator::Ne, "revision")
             .count(db)
             .await
             .unwrap()
     };
     let before = count().await;
+    let (status, form) = get(client, "/mc-admin/post/new").await;
+    assert_eq!(status, Status::Ok, "{form}");
+    assert!(form.contains("action=\"/mc-admin/post\""), "{form}");
+    assert!(form.contains("name=\"title\""), "{form}");
     let response = client.head("/mc-admin/post/new").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
-    assert_eq!(count().await, before);
+    for _ in 0..3 {
+        assert_eq!(get(client, "/mc-admin/post/new").await.0, Status::Ok);
+    }
+    assert_eq!(count().await, before, "opening New creates no post");
 
-    // New: an auto-draft owned by the editor, and its edit form (Ruling R116).
-    let id = new_draft(client, "post").await;
-    let draft = find(db, id).await.unwrap();
-    assert_eq!(draft.status, PostStatus::AutoDraft);
-    assert_eq!(draft.author_id, editor);
-    assert_eq!(draft.post_type, "post");
+    // A save without a title is refused, with the message on the field, and creates nothing.
+    let response = post(
+        client,
+        "/mc-admin/post",
+        &[
+            ("_token", &token_in(&form)),
+            ("title", "  "),
+            ("content", "<p>x</p>"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    let body = response.into_string().await.unwrap_or_default();
+    assert!(body.contains("Title is required."), "{body}");
+    assert_eq!(count().await, before, "a refused save creates no post");
 
-    // The list shows the posts, not the auto-draft.
+    // The first save creates the post, owned by the editor, a Draft when no status is chosen,
+    // and opens its edit form; the list shows it.
+    let id = new_post(client, "post", &[("title", "Written in the admin")]).await;
+    assert_eq!(count().await, before + 1);
+    let created = find(db, id).await.unwrap();
+    assert_eq!(created.status, PostStatus::Draft);
+    assert_eq!(created.author_id, editor);
+    assert_eq!(created.post_type, "post");
+    assert_eq!(created.title, "Written in the admin");
     let (status, list) = get(client, "/mc-admin/post").await;
     assert_eq!(status, Status::Ok);
     assert!(list.contains("Hello from the seed"), "{list}");
@@ -766,19 +800,61 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
         "{list}"
     );
     assert!(
-        !list.contains(&format!("/mc-admin/post/{id}/edit")),
+        list.contains(&format!("/mc-admin/post/{id}/edit")),
         "{list}"
     );
 
-    // Ignite's create form is not used.
+    // An empty title is refused on the edit form too.
     let csrf = token(client).await;
     let response = post(
         client,
-        "/mc-admin/post",
-        &[("_token", &csrf), ("title", "x"), ("status", "draft")],
+        &format!("/mc-admin/post/{id}"),
+        &[("_token", &csrf), ("title", ""), ("status", "draft")],
     )
     .await;
-    assert_eq!(response.status(), Status::Forbidden);
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    let body = response.into_string().await.unwrap_or_default();
+    assert!(body.contains("Title is required."), "{body}");
+    assert_eq!(find(db, id).await.unwrap().title, "Written in the admin");
+
+    // A published post's empty slug is made from the title (`sanitize_title`), and a slug the
+    // type already has gets -2, -3, as `wp_unique_post_slug` does.
+    let mut same = Vec::new();
+    for _ in 0..3 {
+        let id = new_post(
+            client,
+            "post",
+            &[
+                ("title", "Ünïcode & Friends: Part 1"),
+                ("status", "publish"),
+            ],
+        )
+        .await;
+        same.push(find(db, id).await.unwrap().slug);
+    }
+    assert_eq!(
+        same,
+        [
+            "unicode-friends-part-1",
+            "unicode-friends-part-1-2",
+            "unicode-friends-part-1-3"
+        ]
+    );
+    // A given slug is sanitized and made unique the same way.
+    let given = new_post(
+        client,
+        "post",
+        &[
+            ("title", "Another"),
+            ("slug", "Unicode Friends Part 1"),
+            ("status", "publish"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        find(db, given).await.unwrap().slug,
+        "unicode-friends-part-1-4"
+    );
 
     // Saving title, content and status; the HTML is stored as sent (an editor has
     // `unfiltered_html`).
@@ -804,7 +880,8 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
     // A draft is not on the front end; published, it is.
     let front = format!("/?p={id}");
     assert_eq!(get(client, &front).await.0, Status::NotFound);
-    save(client, "post", id, &[("status", "publish")]).await;
+    let title = ("title", "Written in the admin");
+    save(client, "post", id, &[title, ("status", "publish")]).await;
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Publish);
     let (status, page) = get(client, &front).await;
     assert_eq!(status, Status::Ok);
@@ -815,7 +892,7 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Trash);
     assert_eq!(get(client, &front).await.0, Status::NotFound);
     // Saving it with another status restores it.
-    save(client, "post", id, &[("status", "draft")]).await;
+    save(client, "post", id, &[title, ("status", "draft")]).await;
     let restored = find(db, id).await.unwrap();
     assert_eq!(restored.status, PostStatus::Draft);
     assert_eq!(restored.content, html);
@@ -832,24 +909,18 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
 async fn pages(client: &Client, db: &Database) {
     let (status, html) = get(client, "/mc-admin/page").await;
     assert_eq!(status, Status::Ok, "{html}");
-    let parent = new_draft(client, "page").await;
-    save(
-        client,
-        "page",
-        parent,
-        &[("title", "About"), ("status", "publish")],
-    )
-    .await;
+    let parent = new_post(client, "page", &[("title", "About"), ("status", "publish")]).await;
+    assert_eq!(find(db, parent).await.unwrap().status, PostStatus::Publish);
 
     // Parent, order and template (Task 6.2).
-    let id = new_draft(client, "page").await;
-    let (_, edit) = get(client, &format!("/mc-admin/page/{id}/edit")).await;
+    let (_, edit) = get(client, "/mc-admin/page/new").await;
     assert!(edit.contains("name=\"template\""), "{edit}");
     assert!(edit.contains("Default template"), "{edit}");
     assert!(edit.contains("Full width"), "{edit}");
     assert!(edit.contains("name=\"parent\""), "{edit}");
     assert!(edit.contains("name=\"menu_order\""), "{edit}");
     let parent_id = parent.to_string();
+    let id = new_post(client, "page", &[("title", "Team")]).await;
     save(
         client,
         "page",
@@ -882,7 +953,11 @@ async fn pages(client: &Client, db: &Database) {
         client,
         "page",
         id,
-        &[("status", "publish"), ("template", "default")],
+        &[
+            ("title", "Team"),
+            ("status", "publish"),
+            ("template", "default"),
+        ],
     )
     .await;
     assert_eq!(
@@ -897,6 +972,7 @@ async fn pages(client: &Client, db: &Database) {
         &format!("/mc-admin/page/{id}"),
         &[
             ("_token", &csrf),
+            ("title", "Team"),
             ("status", "publish"),
             ("template", "templates/missing"),
         ],
@@ -910,7 +986,7 @@ async fn pages(client: &Client, db: &Database) {
     let response = post(
         client,
         &format!("/mc-admin/page/{id}"),
-        &[("_token", &csrf), ("status", "trash")],
+        &[("_token", &csrf), ("title", "Team"), ("status", "trash")],
     )
     .await;
     assert_eq!(response.status(), Status::InternalServerError);
@@ -985,7 +1061,7 @@ async fn others_are_refused(
         !dashboard.contains("href=\"/mc-admin/page\""),
         "{dashboard}"
     );
-    let id = new_draft(client, "post").await;
+    let id = new_post(client, "post", &[("title", "Draft by the author")]).await;
     let author_id = find(db, id).await.unwrap().author_id;
     save(
         client,
@@ -1031,6 +1107,30 @@ async fn others_are_refused(
         &body,
         "Sorry, you are not allowed to create posts as this user.",
     );
+    // Nor may they save the New screen of pages (Ignite's create): nothing is created.
+    let pages = || async {
+        Post::query()
+            .where_eq("post_type", "page")
+            .count(db)
+            .await
+            .unwrap()
+    };
+    let before = pages().await;
+    let csrf = token(client).await;
+    let response = post(
+        client,
+        "/mc-admin/page",
+        &[("_token", &csrf), ("title", "Not mine to add")],
+    )
+    .await;
+    let status = response.status();
+    let body = response.into_string().await.unwrap_or_default();
+    assert_refused(
+        status,
+        &body,
+        "Sorry, you are not allowed to create posts as this user.",
+    );
+    assert_eq!(pages().await, before);
     assert_eq!(
         get(client, &format!("/mc-admin/page/{any_page}/edit"))
             .await
@@ -1040,30 +1140,38 @@ async fn others_are_refused(
     // Their own post goes to the trash and comes back.
     assert_eq!(delete(client, "post", id).await, Status::SeeOther);
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Trash);
-    save(client, "post", id, &[("status", "draft")]).await;
+    save(
+        client,
+        "post",
+        id,
+        &[("title", "By the author"), ("status", "draft")],
+    )
+    .await;
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Draft);
     sign_out(client).await;
 
     // A contributor cannot publish: Published is saved as Pending, as WordPress does; once
     // published by someone else, their post is no longer theirs to edit.
     sign_in(client, contributor_email).await;
-    let id = new_draft(client, "post").await;
-    save(
+    // The New screen's save too.
+    let id = new_post(
         client,
         "post",
-        id,
         &[("title", "For review"), ("status", "publish")],
     )
     .await;
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Pending);
-    save(client, "post", id, &[("status", "private")]).await;
+    let title = ("title", "For review");
+    save(client, "post", id, &[title, ("status", "publish")]).await;
+    assert_eq!(find(db, id).await.unwrap().status, PostStatus::Pending);
+    save(client, "post", id, &[title, ("status", "private")]).await;
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Pending);
     // A user who cannot publish sets no password (`_wp_translate_postdata`).
     save(
         client,
         "post",
         id,
-        &[("status", "pending"), ("password", "secret")],
+        &[title, ("status", "pending"), ("password", "secret")],
     )
     .await;
     assert_eq!(find(db, id).await.unwrap().password, None);
@@ -1072,7 +1180,7 @@ async fn others_are_refused(
     let response = post(
         client,
         &format!("/mc-admin/post/{id}"),
-        &[("_token", &csrf), ("author", &author_id.to_string())],
+        &[("_token", &csrf), title, ("author", &author_id.to_string())],
     )
     .await;
     assert_eq!(response.status(), Status::UnprocessableEntity);

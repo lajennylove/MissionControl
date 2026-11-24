@@ -81,11 +81,8 @@ async fn editors_use_the_screens_and_the_post_checks_apply() {
     ] {
         assert_eq!(check(&editor, &post_def, screen).await, None, "{screen:?}");
     }
-    // Ignite's create is never used (Ruling R116).
-    assert_eq!(
-        check(&editor, &post_def, PostScreen::Create).await,
-        Some(Refusal::Create)
-    );
+    // The New screen's save (Ignite's create) needs `edit_posts`, as the New screen does.
+    assert_eq!(check(&editor, &post_def, PostScreen::Create).await, None);
     // A post of another type, or none, is Ignite's 404, not a refusal.
     assert_eq!(
         check(&editor, &page_def, PostScreen::Edit(someones_post.id)).await,
@@ -167,6 +164,15 @@ async fn editors_use_the_screens_and_the_post_checks_apply() {
     assert_eq!(
         check(&author, &page_def, PostScreen::New).await,
         Some(Refusal::NewScreen)
+    );
+    assert_eq!(
+        check(&author, &page_def, PostScreen::Create).await,
+        Some(Refusal::Create)
+    );
+    assert_eq!(check(&author, &post_def, PostScreen::Create).await, None);
+    assert_eq!(
+        Refusal::Create.message(),
+        "Sorry, you are not allowed to create posts as this user."
     );
     // A contributor edits their own draft, not their published post.
     let contributor = caps(author_id, CONTRIBUTOR);

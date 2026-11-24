@@ -303,11 +303,16 @@ async fn flow(scratch: &ScratchDatabase) {
     assert!(dashboard.contains("Media"), "{dashboard}");
     let csrf = dashboard_token(&client).await;
 
-    // A post to attach uploads to (the editor's Add Media sends its id).
-    let edit = header(
-        &client.get("/mc-admin/post/new").dispatch().await,
-        "Location",
-    );
+    // A post to attach uploads to (the editor's Add Media sends its id): the New screen's save
+    // creates it and opens its edit form.
+    let response = post(
+        &client,
+        "/mc-admin/post",
+        &[("_token", &csrf), ("title", "With media")],
+    )
+    .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    let edit = header(&response, "Location").to_owned();
     let post_id: i64 = edit
         .strip_prefix("/mc-admin/post/")
         .and_then(|rest| rest.strip_suffix("/edit"))

@@ -185,7 +185,11 @@ fn title_and_content_in_supports_make_those_fields() {
     );
     assert_eq!(field(&resource, "title").kind, FieldKindDef::Text);
     assert_eq!(field(&resource, "content").kind, FieldKindDef::Wysiwyg);
-    assert!(field(&resource, "status").required);
+    // The title is required (the owner's rule); the status is not, as the New screen's select
+    // starts blank and saves a Draft.
+    assert!(field(&resource, "title").required);
+    assert!(!field(&resource, "status").required);
+    assert!(!field(&resource, "slug").required);
     let columns: Vec<&str> = resource.columns.iter().map(|c| c.key.as_str()).collect();
     assert_eq!(columns, ["col_title", "col_status", "col_date"]);
 
@@ -302,14 +306,26 @@ fn a_type_shown_in_rest_is_listed_by_the_rest_api_and_gets_screens() {
 }
 
 #[tokio::test]
-async fn create_is_refused_and_an_auto_draft_is_hidden_from_the_list() {
+async fn create_writes_the_post_and_an_auto_draft_is_hidden_from_the_list() {
     let test = database().await;
     let db = test.db();
     let author = setup(db).await;
-    let resource = post_type_resource(
-        &post_type("rs_draft", vec![Support::Title, Support::Editor]),
-        &Registry::default(),
+    let def = post_type(
+        "rs_draft",
+        vec![Support::Title, Support::Editor, Support::Author],
     );
+    let resource = post_type_resource(&def, &Registry::default());
+    let count = async || -> i64 {
+        raw::fetch_scalar(
+            db,
+            "SELECT COUNT(*) FROM posts WHERE post_type = ?",
+            &["rs_draft".into()],
+        )
+        .await
+        .unwrap()
+    };
+
+    // Without a user, the form must name the author; nothing is written otherwise.
     assert!(
         resource
             .data
@@ -317,6 +333,35 @@ async fn create_is_refused_and_an_auto_draft_is_hidden_from_the_list() {
             .await
             .is_err_and(|e| matches!(e, orbit_orm::Error::Unsupported { .. }))
     );
+    assert_eq!(count().await, 0);
+
+    // The New screen's first save: the post gets its id now, a Draft when no status is chosen.
+    let author_id = author.to_string();
+    let input = validated(
+        post_type_resource(&def, &Registry::default()),
+        &[
+            ("title", "Created"),
+            ("content", "<p>New</p>"),
+            ("author", &author_id),
+        ],
+    );
+    let created = resource.data.create(db, input).await.unwrap();
+    let id = created["id"].as_i64().expect("the new post's id");
+    assert_eq!(created["status"], "draft");
+    let post = Post::query().find(db, id).await.unwrap().unwrap();
+    assert_eq!(post.status, PostStatus::Draft);
+    assert_eq!(post.title, "Created");
+    assert_eq!(post.author_id, author);
+    let page = resource.data.list(db, &first_page(None)).await.unwrap();
+    assert_eq!(ids(&page.rows), [id]);
+    Post::query()
+        .find(db, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .delete(db)
+        .await
+        .unwrap();
 
     let draft = create_auto_draft(db, "rs_draft", author).await.unwrap();
     assert_eq!(draft.status, PostStatus::AutoDraft);

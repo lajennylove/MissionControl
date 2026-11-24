@@ -36,18 +36,22 @@
 //!   edit their own posts, as WordPress lets them. Ignite answers a refusal with 403 and a post
 //!   outside the user's list with 404.
 //! - A fairing before Ignite's routes (Ruling R115, narrowed by Task A1): on a post type it
-//!   checks the New screen and refuses Ignite's create, with WordPress's 403 messages
-//!   ([`authorize_post_screen`]); on the media library it checks every screen (the type's whole
-//!   capability set and `unfiltered_html`, then the post's). A visitor is let through, and Ignite
-//!   sends them to its sign-in page. Ignite's own pages are not touched.
+//!   checks the New screen and its save (Ignite's create) with the type's `edit_posts`, with
+//!   WordPress's 403 messages ([`authorize_post_screen`]); on the media library it checks every
+//!   screen (the type's whole capability set and `unfiltered_html`, then the post's), and
+//!   refuses Ignite's create, as files are uploaded. A visitor is let through, and Ignite sends
+//!   them to its sign-in page. Ignite's own pages are not touched.
 //!   It fails closed: a post type whose Ignite resource this app did not register (another app
 //!   in the process holds it, or code took the slug first) answers 503, logged; and when this
 //!   app cannot register `post` or `page`, it serves no post type screens at all.
-//! - The New screen of a post type (Ruling R116): `GET /mc-admin/<post type>/new` creates an
-//!   `auto-draft` owned by the signed-in user and redirects (303) to its edit form, as
-//!   `post-new.php` does (`HEAD` creates nothing). Auto-drafts nobody saved are deleted after 7
-//!   days by a daily scheduler event (Ruling R125). Ignite's create (`POST /mc-admin/<post type>`)
-//!   is refused.
+//! - The New screen of a post type: a new post gets no id until it is saved (the owner's rule;
+//!   WordPress's `post-new.php` creates an `auto-draft` with an id when the screen opens).
+//!   `GET /mc-admin/<post type>/new` is Ignite's create form, with no record, and creates
+//!   nothing. It posts to `POST /mc-admin/<post type>` (Ignite's create), whose save creates the
+//!   post; the same fairing then sends the browser (303) to the new post's edit form,
+//!   `/mc-admin/<post type>/<id>/edit`, as WordPress does after the first save, where Ignite's
+//!   create would go to the list. Auto-drafts made by the earlier New screen are deleted after
+//!   7 days by a daily scheduler event (Ruling R125).
 //!
 //! - The classic editor for the rich text fields (Task 6.3): the editor script at
 //!   [`editor_script_url`] is registered with Ignite, whose forms then load it.
@@ -101,9 +105,7 @@ use mission_control_core::config::Config;
 use mission_control_core::media::ImageSizes;
 use mission_control_core::rest::KsesLimiter;
 use mission_control_core::theme::Theme;
-use mission_control_core::types::{
-    Access, PostTypeDef, PostTypeResources, Registry, create_auto_draft,
-};
+use mission_control_core::types::{Access, PostTypeResources, Registry};
 use mission_control_core::users::{
     ADMINISTRATOR, EDITOR, IGNITE_SUPER_ADMIN, WORDPRESS_ROLES, ignite_roles_with_cap,
 };
@@ -115,7 +117,7 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::response::Redirect;
 use rocket::response::content::RawHtml;
 use rocket::route::{self, Handler, Route};
-use rocket::{Build, Data, Request, Rocket, State};
+use rocket::{Build, Data, Request, Response, Rocket};
 
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
@@ -151,9 +153,10 @@ const INSTALL_SLUG: &str = "install.php";
 /// sent.
 const REFUSED_PATH: &str = "/__mission-control/admin-refused";
 
-/// The rank of the New route: before Ignite's `/<slug>/new`, whose default rank is between -12
-/// and -1. It forwards every slug that is not a post type's, so Ignite's routes still answer.
-const NEW_RANK: isize = -20;
+/// The rank of the settings screens' list route: before Ignite's `/<slug>`, whose default rank
+/// is between -12 and -1. It forwards every slug that is not a settings screen's, so Ignite's
+/// routes still answer.
+const SETTINGS_RANK: isize = -20;
 
 /// The rank of the routes that answer under the admin path when the panel is not mounted:
 /// before the public site's catch-all.
@@ -371,7 +374,6 @@ pub(crate) async fn mount_panel(
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
-        .mount(ADMIN_PATH, new_routes())
         .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())
@@ -533,8 +535,8 @@ enum AdminRefusal {
 #[derive(Default)]
 struct PendingRefusal(OnceLock<AdminRefusal>);
 
-/// Authorizes the post type screens before Ignite's routes run (Ruling R115); see the
-/// [module](self).
+/// Authorizes the post type screens before Ignite's routes run (Ruling R115), and sends the New
+/// screen's first save to the new post's edit form; see the [module](self).
 struct AdminAuthFairing;
 
 #[rocket::async_trait]
@@ -542,7 +544,34 @@ impl Fairing for AdminAuthFairing {
     fn info(&self) -> Info {
         Info {
             name: "Mission Control admin authorization",
-            kind: Kind::Request,
+            kind: Kind::Request | Kind::Response,
+        }
+    }
+
+    /// Ignite's create answers a saved record with a redirect (303) to the list. On a post type,
+    /// the browser is sent to the new post's edit form instead, as WordPress does after the New
+    /// screen's first save.
+    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
+        if request.method() != Method::Post || response.status() != Status::SeeOther {
+            return;
+        }
+        let mut segments = request.uri().path().segments();
+        let (Some(ADMIN_SEGMENT), Some(slug), None) =
+            (segments.next(), segments.next(), segments.next())
+        else {
+            return;
+        };
+        let Some(resources) = request.rocket().state::<Arc<PostTypeResources>>() else {
+            return;
+        };
+        if resources.post_type(slug).is_none() {
+            return;
+        }
+        let Outcome::Success(user) = request.guard::<AdminUser>().await else {
+            return;
+        };
+        if let Some(id) = resources.take_created(user.user_id(), slug) {
+            response.set_raw_header("Location", format!("{ADMIN_PATH}/{slug}/{id}/edit"));
         }
     }
 
@@ -606,9 +635,9 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         return None;
     };
     let screen = PostScreen::parse(request.method().as_str(), &rest);
-    // A post type's list, forms and Delete are Ignite's, decided by the type's policy and its
-    // user-aware queries (Task A1). The fairing checks only the routes that are not: the New
-    // screen (Mission Control's) and Ignite's create, which the screens do not use.
+    // A post type's list, forms and Delete are decided by the type's policy and its user-aware
+    // queries (Task A1). The fairing also checks the New screen and its save (Ignite's create),
+    // so a refusal there has WordPress's message.
     if slug != media::ATTACHMENT && !matches!(screen, PostScreen::New | PostScreen::Create) {
         return None;
     }
@@ -616,6 +645,10 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         Ok(found) => found,
         Err(failed) => return Some(failed),
     };
+    // A file is added by uploading it (Ruling R129): the media library has no create form.
+    if slug == media::ATTACHMENT && screen == PostScreen::Create {
+        return Some(AdminRefusal::Refused(Refusal::NoSuchPage));
+    }
     // The media library's upload page is `media-new.php`: its refusal is WordPress's for it.
     let upload_page = slug == media::ATTACHMENT && rest == ["new"];
     // The media library's screens stay open only to users with the type's whole capability set
@@ -773,67 +806,6 @@ fn refused(refusal: AdminRefusal) -> (Status, RawHtml<String>) {
     }
 }
 
-/// The post type whose screens the request is for: the first segment after the admin path,
-/// when it is a post type's resource. Any other slug forwards, to Ignite's own routes.
-struct PostTypeScreen(PostTypeDef);
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for PostTypeScreen {
-    type Error = ();
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, ()> {
-        let def = request.routed_segment(0).and_then(|slug| {
-            request
-                .rocket()
-                .state::<Arc<PostTypeResources>>()?
-                .post_type(slug)
-        });
-        match def {
-            Some(def) => Outcome::Success(Self(def)),
-            None => Outcome::Forward(Status::NotFound),
-        }
-    }
-}
-
-/// The New route, at [`NEW_RANK`].
-fn new_routes() -> Vec<Route> {
-    let mut routes = rocket::routes![new_post, new_post_head];
-    for route in &mut routes {
-        route.rank = NEW_RANK;
-    }
-    routes
-}
-
-/// The New screen of a post type (Ruling R116): an `auto-draft` owned by the signed-in user, and
-/// a redirect (303) to its edit form, as `post-new.php` does. The fairing has checked the user's
-/// capabilities; a visitor fails [`AdminUser`] with 401, which Ignite sends to its sign-in page.
-/// `HEAD` is [`new_post_head`]'s, so it creates nothing.
-#[rocket::get("/<_>/new")]
-async fn new_post(
-    screen: PostTypeScreen,
-    user: AdminUser,
-    db: &State<Arc<Database>>,
-) -> Result<Redirect, Status> {
-    let slug = &screen.0.slug;
-    match create_auto_draft(db, slug, user.user_id()).await {
-        Ok(post) => Ok(Redirect::to(format!(
-            "{ADMIN_PATH}/{slug}/{}/edit",
-            post.id
-        ))),
-        Err(e) => {
-            log::error!("Could not create the auto-draft of a new `{slug}`: {e}");
-            Err(Status::InternalServerError)
-        }
-    }
-}
-
-/// `HEAD` on the New screen (Ruling R125): 200 with no body, and nothing created. Without it,
-/// Rocket would answer `HEAD` with [`new_post`], which creates an auto-draft.
-#[rocket::head("/<_>/new")]
-fn new_post_head(_screen: PostTypeScreen, _user: AdminUser) -> Status {
-    Status::Ok
-}
-
 /// The settings screen a request is for: the first segment after the admin path, when it is a
 /// settings screen this app registered. Any other slug forwards, to Ignite's own routes.
 struct SettingsSlug(SettingsScreen);
@@ -859,11 +831,11 @@ impl<'r> FromRequest<'r> for SettingsSlug {
     }
 }
 
-/// The settings screens' list address, at [`NEW_RANK`], before Ignite's list.
+/// The settings screens' list address, at [`SETTINGS_RANK`], before Ignite's list.
 fn settings_routes() -> Vec<Route> {
     let mut routes = rocket::routes![settings_list];
     for route in &mut routes {
-        route.rank = NEW_RANK;
+        route.rank = SETTINGS_RANK;
     }
     routes
 }
