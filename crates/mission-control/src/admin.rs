@@ -135,9 +135,9 @@ pub(crate) const BRAND_NAME: &str = "RocketBoost Mission Control";
 /// The admin's logo, served from `assets/brand/` (see [`crate::editor`]).
 pub(crate) const BRAND_LOGO: &str = "/mc-includes/images/mission-control-logo.webp";
 
-/// The logo's height. The logo is 661x571 px; 8.625rem (138px) shows it 160px wide, the size the
-/// sidebar had it at before Ignite had brand options, inside the sidebar's 222px.
-pub(crate) const BRAND_LOGO_HEIGHT: &str = "8.625rem";
+/// The logo's height. The logo is 661x571 px; 4.3rem (69px) shows it about 80px wide, half the
+/// 160 x 138 px the sidebar showed before, as the owner asked for the sign-in and the sidebar.
+pub(crate) const BRAND_LOGO_HEIGHT: &str = "4.3rem";
 
 /// The admin's favicon, served from `assets/brand/` (see [`crate::editor`]).
 pub(crate) const FAVICON: &str = "/mc-includes/images/favicon-32.png";

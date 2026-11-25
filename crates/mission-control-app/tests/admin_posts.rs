@@ -518,7 +518,7 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     assert!(
         dashboard.contains(
             "<img src=\"/mc-includes/images/mission-control-logo.webp\" \
-             alt=\"RocketBoost Mission Control\" class=\"w-auto\" style=\"height: 8.625rem\">"
+             alt=\"RocketBoost Mission Control\" class=\"w-auto\" style=\"height: 4.3rem\">"
         ),
         "{dashboard}"
     );
