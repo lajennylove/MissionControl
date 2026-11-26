@@ -123,6 +123,7 @@ fn list_query(search: Option<&str>, sort: Option<(&str, Direction)>) -> ListQuer
         per_page: 20,
         search: search.map(str::to_owned),
         sort: sort.map(|(key, dir)| (key.to_owned(), dir)),
+        filter: Default::default(),
     }
 }
 
@@ -229,6 +230,7 @@ async fn the_screen_lists_edits_and_deletes_attachments() {
                 per_page: 500,
                 search: None,
                 sort: None,
+                filter: Default::default(),
             },
         )
         .await

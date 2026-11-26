@@ -15,7 +15,9 @@
 //!    visibility.
 //! 3. **Finished**: the wizard checks that `.env` is still absent, runs Ignite's panel migrations
 //!    and the core migrations ([`run_migrations`]), stores the options WordPress's installer
-//!    sets that Mission Control has, creates the administrator, stores `siteurl` last, writes
+//!    sets that Mission Control has, creates the administrator, creates the default category
+//!    "Uncategorized" and stores it as `default_category` (as `wp_install_defaults` does),
+//!    stores `siteurl` last, writes
 //!    `.env` (`DATABASE_URL` and a generated `IGNITE_SECRET_KEY`, owner-only, never over an
 //!    existing file), and asks for the restart into normal mode ([`RestartHandle::request`]).
 //!
@@ -58,7 +60,7 @@ use std::sync::Mutex;
 use ignite_panel::authz::{self, AuthzError};
 use ignite_panel::users;
 use mission_control::ADMIN_PATH;
-use mission_control_core::content::{get_option, set_option};
+use mission_control_core::content::{NewTerm, Taxonomy, Term, get_option, set_option};
 use mission_control_core::install::env_file::{
     self, ENV_FILE_NAME, EnvFile, EnvFileError, generate_secret_key,
 };
@@ -1329,8 +1331,33 @@ async fn install_database(
     }
     // Before the marker: a failed account leaves a database that does not look installed.
     let created = create_administrator(db, admin).await?;
+    let uncategorized = default_category(db).await?;
+    store("default_category", &json!(uncategorized)).await?;
     store(marker, marker_value).await?;
     Ok(created)
+}
+
+/// The default category, as `wp_install_defaults` creates it: "Uncategorized" (slug
+/// `uncategorized`) in `category`. One a failed install left behind is used again. Returns its
+/// `term_id`, for the `default_category` option.
+async fn default_category(db: &Database) -> Result<i64, Refusal> {
+    let failed = |e: &dyn fmt::Display| {
+        log::error!("The installer could not create the default category: {e}");
+        Refusal::failed(
+            "Mission Control created its tables but could not create the default category. \
+             Nothing was written to .env, so you can fix the problem (the log has the details) \
+             and submit the form again.",
+        )
+    };
+    match Term::find_by_slug(db, &Taxonomy::CATEGORY, "uncategorized").await {
+        Ok(Some(term)) => return Ok(term.term_id),
+        Ok(None) => {}
+        Err(e) => return Err(failed(&e)),
+    }
+    Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("Uncategorized"))
+        .await
+        .map(|term| term.term_id)
+        .map_err(|e| failed(&e))
 }
 
 /// Creates the five WordPress roles (an existing one is kept, as the admin's start does), then

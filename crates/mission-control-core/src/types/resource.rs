@@ -42,13 +42,13 @@
 //! groups that show on the type, in ACF's order of groups; see [`custom_field_name`] for their
 //! names. A field that cannot be mapped is left out with a logged reason.
 //!
-//! The list's columns are the title (sortable, searchable), the author, the status, the terms
-//! of `category`, `post_tag` and each custom taxonomy with `show_admin_column`, and the date
-//! (sortable). Their keys start with `col_`, which no field name does, so a column is never read
-//! as a field's stored value. The title cell ends with the post's state as `_post_states` writes
-//! it after the title: "Hello — Draft" (also Pending, Private and Scheduled; a published or
-//! trashed post has none). Ignite's cells are text, so the state is text, not WordPress's
-//! `<span class="post-state">`; there is no Drafts view, as Ignite's list takes no filter.
+//! The list's columns are the title (sortable, searchable), the post's state (no heading), the
+//! author, the status, the terms of `category`, `post_tag` and each custom taxonomy with
+//! `show_admin_column`, and the date (sortable). Their keys start with `col_`, which no field
+//! name does, so a column is never read as a field's stored value. The list has WordPress's
+//! status links as tabs (All, Published, Scheduled, Drafts, Pending, Private, Trash), and on
+//! the All tab the state column shows the post's state (Draft, Pending, Private or Scheduled)
+//! as a small badge; see [`status_tabs`](super::status_tabs).
 //!
 //! # Trust
 //!
@@ -132,6 +132,7 @@ use serde_json::{Value, json};
 use super::definition::{CapabilityType, FieldDef, FieldKindDef, Origin, PostTypeDef, Support};
 use super::location::ScreenContext;
 use super::registry::Registry;
+use super::status_tabs;
 use crate::admin::navigation::{PostTypePositions, place_post_type};
 use crate::admin::posts::PostTypePolicy;
 use crate::content::{
@@ -671,6 +672,8 @@ pub fn post_type_resource_with_access(
         searchable,
     };
     let mut columns = vec![column(COL_TITLE, "Title", true, true)];
+    // The post's state, after the title as `_post_states` writes it, with no heading.
+    columns.push(column(status_tabs::COL_STATE, "", false, false));
     if data.author {
         columns.push(column(COL_AUTHOR, "Author", false, false));
     }
@@ -697,6 +700,7 @@ pub fn post_type_resource_with_access(
         def.labels.singular_name.clone()
     };
     let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data);
+    status_tabs::add_status_tabs(&mut resource);
     resource.fields = fields;
     resource.columns = columns;
     resource
@@ -1154,19 +1158,6 @@ fn status_label(status: PostStatus) -> &'static str {
     }
 }
 
-/// The state `_get_post_states` names for a post of `status` in the list, shown after its title:
-/// none for a published or trashed post. Password protected, Sticky and the front page's states
-/// are not statuses and are not shown.
-fn post_state(status: PostStatus) -> Option<&'static str> {
-    match status {
-        PostStatus::Draft => Some("Draft"),
-        PostStatus::Pending => Some("Pending"),
-        PostStatus::Private => Some("Private"),
-        PostStatus::Future => Some("Scheduled"),
-        _ => None,
-    }
-}
-
 /// Question marks for `n` binds.
 fn marks(n: usize) -> String {
     vec!["?"; n].join(", ")
@@ -1251,9 +1242,9 @@ impl PostTypeData {
         Ok(out)
     }
 
-    /// The column values of `post`: the title ("(no title)" when empty) followed by its state
-    /// (" — Draft", as `_post_states`), the author's name, the status, the term names and the
-    /// date (published, or last modified when it has none).
+    /// The column values of `post`: the title ("(no title)" when empty), the author's name, the
+    /// status, the term names and the date (published, or last modified when it has none). The
+    /// state column is empty: the list fills it on the All tab ([`status_tabs`]).
     fn columns(
         &self,
         row: &mut Row,
@@ -1262,16 +1253,13 @@ impl PostTypeData {
         terms: &HashMap<(i64, String), Vec<(i64, String)>>,
         offset: FixedOffset,
     ) {
-        let mut title = if post.title.trim().is_empty() || post.status == PostStatus::AutoDraft {
+        let title = if post.title.trim().is_empty() || post.status == PostStatus::AutoDraft {
             "(no title)".to_owned()
         } else {
             post.title.clone()
         };
-        if let Some(state) = post_state(post.status) {
-            title.push_str(" — ");
-            title.push_str(state);
-        }
         row.insert(COL_TITLE.into(), Value::from(title));
+        row.insert(status_tabs::COL_STATE.into(), Value::from(""));
         if self.author {
             row.insert(
                 COL_AUTHOR.into(),
@@ -1419,8 +1407,10 @@ impl PostTypeData {
         Ok(row)
     }
 
-    /// One page of the list: every post of the type but auto-drafts, matching the search on the
-    /// title, excerpt and content as `WP_Query::parse_search` splits it.
+    /// One page of the list: every post of the type but auto-drafts, in the tab's statuses
+    /// ([`status_tabs`]), matching the search on the title, excerpt and content as
+    /// `WP_Query::parse_search` splits it. With `per_page` 0 (the panel counting a tab), only
+    /// the total.
     async fn list_page(
         &self,
         db: &Database,
@@ -1432,6 +1422,7 @@ impl PostTypeData {
         let mut filter = String::from("FROM posts p WHERE p.post_type = ? AND p.status <> ?");
         let mut binds: Vec<Sql> =
             vec![self.post_type.as_str().into(), PostStatus::AutoDraft.into()];
+        status_tabs::status_conditions(&query.filter, &mut filter, &mut binds);
         if let Some(scope) = scope {
             if scope.own_only {
                 filter.push_str(" AND p.author_id = ?");
@@ -1459,6 +1450,12 @@ impl PostTypeData {
         }
         let total: i64 =
             raw::fetch_scalar(db, &format!("SELECT COUNT(*) {filter}"), &binds).await?;
+        if query.per_page <= 0 {
+            return Ok(Page {
+                rows: Vec::new(),
+                total,
+            });
+        }
         let date = "COALESCE(p.published_at, p.modified_at)";
         let order = match &query.sort {
             Some((key, direction)) => {
@@ -1504,12 +1501,16 @@ impl PostTypeData {
             HashMap::new()
         };
         let terms = self.post_terms(db, &ids, MAX_TERMS_SHOWN).await?;
+        let states = status_tabs::is_all_tab(&query.filter);
         let rows = posts
             .iter()
             .map(|post| {
                 let mut row = Row::new();
                 row.insert("id".into(), Value::from(post.id));
                 self.columns(&mut row, post, &authors, &terms, offset);
+                if let Some(state) = status_tabs::post_state(post.status).filter(|_| states) {
+                    row.insert(status_tabs::COL_STATE.into(), Value::from(state));
+                }
                 row
             })
             .collect();

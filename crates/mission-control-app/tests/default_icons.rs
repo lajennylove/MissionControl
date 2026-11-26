@@ -251,7 +251,7 @@ async fn sidebar(scratch: &ScratchDatabase) {
         "<i class=\"ti ti-photo text-lg\"></i>Media",
         "<i class=\"ti ti-file-text text-lg\"></i>Pages",
         "<i class=\"ti ti-brush text-lg\"></i>Menus",
-        "<i class=\"ti ti-settings text-lg\"></i>General Settings",
+        "<i class=\"ti ti-settings text-lg\"></i>Settings</a>",
     ] {
         assert!(nav.contains(entry), "`{entry}` in {nav}");
     }

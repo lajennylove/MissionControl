@@ -55,6 +55,7 @@ body.wp-admin a:hover, body.wp-admin a:active { color: #135e96; }
 #adminmenu li.menu-top:not(.current):hover > .wp-submenu, #adminmenu li.menu-top:not(.current):focus-within > .wp-submenu { box-shadow: 0 3px 5px rgba(0, 0, 0, 0.2); display: block; left: 160px; min-width: 160px; position: absolute; top: 0; z-index: 9999; }
 #adminmenu .wp-submenu a { color: rgba(240, 246, 252, 0.7); display: block; font-size: 13px; line-height: 1.4; padding: 5px 12px; text-decoration: none; }
 #adminmenu .wp-submenu a:hover, #adminmenu .wp-submenu a:focus { color: #72aee6; }
+#adminmenu .wp-submenu li.current a { color: #fff; font-weight: 600; }
 #adminmenu .wp-submenu-head { display: none; }
 #adminmenu li.wp-menu-separator { height: 5px; margin: 0 0 6px; padding: 0; }
 .mc-wp-menu-toggle { display: none; }

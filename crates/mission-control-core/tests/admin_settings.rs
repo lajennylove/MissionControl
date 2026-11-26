@@ -1030,6 +1030,7 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
                 per_page: 500,
                 search: Some("mai".into()),
                 sort: None,
+                filter: Default::default(),
             },
         )
         .await

@@ -5,7 +5,8 @@
 //! The admin runs on MySQL and MariaDB only (Ruling R119), so the test runs when
 //! `MC_TEST_DATABASE_URL` is a `mysql://` or `mariadb://` URL; otherwise it says why it is skipped
 //! and passes. Ignite reads its database from `DATABASE_URL`, so the test sets it for the process.
-//! It is the only test of this file, so nothing else reads the environment meanwhile.
+//! It is the only test of this file, so nothing else reads the environment meanwhile. The
+//! install also creates the default category, "Uncategorized", as `wp_install_defaults` does.
 
 use std::path::Path;
 
@@ -14,10 +15,13 @@ use mission_control_app::install::wizard::TOKEN_FIELD;
 use mission_control_app::restart::RestartHandle;
 use mission_control_app::setup::{INSTALL_PATH, Mode, setup_rocket_with_restart};
 use mission_control_core::config::Config;
+use mission_control_core::content::{Taxonomy, Term, get_option};
 use mission_control_testing::{ScratchDatabase, scratch_database};
+use orbit_orm::Database;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use rocket::http::{ContentType, Status};
 use rocket::local::asynchronous::{Client, LocalResponse};
+use serde_json::json;
 
 /// The administrator's password, typed in the site step.
 const ADMIN_PASSWORD: &str = "admin-pw-Sign-In-4402";
@@ -176,6 +180,7 @@ fn the_installed_administrator_signs_in() {
     // SAFETY: this is the only test of the process, and the runtimes above are gone, so no
     // other thread reads or writes the environment now.
     unsafe { std::env::set_var("DATABASE_URL", &config.database_url) };
+    let database_url = config.database_url.clone();
     rocket::async_test(async {
         let client = Client::tracked(rocket_with_options(config, AppOptions::default()))
             .await
@@ -188,6 +193,32 @@ fn the_installed_administrator_signs_in() {
         assert_eq!(to, "/mc-admin");
         let (status, page) = get(&client, "/mc-admin").await;
         assert_eq!(status, Status::Ok, "{page}");
+
+        // The default category, as `wp_install_defaults` creates it: "Uncategorized", stored as
+        // `default_category`, so the Categories screen lists it without a Delete.
+        let db = Database::connect(&database_url).await.expect("connects");
+        let uncategorized = Term::find_by_slug(&db, &Taxonomy::CATEGORY, "uncategorized")
+            .await
+            .unwrap()
+            .expect("the installer creates Uncategorized");
+        assert_eq!(uncategorized.name, "Uncategorized");
+        assert_eq!(uncategorized.parent_id, None);
+        assert_eq!(
+            get_option(&db, "default_category").await.unwrap(),
+            Some(json!(uncategorized.term_id))
+        );
+        assert_eq!(Term::all(&db, &Taxonomy::CATEGORY).await.unwrap().len(), 1);
+        db.close().await;
+        let (status, list) = get(&client, "/mc-admin/category").await;
+        assert_eq!(status, Status::Ok, "{list}");
+        assert!(list.contains("<td>Uncategorized</td>"), "{list}");
+        assert!(
+            !list.contains(&format!(
+                "/mc-admin/category/{}/delete",
+                uncategorized.term_id
+            )),
+            "{list}"
+        );
     });
     // SAFETY: as above: the runtime of the test has ended.
     unsafe { std::env::remove_var("DATABASE_URL") };

@@ -58,11 +58,11 @@ pub const POST_TAG_SCREEN: &str = "post_tag";
 /// Both screens' slugs.
 pub const TERM_SCREENS: [&str; 2] = [CATEGORY_SCREEN, POST_TAG_SCREEN];
 
-/// Where Categories is listed in the sidebar: in Content, right after Posts (5). WordPress has it
-/// in the Posts submenu (`edit.php`, at 15).
+/// Where Categories is listed in the sidebar: under Posts, in its Content group, as WordPress's
+/// Posts submenu (`edit.php`, at 15).
 pub const CATEGORIES_SORT: i32 = navigation::POSTS + 1;
 
-/// Where Tags is listed: right after Categories. WordPress has it in the Posts submenu, at 16.
+/// Where Tags is listed: under Posts, after Categories, as WordPress's Posts submenu (at 16).
 pub const TAGS_SORT: i32 = navigation::POSTS + 2;
 
 /// The most terms a page of the list shows.
@@ -146,9 +146,9 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
         column(COL_COUNT, "Count", true, false),
     ];
     navigation::place(&mut resource, sort, navigation::POST_ICON);
-    // PARENT MENU: Categories and Tags belong under Posts (WordPress's `edit.php` submenu). Set
-    // the parent here once Ignite has sub-items; until then they are top-level entries of the
-    // Content group, right after Posts.
+    // Categories and Tags are in Posts' submenu (WordPress's `edit.php`), in the Content group
+    // with it.
+    resource.navigation_parent_item = Some(navigation::POSTS_PARENT.to_owned());
     resource
 }
 

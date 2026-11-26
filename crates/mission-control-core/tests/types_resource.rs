@@ -162,6 +162,7 @@ fn first_page(search: Option<&str>) -> ListQuery {
         per_page: 20,
         search: search.map(str::to_owned),
         sort: None,
+        filter: Default::default(),
     }
 }
 
@@ -191,7 +192,7 @@ fn title_and_content_in_supports_make_those_fields() {
     assert!(!field(&resource, "status").required);
     assert!(!field(&resource, "slug").required);
     let columns: Vec<&str> = resource.columns.iter().map(|c| c.key.as_str()).collect();
-    assert_eq!(columns, ["col_title", "col_status", "col_date"]);
+    assert_eq!(columns, ["col_title", "col_state", "col_status", "col_date"]);
 
     // A type with no supports has the slug, status, date and password only.
     let bare = post_type_resource(&post_type("rs_bare", Vec::new()), &Registry::default());
@@ -216,7 +217,10 @@ fn the_builtin_types_have_wordpress_s_boxes() {
             "password",
             "sticky",
             "tax_category",
-            "tax_post_tag"
+            // The Add New Category link's and the tags box's new terms.
+            "new_category",
+            "tax_post_tag",
+            "tax_input_post_tag"
         ]
     );
     assert_eq!(field(&post, "author").kind, FieldKindDef::User);
@@ -402,9 +406,56 @@ async fn create_writes_the_post_and_an_auto_draft_is_hidden_from_the_list() {
     assert_eq!(saved["status"], "draft");
     let page = resource.data.list(db, &first_page(None)).await.unwrap();
     assert_eq!(ids(&page.rows), [draft.id]);
-    // The title ends with the draft's state, as `_post_states` writes it.
-    assert_eq!(page.rows[0]["col_title"], "First — Draft");
+    // The title is the title; the draft's state, as `_post_states` names it, is in the state
+    // column on the All tab only.
+    assert_eq!(page.rows[0]["col_title"], "First");
+    assert_eq!(page.rows[0]["col_state"], "");
     assert_eq!(page.rows[0]["col_status"], "Draft");
+    let tabs = resource.tabs.clone();
+    let tab = |key: &str| tabs.iter().find(|t| t.key == key).unwrap().filter.clone();
+    let all = resource
+        .data
+        .list(
+            db,
+            &ListQuery {
+                filter: tab("all"),
+                ..first_page(None)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(all.rows[0]["col_state"], "Draft");
+    for (key, total) in [("draft", 1), ("publish", 0), ("trash", 0)] {
+        let page = resource
+            .data
+            .list(
+                db,
+                &ListQuery {
+                    filter: tab(key),
+                    ..first_page(None)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total, total, "{key}");
+        if let Some(row) = page.rows.first() {
+            assert_eq!(row["col_state"], "", "{key}");
+        }
+    }
+    // The panel counts a tab with `per_page` 0: the total, no rows.
+    let count = resource
+        .data
+        .list(
+            db,
+            &ListQuery {
+                per_page: 0,
+                filter: tab("draft"),
+                ..first_page(None)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((count.rows.len(), count.total), (0, 1));
 
     // A post of another type is not found.
     let other = create_auto_draft(db, "rs_other", author).await.unwrap();

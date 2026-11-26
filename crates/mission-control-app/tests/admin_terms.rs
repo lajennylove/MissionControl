@@ -236,13 +236,18 @@ async fn flows(scratch: &ScratchDatabase) {
 }
 
 /// The screens need `manage_categories`, as WordPress's `edit-tags.php` needs the taxonomy's
-/// `manage_terms`: administrators and editors hold it, authors do not.
+/// `manage_terms`: administrators and editors hold it, authors do not. The sidebar lists them
+/// under Posts, as WordPress's Posts submenu, shown on the Posts screens.
 async fn who_may_open(client: &Client, admin: &str, editor: &str, author: &str) {
     for email in [admin, editor] {
         sign_in(client, email).await;
-        let (_, dashboard) = get(client, "/mc-admin").await;
+        let (_, posts) = get(client, "/mc-admin/post").await;
+        let under_posts = &posts[posts.find("</i>Posts</a>").expect("the Posts entry")..];
         for uri in ["/mc-admin/category", "/mc-admin/post_tag"] {
-            assert!(dashboard.contains(uri), "{email} sees {uri}: {dashboard}");
+            assert!(
+                under_posts.contains(&format!("href=\"{uri}\"")),
+                "{email} sees {uri} under Posts: {posts}"
+            );
             let (status, html) = get(client, uri).await;
             assert_eq!(status, Status::Ok, "{email} opens {uri}: {html}");
         }
@@ -254,7 +259,7 @@ async fn who_may_open(client: &Client, admin: &str, editor: &str, author: &str) 
     }
 
     sign_in(client, author).await;
-    let (_, dashboard) = get(client, "/mc-admin").await;
+    let (_, dashboard) = get(client, "/mc-admin/post").await;
     for uri in [
         "/mc-admin/category",
         "/mc-admin/post_tag",

@@ -12,6 +12,7 @@ pub mod field_value;
 pub mod location;
 pub mod registry;
 pub mod resource;
+pub mod status_tabs;
 
 pub use definition::{
     CapabilityType, DefinitionError, FieldDef, FieldGroupDef, FieldKindDef, HasArchive,

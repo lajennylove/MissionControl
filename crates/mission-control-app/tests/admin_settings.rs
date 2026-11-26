@@ -248,8 +248,29 @@ async fn flows(scratch: &ScratchDatabase) {
     sign_in(&client, &admin).await;
     let (status, dashboard) = get(&client, "/mc-admin").await;
     assert_eq!(status, Status::Ok);
-    for title in ["General Settings", "Permalink Settings", "Privacy", "Menus"] {
-        assert!(dashboard.contains(title), "{title}: {dashboard}");
+    // The sidebar's Settings entry opens General; the other screens are its children, shown
+    // on a settings screen.
+    for entry in [
+        "href=\"/mc-admin/options-general\"><i class=\"ti ti-settings text-lg\"></i>Settings</a>",
+        "</i>Menus</a>",
+    ] {
+        assert!(dashboard.contains(entry), "{entry}: {dashboard}");
+    }
+    let (_, general) = get(&client, "/mc-admin/options-general/1/edit").await;
+    for child in [
+        "Writing",
+        "Reading",
+        "Discussion",
+        "Media",
+        "Permalinks",
+        "Privacy",
+    ] {
+        let slug = match child {
+            "Permalinks" => "permalink".to_owned(),
+            other => other.to_lowercase(),
+        };
+        let link = format!("href=\"/mc-admin/options-{slug}\">{child}</a>");
+        assert!(general.contains(&link), "{link}: {general}");
     }
     // The list address opens the one record's form.
     {
@@ -297,7 +318,10 @@ async fn flows(scratch: &ScratchDatabase) {
     // An editor is refused with WordPress's messages, and sees neither screen in the menu.
     sign_in(&client, &editor).await;
     let (_, dashboard) = get(&client, "/mc-admin").await;
-    assert!(!dashboard.contains("General Settings"), "{dashboard}");
+    assert!(
+        !dashboard.contains("/mc-admin/options-general"),
+        "{dashboard}"
+    );
     assert!(!dashboard.contains("/mc-admin/nav-menus"), "{dashboard}");
     for uri in [
         "/mc-admin/options-general",

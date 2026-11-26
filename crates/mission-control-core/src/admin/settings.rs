@@ -143,6 +143,19 @@ impl SettingsScreen {
         }
     }
 
+    /// The screen's entry in WordPress's Settings submenu (`wp-admin/menu.php`).
+    pub const fn menu_title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Writing => "Writing",
+            Self::Reading => "Reading",
+            Self::Discussion => "Discussion",
+            Self::Media => "Media",
+            Self::Permalink => "Permalinks",
+            Self::Privacy => "Privacy",
+        }
+    }
+
     /// The capability the screen needs: `manage_options`, or `manage_privacy_options` for
     /// Privacy.
     pub const fn capability(self) -> &'static str {
@@ -574,6 +587,14 @@ pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> 
         super::navigation::SETTINGS + i32::try_from(index).unwrap_or_default(),
         super::navigation::SETTINGS_ICON,
     );
+    // WordPress's Settings menu: its entry opens General, and the other screens are its
+    // submenu, by their menu titles.
+    if screen == SettingsScreen::General {
+        resource.navigation_label = Some(super::navigation::SETTINGS_LABEL.to_owned());
+    } else {
+        resource.navigation_label = Some(screen.menu_title().to_owned());
+        resource.navigation_parent_item = Some(super::navigation::SETTINGS_PARENT.to_owned());
+    }
     resource
 }
 

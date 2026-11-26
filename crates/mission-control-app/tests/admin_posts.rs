@@ -232,6 +232,22 @@ async fn delete(client: &Client, post_type: &str, id: i64) -> Status {
 }
 
 /// The New screen's refusal (Ruling R115): 403 with WordPress's message.
+/// Whether the list row titled `title` shows the state badge `state` in `color` right after its
+/// title cell, as the All tab shows a post's state.
+fn badge_after(list: &str, title: &str, color: &str, state: &str) -> bool {
+    let cell = format!("<td>{title}</td>");
+    let badge = format!("<td><span class=\"ig-badge ig-badge-{color}\">{state}</span></td>");
+    list.match_indices(&cell)
+        .any(|(at, _)| list[at + cell.len()..].trim_start().starts_with(&badge))
+}
+
+/// The count a list's tab `label` shows, as "Drafts (3)".
+fn tab_count(list: &str, label: &str) -> Option<i64> {
+    let marker = format!(">{label} <span class=\"ig-tab-count\">(");
+    let at = list.find(&marker)? + marker.len();
+    list[at..].split(')').next()?.parse().ok()
+}
+
 fn assert_refused(status: Status, body: &str, message: &str) {
     assert_eq!(status, Status::Forbidden, "{body}");
     assert!(body.contains(message), "{body}");
@@ -316,6 +332,7 @@ async fn flows(scratch: &ScratchDatabase) {
 
     posts(&client, &db, editor).await;
     pages(&client, &db).await;
+    status_tabs(&client, &db, editor).await;
 
     sign_out(&client).await;
     post_locks(&client, &db).await;
@@ -355,6 +372,173 @@ async fn flows(scratch: &ScratchDatabase) {
     assert_eq!(get(&second, "/mc-admin").await.0, Status::Ok);
     drop(second);
     db.close().await;
+}
+
+/// WordPress's status links on the Posts and Pages lists, as Ignite's tabs at `?tab=`: All
+/// (every status but Trash), Published, Scheduled, Drafts, Pending, Private and Trash, each with
+/// the number of the type's posts in it. A tab lists only its posts, and the search, the sort and
+/// the pages stay in it. On the All tab, a post's state (Draft, Pending, Private, Scheduled) is a
+/// small badge after its title; the other tabs show none.
+async fn status_tabs(client: &Client, db: &Database, editor: i64) {
+    let future = chrono::Utc::now().naive_utc() + chrono::Duration::days(30);
+    for (post_type, status, title) in [
+        ("post", PostStatus::Publish, "Tabbed published"),
+        ("post", PostStatus::Draft, "Tabbed draft"),
+        ("post", PostStatus::Pending, "Tabbed pending"),
+        ("post", PostStatus::Private, "Tabbed private"),
+        ("post", PostStatus::Future, "Tabbed scheduled"),
+        ("post", PostStatus::Trash, "Tabbed trashed"),
+        ("page", PostStatus::Pending, "Tabbed page pending"),
+        ("page", PostStatus::Trash, "Tabbed page trashed"),
+    ] {
+        Post::create(
+            db,
+            NewPost {
+                status,
+                title: title.to_owned(),
+                published_at: (status == PostStatus::Future).then_some(future),
+                ..NewPost::new(editor, post_type)
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // The type's posts in `status`, as `wp_count_posts` counts them.
+    let count = |post_type: &'static str, status: Option<PostStatus>| async move {
+        let query = Post::query().where_eq("post_type", post_type).where_op(
+            "status",
+            Operator::Ne,
+            PostStatus::AutoDraft.as_str(),
+        );
+        match status {
+            Some(status) => query.where_eq("status", status.as_str()),
+            None => query.where_op("status", Operator::Ne, PostStatus::Trash.as_str()),
+        }
+        .count(db)
+        .await
+        .unwrap() as i64
+    };
+    let tabs = [
+        ("All", None),
+        ("Published", Some(PostStatus::Publish)),
+        ("Scheduled", Some(PostStatus::Future)),
+        ("Drafts", Some(PostStatus::Draft)),
+        ("Pending", Some(PostStatus::Pending)),
+        ("Private", Some(PostStatus::Private)),
+        ("Trash", Some(PostStatus::Trash)),
+    ];
+    for post_type in ["post", "page"] {
+        let (status, list) = get(client, &format!("/mc-admin/{post_type}")).await;
+        assert_eq!(status, Status::Ok, "{list}");
+        // The tabs, in WordPress's order, with their links.
+        let mut at = 0;
+        for (label, status) in tabs {
+            let key = status.map_or("all", PostStatus::as_str);
+            let link = format!("href=\"/mc-admin/{post_type}?tab={key}\"");
+            let found = list[at..]
+                .find(&link)
+                .unwrap_or_else(|| panic!("{post_type}: the {label} tab after byte {at}: {list}"));
+            at += found + link.len();
+            assert_eq!(
+                tab_count(&list, label),
+                Some(count(post_type, status).await),
+                "{post_type}: {label}"
+            );
+        }
+        // All is the default tab and leaves out the trash.
+        assert!(
+            list.contains(&format!(
+                "class=\"ig-tab ig-tab-active\" href=\"/mc-admin/{post_type}?tab=all\" aria-current=\"page\""
+            )),
+            "{list}"
+        );
+        assert!(!list.contains("Tabbed trashed"), "{list}");
+        assert!(!list.contains("Tabbed page trashed"), "{list}");
+    }
+
+    // The All tab: each state is a badge after the title; a published post has none.
+    let (_, all) = get(client, "/mc-admin/post?tab=all&q=Tabbed").await;
+    for (title, color, state) in [
+        ("Tabbed draft", "gray", "Draft"),
+        ("Tabbed pending", "warning", "Pending"),
+        ("Tabbed private", "info", "Private"),
+        ("Tabbed scheduled", "primary", "Scheduled"),
+    ] {
+        assert!(badge_after(&all, title, color, state), "{title}: {all}");
+    }
+    assert!(all.contains("<td>Tabbed published</td>"), "{all}");
+    assert!(!all.contains("Tabbed trashed"), "{all}");
+    assert_eq!(all.matches("class=\"ig-badge ").count(), 4, "{all}");
+
+    // Each other tab lists its status only, with no badge.
+    for (key, title, others) in [
+        ("publish", "Tabbed published", "Tabbed draft"),
+        ("draft", "Tabbed draft", "Tabbed published"),
+        ("pending", "Tabbed pending", "Tabbed draft"),
+        ("private", "Tabbed private", "Tabbed draft"),
+        ("future", "Tabbed scheduled", "Tabbed draft"),
+        ("trash", "Tabbed trashed", "Tabbed draft"),
+    ] {
+        let (status, list) = get(client, &format!("/mc-admin/post?tab={key}&q=Tabbed")).await;
+        assert_eq!(status, Status::Ok, "{key}");
+        assert!(list.contains(&format!("<td>{title}</td>")), "{key}: {list}");
+        assert!(!list.contains(others), "{key}: {list}");
+        assert!(!list.contains("class=\"ig-badge "), "{key}: {list}");
+        assert!(
+            list.contains(&format!(
+                "class=\"ig-tab ig-tab-active\" href=\"/mc-admin/post?q=Tabbed&amp;tab={key}\""
+            )),
+            "{key}: {list}"
+        );
+    }
+    let (_, pages) = get(client, "/mc-admin/page?tab=pending").await;
+    assert!(pages.contains("<td>Tabbed page pending</td>"), "{pages}");
+    assert!(!pages.contains("<td>Tabbed pending</td>"), "{pages}");
+
+    // The search and the sort stay in the tab: the search box carries it, the column links keep
+    // it, and a search inside a tab finds only that tab's posts.
+    let (_, drafts) = get(
+        client,
+        "/mc-admin/post?tab=draft&q=Tabbed&sort=col_title&dir=desc",
+    )
+    .await;
+    assert!(
+        drafts.contains("<input type=\"hidden\" name=\"tab\" value=\"draft\">"),
+        "{drafts}"
+    );
+    assert!(
+        drafts.contains(
+            "href=\"/mc-admin/post?q=Tabbed&amp;tab=draft&amp;sort=col_title&amp;dir=asc\""
+        ),
+        "{drafts}"
+    );
+    assert!(drafts.contains("<td>Tabbed draft</td>"), "{drafts}");
+    let (_, none) = get(client, "/mc-admin/post?tab=publish&q=Tabbed+draft").await;
+    assert!(!none.contains("<td>Tabbed draft</td>"), "{none}");
+
+    // Paging stays in the tab: a page of the Drafts tab is drafts only.
+    for n in 0..25 {
+        Post::create(
+            db,
+            NewPost {
+                status: PostStatus::Draft,
+                title: format!("Paged draft {n:02}"),
+                ..NewPost::new(editor, "post")
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let (_, first) = get(client, "/mc-admin/post?tab=draft").await;
+    assert!(
+        first.contains("href=\"/mc-admin/post?tab=draft&amp;page=2\""),
+        "{first}"
+    );
+    let (status, second) = get(client, "/mc-admin/post?tab=draft&page=2").await;
+    assert_eq!(status, Status::Ok);
+    assert!(second.contains("Paged draft"), "{second}");
+    assert!(!second.contains("Tabbed published"), "{second}");
+    assert!(!second.contains("Hello from the seed"), "{second}");
 }
 
 /// Task A6: post locks, as WordPress's `_edit_lock`: opening a post's form locks it, a second
@@ -498,6 +682,99 @@ async fn post_locks(client: &Client, db: &Database) {
     assert_eq!(response.status(), Status::Unauthorized);
 }
 
+/// The sidebar of a signed-in administrator on the page `uri`, the Ignite theme's.
+async fn sidebar(client: &Client, uri: &str) -> String {
+    let (status, html) = get(client, uri).await;
+    assert_eq!(status, Status::Ok, "{uri}: {html}");
+    let start = html.find("aria-label=\"Main\"").expect("the sidebar");
+    html[start..start + html[start..].find("</nav>").unwrap()].to_owned()
+}
+
+/// Asserts each of `entries` comes in `nav`, in order.
+fn assert_in_order(nav: &str, entries: &[&str]) {
+    let mut at = 0;
+    for entry in entries {
+        let found = nav[at..]
+            .find(entry)
+            .unwrap_or_else(|| panic!("`{entry}` after byte {at} of the sidebar: {nav}"));
+        at += found + entry.len();
+    }
+}
+
+/// WordPress's submenus as Ignite's child entries: Categories and Tags under Posts, in Content;
+/// the settings screens under Settings (General's entry), in Site. Menus stays in Site, alone.
+async fn sidebar_children(client: &Client) {
+    let child = |uri: &str, label: &str, active: bool| {
+        if active {
+            format!(
+                "<a class=\"ig-nav-link ig-nav-link-active py-1.5 pl-11 text-[13px]\" href=\"{uri}\" aria-current=\"page\">{label}</a>"
+            )
+        } else {
+            format!("<a class=\"ig-nav-link py-1.5 pl-11 text-[13px]\" href=\"{uri}\">{label}</a>")
+        }
+    };
+    for (uri, current) in [
+        ("/mc-admin/post", ""),
+        ("/mc-admin/category", "/mc-admin/category"),
+        ("/mc-admin/post_tag", "/mc-admin/post_tag"),
+    ] {
+        let nav = sidebar(client, uri).await;
+        assert_in_order(
+            &nav,
+            &[
+                "data-ig-nav-toggle>Content<",
+                "</i>Posts</a>",
+                &child(
+                    "/mc-admin/category",
+                    "Categories",
+                    current == "/mc-admin/category",
+                ),
+                &child(
+                    "/mc-admin/post_tag",
+                    "Tags",
+                    current == "/mc-admin/post_tag",
+                ),
+                "</i>Media</a>",
+                "</i>Pages</a>",
+                "data-ig-nav-toggle>Site<",
+                "</i>Menus</a>",
+                "</i>Settings</a>",
+            ],
+        );
+        assert_eq!(nav.matches("/mc-admin/category\"").count(), 1, "{nav}");
+        assert!(!nav.contains("/mc-admin/options-writing\""), "{uri}: {nav}");
+    }
+    let settings = [
+        ("options-writing", "Writing"),
+        ("options-reading", "Reading"),
+        ("options-discussion", "Discussion"),
+        ("options-media", "Media"),
+        ("options-permalink", "Permalinks"),
+        ("options-privacy", "Privacy"),
+    ];
+    for (current, uri) in [
+        ("options-general", "/mc-admin/options-general/1/edit"),
+        ("options-reading", "/mc-admin/options-reading/1/edit"),
+        ("options-privacy", "/mc-admin/options-privacy/1/edit"),
+    ] {
+        let nav = sidebar(client, uri).await;
+        let mut order = vec![
+            "data-ig-nav-toggle>Site<".to_owned(),
+            "</i>Menus</a>".to_owned(),
+            "href=\"/mc-admin/options-general\"".to_owned(),
+            "</i>Settings</a>".to_owned(),
+        ];
+        order.extend(
+            settings
+                .iter()
+                .map(|(slug, label)| child(&format!("/mc-admin/{slug}"), label, *slug == current)),
+        );
+        let order: Vec<&str> = order.iter().map(String::as_str).collect();
+        assert_in_order(&nav, &order);
+        assert!(!nav.contains("/mc-admin/category\""), "{uri}: {nav}");
+    }
+}
+
 /// The admin's brand (Ignite's brand options) and its sidebar in WordPress's menu order: the
 /// dashboard, then Content (Posts 5, Media 10, Pages 20), then Site (Menus 60, then the settings
 /// screens from 80), each with its Dashicons class.
@@ -583,23 +860,17 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     let nav = &dashboard[nav_start..dashboard[nav_start..].find("</nav>").unwrap() + nav_start];
     let order = [
         "href=\"/mc-admin\"",
-        ">Content</p>",
+        "data-ig-nav-toggle>Content<",
         "<i class=\"ti ti-pin text-lg\"></i>Posts",
         "<i class=\"ti ti-photo text-lg\"></i>Media",
         "<i class=\"ti ti-file-text text-lg\"></i>Pages",
-        ">Site</p>",
+        "data-ig-nav-toggle>Site<",
         "<i class=\"ti ti-brush text-lg\"></i>Menus",
-        "<i class=\"ti ti-settings text-lg\"></i>General Settings",
-        "</i>Writing Settings",
-        "</i>Reading Settings",
-        "</i>Discussion Settings",
-        "</i>Media Settings",
-        "</i>Permalink Settings",
-        "</i>Privacy",
+        "<i class=\"ti ti-settings text-lg\"></i>Settings</a>",
     ];
     // Nothing between the dashboard and the Content group: every screen is in a group.
     let dashboard_end = nav.find("href=\"/mc-admin\"").unwrap();
-    let content = nav.find(">Content</p>").unwrap();
+    let content = nav.find("data-ig-nav-toggle>Content<").unwrap();
     assert!(
         !nav[dashboard_end..content].contains("ig-nav-link\" href"),
         "{nav}"
@@ -611,6 +882,19 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
             .unwrap_or_else(|| panic!("`{entry}` after byte {at} of the sidebar: {nav}"));
         at += found + entry.len();
     }
+    // The children show under their entry when it, or one of them, is the current page, as
+    // Filament's: none on the dashboard, and no Post Types, Taxonomies or Field Groups yet.
+    for child in [
+        "/mc-admin/category\"",
+        "/mc-admin/post_tag\"",
+        "/mc-admin/options-writing\"",
+        "Post Types",
+        "Taxonomies",
+        "Field Groups",
+    ] {
+        assert!(!nav.contains(child), "{child}: {nav}");
+    }
+    sidebar_children(client).await;
     // Choosing the WordPress theme on the profile page shows its Dashicons and loads their
     // stylesheet; an empty choice goes back to the site's default, Ignite's theme.
     let csrf = token(client).await;
@@ -630,6 +914,9 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "Howdy, <span class=\"display-name\">ada</span>",
         "<ul id=\"adminmenu\">",
         "<span class=\"dashicons dashicons-admin-post\"></span></div><div class=\"wp-menu-name\">Posts</div>",
+        "<li><a href=\"/mc-admin/post/new\">Add New</a></li><li><a href=\"/mc-admin/category\">Categories</a></li><li><a href=\"/mc-admin/post_tag\">Tags</a></li></ul>",
+        "<div class=\"wp-menu-name\">Settings</div></a>\n<ul class=\"wp-submenu\"><li class=\"wp-submenu-head\" aria-hidden=\"true\">Settings</li><li><a href=\"/mc-admin/options-writing\">Writing</a></li>",
+        "<li><a href=\"/mc-admin/options-permalink\">Permalinks</a></li><li><a href=\"/mc-admin/options-privacy\">Privacy</a></li></ul>",
         "<li class=\"wp-menu-separator\" aria-hidden=\"true\"></li>",
         "<div id=\"wpbody\" role=\"main\">",
         "&lsaquo; RocketBoost Mission Control</title>",
@@ -640,7 +927,17 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     assert!(!wordpress.contains("ig-nav-link"), "{wordpress}");
     assert!(!wordpress.contains("aria-label=\"Main\""), "{wordpress}");
     // The groups are separated, without their headings.
-    assert!(!wordpress.contains(">Content</p>"), "{wordpress}");
+    assert!(!wordpress.contains(">Content<"), "{wordpress}");
+    // On a child's page its parent's submenu is open, with the child current.
+    let (_, categories) = get(client, "/mc-admin/category").await;
+    assert!(
+        categories.contains("<li class=\"menu-top current wp-has-current-submenu\"><a class=\"menu-top\" href=\"/mc-admin/post\">"),
+        "{categories}"
+    );
+    assert!(
+        categories.contains("<li class=\"current\"><a href=\"/mc-admin/category\" aria-current=\"page\">Categories</a></li>"),
+        "{categories}"
+    );
     let csrf = token(client).await;
     let response = post(
         client,
@@ -803,14 +1100,17 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
         list.contains(&format!("/mc-admin/post/{id}/edit")),
         "{list}"
     );
-    // The saved draft is listed with its state after the title, as `_post_states` writes it;
-    // the published post has none.
+    // The saved draft is listed with its state after the title, as `_post_states` writes it,
+    // as a badge on the All tab; the published post has none.
     assert!(
-        list.contains("<td>Written in the admin — Draft</td>"),
+        badge_after(&list, "Written in the admin", "gray", "Draft"),
         "{list}"
     );
     assert!(list.contains("<td>Hello from the seed</td>"), "{list}");
-    assert!(!list.contains("Hello from the seed —"), "{list}");
+    assert!(
+        !badge_after(&list, "Hello from the seed", "gray", "Draft"),
+        "{list}"
+    );
 
     // An empty title is refused on the edit form too.
     let csrf = token(client).await;
@@ -934,7 +1234,7 @@ async fn pages(client: &Client, db: &Database) {
     let id = new_post(client, "page", &[("title", "Team")]).await;
     // A draft page is in the Pages list, tagged; the published one is not.
     let (_, list) = get(client, "/mc-admin/page").await;
-    assert!(list.contains("<td>Team — Draft</td>"), "{list}");
+    assert!(badge_after(&list, "Team", "gray", "Draft"), "{list}");
     assert!(list.contains("<td>About</td>"), "{list}");
     save(
         client,

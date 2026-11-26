@@ -55,6 +55,19 @@ pub const TOOLS: i32 = 75;
 /// Settings' position. The settings screens take 80 to 86, in WordPress's submenu order.
 pub const SETTINGS: i32 = 80;
 
+/// The entry the Categories and Tags screens are listed under: Posts, by its slug (WordPress's
+/// `edit.php` submenu).
+pub const POSTS_PARENT: &str = "post";
+
+/// The entry the other settings screens are listed under: General's, labelled
+/// [`SETTINGS_LABEL`], as WordPress's Settings menu opens `options-general.php`. Ignite lists
+/// children only under another resource's entry, so General is the parent entry and Writing,
+/// Reading, Discussion, Media, Permalinks and Privacy are its children.
+pub const SETTINGS_PARENT: &str = "options-general";
+
+/// The label of the Settings entry, which opens General.
+pub const SETTINGS_LABEL: &str = "Settings";
+
 /// The positions a custom post type does not take: WordPress's `$core_menu_positions` (59, 60,
 /// 65, 70, 75, 80, 85, 99) and the entries `$menu` already holds when the post types are added
 /// (Dashboard 2, its separator 4, Posts 5, Media 10, Pages 20, Comments 25; Links, 15, is off by
