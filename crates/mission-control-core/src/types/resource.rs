@@ -38,9 +38,21 @@
 //!
 //! Each taxonomy the type uses (its `taxonomies`, and those whose `object_type` names it,
 //! `category` and `post_tag` for `post`) whose `show_ui` is on is a relationship field
-//! `tax_<taxonomy>` (`-` written `_`) holding its terms' ids. Then come the fields of the field
-//! groups that show on the type, in ACF's order of groups; see [`custom_field_name`] for their
-//! names. A field that cannot be mapped is left out with a logged reason.
+//! `tax_<taxonomy>` (`-` written `_`) holding its terms' ids (a hierarchical taxonomy's choices
+//! in tree order, a child indented by three no-break spaces per level), followed by a text field
+//! of new terms' names, separated by commas: `new_<taxonomy>` for a hierarchical taxonomy
+//! (WordPress's Add New Category), `tax_input_<taxonomy>` for a flat one (the tags typed in the
+//! tags box). The save creates each new name the taxonomy does not have and assigns it; a new
+//! category needs the taxonomy's `edit_terms`, a new tag its `assign_terms`. The editor's
+//! script (`terms.js`) shows them as WordPress's category checklist and tags box. Then come the
+//! fields of the field groups that show on the type, in ACF's order of groups; see
+//! [`custom_field_name`] for their names. A field that cannot be mapped is left out with a
+//! logged reason.
+//!
+//! The form is laid out as WordPress's editor with its settings sidebar: a main column two
+//! thirds wide (title, slug, content, excerpt, field groups) and a sidebar one third wide
+//! (Publish, featured image, Page Attributes, taxonomies); see `editor_layout`. The slug follows
+//! the title until it is edited by hand (Ignite's `slug_from`).
 //!
 //! The list's columns are the title (sortable, searchable), the post's state (no heading), the
 //! author, the status, the terms of `category`, `post_tag` and each custom taxonomy with
@@ -122,9 +134,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, FixedOffset, NaiveDate, NaiveDateTime};
 use ignite_core::{
-    ActingUser, ColumnDef, Direction, FieldDef as IgniteFieldDef, ListQuery, Page, Row,
-    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, register_policy, register_runtime,
-    unregister_policy, unregister_runtime,
+    ActingUser, ColumnDef, Direction, FieldDef as IgniteFieldDef, FormLayout, Group, ListQuery,
+    Page, Row, RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, register_policy,
+    register_runtime, unregister_policy, unregister_runtime,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -136,8 +148,8 @@ use super::status_tabs;
 use crate::admin::navigation::{PostTypePositions, place_post_type};
 use crate::admin::posts::PostTypePolicy;
 use crate::content::{
-    MetaError, NewPost, Post, PostStatus, SaveError, Taxonomy, delete_post_meta, get_option,
-    save_revision, set_post_meta,
+    MetaError, NewPost, NewTerm, Post, PostStatus, SaveError, Taxonomy, Term, TermError,
+    delete_post_meta, get_option, save_revision, set_post_meta,
 };
 use crate::content::{PostFields, kses_post};
 use crate::front::{escape_like, search_terms};
@@ -298,6 +310,38 @@ fn taxonomy_field_name(taxonomy: &str) -> String {
     format!("tax_{}", taxonomy.replace('-', "_"))
 }
 
+/// The Ignite field name of the new terms of the taxonomy named `taxonomy`: `new_<taxonomy>`
+/// for a hierarchical one (WordPress's `newcategory`), `tax_input_<taxonomy>` for a flat one
+/// (the tags box), `-` written `_`. The editor's script finds the boxes by these prefixes.
+fn new_terms_field_name(taxonomy: &str, hierarchical: bool) -> String {
+    let name = taxonomy.replace('-', "_");
+    if hierarchical {
+        format!("new_{name}")
+    } else {
+        format!("tax_input_{name}")
+    }
+}
+
+/// The most new terms one save creates in one taxonomy.
+const MAX_NEW_TERMS: usize = 100;
+
+/// The indent of one level of a hierarchical taxonomy's choices: three no-break spaces, as
+/// `wp_dropdown_categories` pads a child (`&nbsp;&nbsp;&nbsp;`). A term name never starts with
+/// one (names are trimmed), so the editor's script reads the depth from it.
+const LEVEL_INDENT: &str = "\u{a0}\u{a0}\u{a0}";
+
+/// The names in `text`, separated by commas as the tags box separates them: trimmed, blanks
+/// left out, each name once (compared without case), at most [`MAX_NEW_TERMS`].
+fn term_names(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    text.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && seen.insert(name.to_lowercase()))
+        .take(MAX_NEW_TERMS)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// One taxonomy field of a resource.
 #[derive(Debug, Clone)]
 struct TaxonomyField {
@@ -309,6 +353,14 @@ struct TaxonomyField {
     taxonomy: Taxonomy,
     /// The capability that assigns its terms (`assign_terms`).
     assign_terms: String,
+    /// The text field of the new terms the form adds: `new_<taxonomy>` (WordPress's
+    /// `newcategory`) for a hierarchical taxonomy, `tax_input_<taxonomy>` (the tags box's
+    /// `tax_input[post_tag]`) for a flat one. `None` when its name is taken.
+    new_field: Option<String>,
+    /// The capability that creates a term from the form: `edit_terms` for a hierarchical
+    /// taxonomy (the Add New Category link's check), `assign_terms` for a flat one (a typed tag
+    /// is created by the save).
+    create_terms: String,
 }
 
 /// One field group field of a resource.
@@ -602,7 +654,15 @@ pub fn post_type_resource_with_access(
     }
 
     let mut names: HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
-    for (taxonomy, label, column, assign_terms) in taxonomies_of(def, registry) {
+    for used in taxonomies_of(def, registry) {
+        let TaxonomyUse {
+            taxonomy,
+            label,
+            column,
+            assign_terms,
+            edit_terms,
+            add_new,
+        } = used;
         let name = taxonomy_field_name(&taxonomy.name);
         if !names.insert(name.clone()) {
             log::warn!(
@@ -613,15 +673,39 @@ pub fn post_type_resource_with_access(
             continue;
         }
         fields.push(field(&name, &label, FieldKindDef::Relationship, false));
+        // The text field of the terms the form adds: the Add New Category link, or the tags
+        // typed in the tags box.
+        let new_name = new_terms_field_name(&taxonomy.name, taxonomy.hierarchical);
+        let new_field = if names.insert(new_name.clone()) {
+            fields.push(field(&new_name, &add_new, FieldKindDef::Text, false));
+            Some(new_name)
+        } else {
+            log::warn!(
+                "The taxonomy `{}` of the `{slug}` screens has no field for new terms: its name \
+                 `{new_name}` is taken by another taxonomy.",
+                taxonomy.name
+            );
+            None
+        };
+        let create_terms = if taxonomy.hierarchical {
+            edit_terms
+        } else {
+            assign_terms.clone()
+        };
         data.taxonomies.push(TaxonomyField {
             column: column.then(|| format!("col_{name}")),
             field: name,
             taxonomy,
             assign_terms,
+            new_field,
+            create_terms,
         });
     }
 
+    // The field groups' fields, one card per group in the main column.
+    let mut group_sections: Vec<Section> = Vec::new();
     for group in registry.groups_for(&ScreenContext::post(slug)) {
+        let mut section = Section::make(group.title.clone());
         for def in group.fields {
             let skip = |reason: &str| {
                 log::warn!(
@@ -661,8 +745,10 @@ pub fn post_type_resource_with_access(
             let mut ignite = def.to_ignite();
             ignite.name = name.clone();
             fields.push(ignite);
+            section = section.schema([name.clone()]);
             data.custom.push(CustomField { field: name, def });
         }
+        group_sections.push(section);
     }
 
     let column = |key: &str, label: &str, sortable: bool, searchable: bool| ColumnDef {
@@ -699,11 +785,67 @@ pub fn post_type_resource_with_access(
     } else {
         def.labels.singular_name.clone()
     };
+    let layout = editor_layout(&data, group_sections);
+    let has_title = data.title;
     let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data);
     status_tabs::add_status_tabs(&mut resource);
     resource.fields = fields;
     resource.columns = columns;
+    resource.form_layout = layout;
+    if has_title {
+        // WordPress's permalink follows the title until it is edited by hand.
+        resource = resource.slug_from(SLUG, TITLE);
+    }
     resource
+}
+
+/// The layout of a post type's edit form, as WordPress's editor with its settings sidebar
+/// (Filament's `->columns(3)` with a main group spanning 2 and a sidebar group spanning 1):
+///
+/// - the main column (two thirds): the title, the slug and the content in one card, the
+///   excerpt, and one card per field group (`group_sections`, headed by the group's title);
+/// - the sidebar (one third): Publish (status, date, password, sticky, author), the featured
+///   image, Page Attributes (parent, template, order), and one card per taxonomy with its
+///   field for new terms.
+///
+/// A field the type does not have is not on the form, and Ignite leaves out a card with none.
+fn editor_layout(data: &PostTypeData, group_sections: Vec<Section>) -> FormLayout {
+    let mut main = vec![
+        Section::make("").schema([TITLE, SLUG, CONTENT]),
+        Section::make("Excerpt").schema([EXCERPT]),
+    ];
+    main.extend(group_sections);
+    let mut sidebar = vec![
+        Section::make("Publish").schema([STATUS, DATE, PASSWORD, STICKY, AUTHOR]),
+        Section::make("").schema([FEATURED_MEDIA]),
+        Section::make("Page Attributes").schema([PARENT, TEMPLATE, MENU_ORDER]),
+    ];
+    for taxonomy in &data.taxonomies {
+        let mut section = Section::make("").schema([taxonomy.field.clone()]);
+        if let Some(new_field) = &taxonomy.new_field {
+            section = section.schema([new_field.clone()]);
+        }
+        sidebar.push(section);
+    }
+    FormLayout::new().columns(3).schema([
+        Group::make(main).column_span(2),
+        Group::make(sidebar).column_span(1),
+    ])
+}
+
+/// One taxonomy a post type's form shows; see [`taxonomies_of`].
+struct TaxonomyUse {
+    taxonomy: Taxonomy,
+    /// The field's label: "Categories".
+    label: String,
+    /// Whether the list shows a column of its terms.
+    column: bool,
+    /// The capability that assigns its terms.
+    assign_terms: String,
+    /// The capability that creates and edits its terms.
+    edit_terms: String,
+    /// The label of the new terms' field: "Add New Category".
+    add_new: String,
 }
 
 /// The taxonomies the type `def` uses, with their field label and whether the list shows them:
@@ -711,7 +853,7 @@ pub fn post_type_resource_with_access(
 /// `register_taxonomy` attaches it. A taxonomy whose `show_ui` is off, or that is not
 /// registered, is left out. Categories and tags have WordPress's labels and always show in the
 /// list; a custom taxonomy shows with `show_admin_column`.
-fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, String, bool, String)> {
+fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<TaxonomyUse> {
     let custom = registry.all_taxonomies();
     let mut names: Vec<&str> = def.taxonomies.iter().map(String::as_str).collect();
     for taxonomy in &custom {
@@ -722,19 +864,24 @@ fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, Strin
     let mut out = Vec::new();
     for name in names {
         match name {
-            // `assign_terms` of categories and tags is `edit_posts`.
-            "category" => out.push((
-                Taxonomy::CATEGORY,
-                "Categories".to_owned(),
-                true,
-                "edit_posts".to_owned(),
-            )),
-            "post_tag" => out.push((
-                Taxonomy::POST_TAG,
-                "Tags".to_owned(),
-                true,
-                "edit_posts".to_owned(),
-            )),
+            // `assign_terms` of categories and tags is `edit_posts`, and `edit_terms` is
+            // `manage_categories`, as `map_meta_cap` maps them.
+            "category" => out.push(TaxonomyUse {
+                taxonomy: Taxonomy::CATEGORY,
+                label: "Categories".to_owned(),
+                column: true,
+                assign_terms: "edit_posts".to_owned(),
+                edit_terms: "manage_categories".to_owned(),
+                add_new: "Add New Category".to_owned(),
+            }),
+            "post_tag" => out.push(TaxonomyUse {
+                taxonomy: Taxonomy::POST_TAG,
+                label: "Tags".to_owned(),
+                column: true,
+                assign_terms: "edit_posts".to_owned(),
+                edit_terms: "manage_categories".to_owned(),
+                add_new: "Add New Tags (separate tags with commas)".to_owned(),
+            }),
             _ => match custom.iter().find(|t| t.slug == name) {
                 Some(t) if t.effective_show_ui() => {
                     let label = if t.labels.name.is_empty() {
@@ -742,12 +889,35 @@ fn taxonomies_of(def: &PostTypeDef, registry: &Registry) -> Vec<(Taxonomy, Strin
                     } else {
                         t.labels.name.clone()
                     };
-                    out.push((
-                        t.to_taxonomy(),
+                    let singular = if t.labels.singular_name.is_empty() {
+                        label.clone()
+                    } else {
+                        t.labels.singular_name.clone()
+                    };
+                    let add_new = t
+                        .labels
+                        .add_new_item
+                        .clone()
+                        .unwrap_or_else(|| format!("Add New {singular}"));
+                    let add_new = if t.hierarchical {
+                        add_new
+                    } else {
+                        let separate = t
+                            .labels
+                            .separate_items_with_commas
+                            .clone()
+                            .unwrap_or_else(|| "separate them with commas".to_owned());
+                        format!("{add_new} ({separate})")
+                    };
+                    let caps = t.caps();
+                    out.push(TaxonomyUse {
+                        taxonomy: t.to_taxonomy(),
                         label,
-                        t.show_admin_column,
-                        t.caps().assign_terms,
-                    ));
+                        column: t.show_admin_column,
+                        assign_terms: caps.assign_terms,
+                        edit_terms: caps.edit_terms,
+                        add_new,
+                    });
                 }
                 Some(_) => {}
                 None => log::debug!(
@@ -1532,6 +1702,9 @@ impl PostTypeData {
             return published_posts_of(db, &self.post_type).await;
         }
         if let Some(taxonomy) = self.taxonomies.iter().find(|t| t.field == field) {
+            if taxonomy.taxonomy.hierarchical {
+                return terms_tree_of(db, &taxonomy.taxonomy.name).await;
+            }
             return terms_of(db, &taxonomy.taxonomy.name).await;
         }
         let Some(custom) = self.custom.iter().find(|c| c.field == field) else {
@@ -1660,6 +1833,94 @@ async fn terms_of(db: &Database, taxonomy: &str) -> Result<Vec<(String, String)>
         .filter(|(_, _, name)| name == taxonomy)
         .map(|(id, name, _)| (id.to_string(), name))
         .collect())
+}
+
+/// The terms of the hierarchical taxonomy named `taxonomy` as a tree, as WordPress's category
+/// checklist lists them: each term after its parent, siblings by name, a child's label indented
+/// by [`LEVEL_INDENT`] per level. A term whose parent is not among the choices is at the top.
+async fn terms_tree_of(db: &Database, taxonomy: &str) -> Result<Vec<(String, String)>, Error> {
+    let rows: Vec<(i64, String, String, Option<i64>)> = raw::fetch_all(
+        db,
+        "SELECT t.id, t.name, tt.taxonomy, tt.parent_id FROM term_taxonomy tt \
+         INNER JOIN terms t ON t.id = tt.term_id WHERE tt.taxonomy = ? \
+         ORDER BY t.name, t.id LIMIT ?",
+        &[taxonomy.into(), (MAX_OPTIONS as i64).into()],
+    )
+    .await?;
+    let terms: Vec<(i64, String, Option<i64>)> = rows
+        .into_iter()
+        // Exact comparison: MySQL compares text without case.
+        .filter(|(_, _, name, _)| name == taxonomy)
+        .map(|(id, name, _, parent)| (id, name, parent))
+        .collect();
+    Ok(term_tree(&terms))
+}
+
+/// `terms` (`term_id`, name, parent), in name order, as a tree; see [`terms_tree_of`].
+fn term_tree(terms: &[(i64, String, Option<i64>)]) -> Vec<(String, String)> {
+    let ids: HashSet<i64> = terms.iter().map(|(id, _, _)| *id).collect();
+    let mut children: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
+    for (index, (id, _, parent)) in terms.iter().enumerate() {
+        // A parent outside the choices (or the term itself) puts the term at the top.
+        let parent = parent.filter(|p| ids.contains(p) && p != id);
+        children.entry(parent).or_default().push(index);
+    }
+    let mut out = Vec::with_capacity(terms.len());
+    let mut placed = HashSet::new();
+    // Depth-first, without recursion; a loop in the parents is cut where it repeats.
+    let mut stack: Vec<(usize, usize)> = children
+        .get(&None)
+        .map(|top| top.iter().rev().map(|&i| (i, 0)).collect())
+        .unwrap_or_default();
+    loop {
+        while let Some((index, depth)) = stack.pop() {
+            if !placed.insert(index) {
+                continue;
+            }
+            let (id, name, _) = &terms[index];
+            out.push((
+                id.to_string(),
+                format!("{}{name}", LEVEL_INDENT.repeat(depth)),
+            ));
+            if let Some(kids) = children.get(&Some(*id)) {
+                stack.extend(kids.iter().rev().map(|&i| (i, depth + 1)));
+            }
+        }
+        // Terms only reachable through a loop of parents: listed at the top.
+        match (0..terms.len()).find(|i| !placed.contains(i)) {
+            Some(index) => stack.push((index, 0)),
+            None => break,
+        }
+    }
+    out
+}
+
+/// The `term_id`s of the terms of `taxonomy` named `names`, each created when the taxonomy has
+/// none of that name (at the top level), as WordPress's save creates the tags typed in the tags
+/// box and the Add New Category link creates a category. A name that cannot be a term (too long)
+/// is left out, logged.
+async fn term_ids_named(
+    db: &Database,
+    taxonomy: &Taxonomy,
+    names: &[String],
+) -> Result<Vec<i64>, Error> {
+    let mut ids = Vec::new();
+    for name in names {
+        match Term::create(db, taxonomy, NewTerm::new(name)).await {
+            Ok(term) => ids.push(term.term_id),
+            Err(TermError::Exists { term_taxonomy_id }) => {
+                if let Some(term) = Term::find(db, term_taxonomy_id).await? {
+                    ids.push(term.term_id);
+                }
+            }
+            Err(TermError::Database(e)) => return Err(e),
+            Err(e) => log::warn!(
+                "The new {} term `{name}` was not created: {e}.",
+                taxonomy.name
+            ),
+        }
+    }
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2014,6 +2275,21 @@ impl PostTypeData {
                 continue;
             };
             let mut ids = row_ids(value);
+            // The terms the form adds, created when the taxonomy has none of their name.
+            let names = taxonomy
+                .new_field
+                .as_ref()
+                .and_then(|field| input.get(field))
+                .and_then(text_of)
+                .map(|text| term_names(&text))
+                .unwrap_or_default();
+            if !names.is_empty() {
+                for id in term_ids_named(db, &taxonomy.taxonomy, &names).await? {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
             // `wp_insert_post`: a post with no category gets the default one.
             if ids.is_empty()
                 && post.post_type == "post"
@@ -2063,6 +2339,13 @@ impl PostTypeData {
         for taxonomy in &self.taxonomies {
             if !has_cap(caps, &taxonomy.assign_terms) {
                 input.remove(&taxonomy.field);
+            }
+            // A new category needs `edit_terms` (the Add New Category link's check); a typed tag
+            // needs `assign_terms`.
+            if let Some(new_field) = &taxonomy.new_field
+                && !(has_cap(caps, &taxonomy.assign_terms) && has_cap(caps, &taxonomy.create_terms))
+            {
+                input.remove(new_field);
             }
         }
         if !publish {
@@ -2622,6 +2905,108 @@ mod tests {
                 .unwrap()
                 .contains("<script")
         );
+    }
+
+    #[test]
+    fn hierarchical_choices_are_a_tree_indented_by_level() {
+        let terms = vec![
+            (3, "Apples".to_owned(), Some(1)),
+            (1, "Fruit".to_owned(), None),
+            (4, "Loop".to_owned(), Some(4)),
+            (2, "Red apples".to_owned(), Some(3)),
+            (5, "Zoo".to_owned(), Some(99)),
+        ];
+        let tree: Vec<(String, String)> = term_tree(&terms);
+        let indent = LEVEL_INDENT;
+        assert_eq!(
+            tree,
+            [
+                ("1".to_owned(), "Fruit".to_owned()),
+                ("3".to_owned(), format!("{indent}Apples")),
+                ("2".to_owned(), format!("{indent}{indent}Red apples")),
+                ("4".to_owned(), "Loop".to_owned()),
+                ("5".to_owned(), "Zoo".to_owned()),
+            ]
+        );
+        // Two terms that are each other's parent are both listed.
+        let looped = vec![(1, "A".to_owned(), Some(2)), (2, "B".to_owned(), Some(1))];
+        assert_eq!(term_tree(&looped).len(), 2);
+    }
+
+    #[test]
+    fn new_term_names_are_split_by_commas() {
+        assert_eq!(
+            term_names(" News, sports ,,News, Sports , Rust"),
+            ["News", "sports", "Rust"]
+        );
+        assert!(term_names(" , ").is_empty());
+        assert_eq!(new_terms_field_name("category", true), "new_category");
+        assert_eq!(
+            new_terms_field_name("post_tag", false),
+            "tax_input_post_tag"
+        );
+        assert_eq!(new_terms_field_name("book-genre", true), "new_book_genre");
+    }
+
+    #[test]
+    fn the_post_editor_has_a_main_column_and_a_sidebar() {
+        use ignite_core::{ColumnSpan, Component};
+
+        let registry = Registry::default();
+        let [post, page] = builtin_post_types();
+        for def in [&post, &page] {
+            let resource = post_type_resource(def, &registry);
+            let layout = &resource.form_layout;
+            assert_eq!(layout.column_count(), Some(3));
+            let columns: Vec<(ColumnSpan, Vec<String>)> = layout
+                .components()
+                .iter()
+                .map(|component| {
+                    let Component::Group(group) = component else {
+                        panic!("a top-level component that is not a column");
+                    };
+                    let fields = group
+                        .components()
+                        .iter()
+                        .flat_map(|inner| match inner {
+                            Component::Section(section) => section.fields().to_vec(),
+                            _ => Vec::new(),
+                        })
+                        .collect();
+                    (group.get_column_span(), fields)
+                })
+                .collect();
+            assert_eq!(columns.len(), 2);
+            assert_eq!(columns[0].0, ColumnSpan::Columns(2));
+            assert_eq!(columns[1].0, ColumnSpan::Columns(1));
+            for name in [TITLE, SLUG, CONTENT, EXCERPT] {
+                assert!(columns[0].1.iter().any(|f| f == name), "{name}");
+            }
+            for name in [AUTHOR, FEATURED_MEDIA, STATUS, DATE, PASSWORD] {
+                assert!(columns[1].1.iter().any(|f| f == name), "{name}");
+            }
+            // Every field of the form is placed.
+            for field in &resource.fields {
+                assert!(
+                    columns
+                        .iter()
+                        .any(|(_, fields)| fields.contains(&field.name)),
+                    "{} is not placed",
+                    field.name
+                );
+            }
+            assert_eq!(resource.conditions.slug_source(SLUG), Some(TITLE));
+        }
+        let resource = post_type_resource(&post, &registry);
+        let names: Vec<&str> = resource.fields.iter().map(|f| f.name.as_str()).collect();
+        for name in [
+            "tax_category",
+            "new_category",
+            "tax_post_tag",
+            "tax_input_post_tag",
+        ] {
+            assert!(names.contains(&name), "{name}");
+        }
     }
 
     #[test]

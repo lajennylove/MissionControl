@@ -34,6 +34,7 @@
   var tinymceBase = new URL('tinymce', scriptUrl).href;
   var stylesheet = new URL('../css/editor.css', scriptUrl).href + query;
   var mediaScript = new URL('media.js', scriptUrl).href + query;
+  var termsScript = new URL('terms.js', scriptUrl).href + query;
 
   /** The key under which the last tab used is remembered, as WordPress's `editor` setting. */
   var MODE_KEY = 'mc-editor-mode';
@@ -431,6 +432,11 @@
       self.instance = instances[0] || null;
       if (self.instance) {
         self.keepLoaded();
+        // The Visual tab's changes reach the textarea as they are made, so the panel's
+        // unsaved changes alert sees them.
+        self.instance.on('change', function () {
+          self.save();
+        });
       }
       return self.instance;
     });
@@ -605,6 +611,10 @@
   }
 
   function addStylesheet() {
+    if (api.stylesheetAdded) {
+      return;
+    }
+    api.stylesheetAdded = true;
     var link = document.createElement('link');
     link.rel = 'stylesheet';
     link.href = stylesheet;
@@ -717,8 +727,43 @@
     );
   }
 
+  /**
+   * Writes every Visual tab into its textarea: before the panel's unsaved changes alert reads
+   * the form (a link followed, the page closed or reloaded), so a change TinyMCE has not
+   * reported yet is not missed. These listeners capture, so they run before the panel's.
+   */
+  function saveAll() {
+    Object.keys(editors).forEach(function (id) {
+      editors[id].save();
+    });
+  }
+
+  /**
+   * Loads the category checklist and the tags box (`terms.js`) when the form has a taxonomy's
+   * field for new terms (`new_<taxonomy>` or `tax_input_<taxonomy>`).
+   */
+  function loadTermBoxes() {
+    if (api.termBoxes || !document.querySelector(
+      '[data-ignite-field^="new_"], [data-ignite-field^="tax_input_"]'
+    )) {
+      return;
+    }
+    addStylesheet();
+    var tag = document.createElement('script');
+    tag.src = termsScript;
+    tag.async = true;
+    document.head.appendChild(tag);
+  }
+
   function start() {
     startLock();
+    loadTermBoxes();
+    document.addEventListener('click', function (event) {
+      if (event.target.closest && event.target.closest('a[href]')) {
+        saveAll();
+      }
+    }, true);
+    window.addEventListener('beforeunload', saveAll, true);
     var areas = document.querySelectorAll('textarea[data-ignite-editor="wysiwyg"]');
     if (!areas.length) {
       return;

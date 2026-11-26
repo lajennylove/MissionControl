@@ -12,6 +12,8 @@
 //!   loads TinyMCE and turns each `textarea[data-ignite-editor="wysiwyg"]` into the editor.
 //! - `media.js`, the Add Media picker (Task 6.4), which `editor.js` loads: it uploads a file or
 //!   picks one from the media library, and inserts it as WordPress's editor does.
+//! - `terms.js`, the post editor's category checklist and tags box, which `editor.js` loads
+//!   when the form has a taxonomy's field for new terms (see `mission_control_core::types`).
 //! - `editor.css`, the tabs, the Add Media button, the picker and the media library's upload
 //!   page.
 //! - `tinymce/`, the parts of TinyMCE 7.9.3 (GPL-2.0-or-later, see `NOTICE`) the toolbar uses,
@@ -90,6 +92,7 @@ macro_rules! bundle {
 static BUNDLE: &[Asset] = bundle! {
     "js/editor.js" => "editor.js",
     "js/media.js" => "media.js",
+    "js/terms.js" => "terms.js",
     "js/media-grid.js" => "grid.js",
     "css/editor.css" => "editor.css",
     "js/tinymce/tinymce.min.js" => "tinymce/tinymce.min.js",
@@ -258,6 +261,7 @@ mod tests {
     #[test]
     fn only_the_files_of_the_bundle_are_found() {
         assert!(find(&["js", "editor.js"]).is_some());
+        assert!(find(&["js", "terms.js"]).is_some());
         assert!(find(&["js", "tinymce", "tinymce.min.js"]).is_some());
         assert!(find(&["images", "mission-control-mark.webp"]).is_some());
         for refused in [

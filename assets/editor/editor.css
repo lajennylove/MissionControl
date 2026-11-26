@@ -381,3 +381,74 @@
 .mc-grid-remove {
   color: #b32d2e;
 }
+
+/* The category checklist and the tags box on the post editor's sidebar (terms.js). */
+.mc-terms {
+  display: grid;
+  gap: 0.5rem;
+}
+.mc-terms-checklist {
+  max-height: 16rem;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  list-style: none;
+  border: 1px solid #c3c4c7;
+  border-radius: 4px;
+}
+.mc-terms-checklist ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  list-style: none;
+}
+.mc-terms-checklist li {
+  margin: 0.25rem 0;
+}
+.mc-terms-checklist label {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.mc-terms-toggle {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #2271b1;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.mc-terms-add {
+  display: flex;
+  gap: 0.5rem;
+}
+.mc-terms-add[hidden] {
+  display: none;
+}
+.mc-terms-add .ig-input {
+  flex: 1;
+  min-width: 0;
+}
+.mc-terms-hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-style: italic;
+}
+.mc-terms-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mc-terms-remove {
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 1px solid #8c8f94;
+  border-radius: 50%;
+  background: none;
+  line-height: 1;
+  cursor: pointer;
+}

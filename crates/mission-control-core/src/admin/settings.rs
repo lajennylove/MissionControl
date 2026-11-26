@@ -57,8 +57,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ignite_core::{
-    ColumnDef, FieldDef, FieldKindDef, ListQuery, Page, Row, RuntimeData, RuntimeError,
-    RuntimeFuture, RuntimeResource,
+    ColumnDef, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page, Row, RuntimeData,
+    RuntimeError, RuntimeFuture, RuntimeResource, Section,
 };
 use orbit_orm::{Database, Error, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -561,8 +561,128 @@ pub struct SettingsServices {
     pub kses: Option<KsesLimiter>,
 }
 
-/// The Ignite runtime resource of `screen`: its fields, one column, and [`SettingsData`] over
-/// `options`.
+/// The layout of `screen`'s form: two equal columns (the owner's rule for settings screens,
+/// Filament's `->columns(2)` with two groups spanning one column each), each a stack of cards
+/// headed by WordPress's section titles. A screen with one field has the left column only.
+pub fn settings_layout(screen: SettingsScreen) -> FormLayout {
+    let section = |heading: &str, fields: &[&str]| Section::make(heading).schema(fields.to_vec());
+    let (left, right): (Vec<Section>, Vec<Section>) = match screen {
+        SettingsScreen::General => (
+            vec![section(
+                "Site",
+                &[
+                    "blogname",
+                    "blogdescription",
+                    "siteurl",
+                    "home",
+                    "admin_email",
+                ],
+            )],
+            vec![section(
+                "Date and time",
+                &[
+                    "timezone_string",
+                    "date_format",
+                    "date_format_custom",
+                    "time_format",
+                    "time_format_custom",
+                    "start_of_week",
+                ],
+            )],
+        ),
+        SettingsScreen::Writing => (vec![section("", &["default_category"])], Vec::new()),
+        SettingsScreen::Reading => (
+            vec![section(
+                "Homepage",
+                &[
+                    "show_on_front",
+                    "page_on_front",
+                    "page_for_posts",
+                    "posts_per_page",
+                ],
+            )],
+            vec![
+                section("Feeds", &["posts_per_rss", "rss_use_excerpt"]),
+                section("Search engine visibility", &["blog_public"]),
+            ],
+        ),
+        SettingsScreen::Discussion => (
+            vec![
+                section(
+                    "Default post settings",
+                    &[
+                        "default_pingback_flag",
+                        "default_ping_status",
+                        "default_comment_status",
+                    ],
+                ),
+                section(
+                    "Other comment settings",
+                    &[
+                        "require_name_email",
+                        "comment_registration",
+                        "close_comments_for_old_posts",
+                        "close_comments_days_old",
+                        "show_comments_cookies_opt_in",
+                        "thread_comments",
+                        "thread_comments_depth",
+                        "page_comments",
+                        "comments_per_page",
+                        "default_comments_page",
+                        "comment_order",
+                    ],
+                ),
+            ],
+            vec![
+                section(
+                    "Email me whenever",
+                    &["comments_notify", "moderation_notify"],
+                ),
+                section(
+                    "Before a comment appears",
+                    &["comment_moderation", "comment_previously_approved"],
+                ),
+                section(
+                    "Comment Moderation",
+                    &["comment_max_links", "moderation_keys"],
+                ),
+                section("Disallowed Comment Keys", &["disallowed_keys"]),
+                section(
+                    "Avatars",
+                    &["show_avatars", "avatar_rating", "avatar_default"],
+                ),
+            ],
+        ),
+        SettingsScreen::Media => (
+            vec![section(
+                "Thumbnail size",
+                &["thumbnail_size_w", "thumbnail_size_h", "thumbnail_crop"],
+            )],
+            vec![
+                section("Medium size", &["medium_size_w", "medium_size_h"]),
+                section("Large size", &["large_size_w", "large_size_h"]),
+            ],
+        ),
+        SettingsScreen::Permalink => (
+            vec![section(
+                "Common Settings",
+                &["permalink_selection", "permalink_structure"],
+            )],
+            vec![section("Optional", &["category_base", "tag_base"])],
+        ),
+        SettingsScreen::Privacy => (
+            vec![section("", &["wp_page_for_privacy_policy"])],
+            Vec::new(),
+        ),
+    };
+    FormLayout::new().columns(2).schema([
+        Group::make(left).column_span(1),
+        Group::make(right).column_span(1),
+    ])
+}
+
+/// The Ignite runtime resource of `screen`: its fields in [`settings_layout`]'s two columns,
+/// and [`SettingsData`] over `options`.
 pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> RuntimeResource {
     let mut resource = RuntimeResource::new(
         screen.slug(),
@@ -571,6 +691,7 @@ pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> 
         SettingsData { screen, services },
     );
     resource.fields = settings_fields(screen);
+    resource.form_layout = settings_layout(screen);
     resource.columns = vec![ColumnDef {
         key: COL_TITLE.to_owned(),
         label: "Settings".to_owned(),
@@ -1373,6 +1494,40 @@ impl RuntimeData for SettingsData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_screen_has_two_equal_columns_that_place_every_field_once() {
+        use ignite_core::{ColumnSpan, Component};
+
+        for screen in SettingsScreen::ALL {
+            let layout = settings_layout(screen);
+            assert_eq!(layout.column_count(), Some(2), "{screen:?}");
+            let mut placed = Vec::new();
+            for component in layout.components() {
+                let Component::Group(group) = component else {
+                    panic!("{screen:?}: a top-level component that is not a column");
+                };
+                assert_eq!(
+                    group.get_column_span(),
+                    ColumnSpan::Columns(1),
+                    "{screen:?}"
+                );
+                for inner in group.components() {
+                    let Component::Section(section) = inner else {
+                        panic!("{screen:?}: a column holds a component that is not a card");
+                    };
+                    placed.extend(section.fields().iter().cloned());
+                }
+            }
+            let mut fields: Vec<String> = settings_fields(screen)
+                .into_iter()
+                .map(|f| f.name)
+                .collect();
+            fields.sort();
+            placed.sort();
+            assert_eq!(placed, fields, "{screen:?}");
+        }
+    }
 
     #[test]
     fn screens_have_wordpresss_slugs_and_valid_field_names() {

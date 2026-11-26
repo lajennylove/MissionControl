@@ -38,8 +38,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ignite_core::{
-    ColumnDef, Direction, FieldDef, FieldKindDef, ListQuery, Page, Row, RuntimeData, RuntimeError,
-    RuntimeFuture, RuntimeResource,
+    ColumnDef, Direction, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page, Row,
+    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -223,6 +223,18 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
         },
     );
     resource.fields = fields;
+    // Two equal columns, as the settings screens: the menu's name and display locations
+    // (WordPress's Menu Settings) on the left, its items (Menu Structure) on the right.
+    let settings: Vec<String> = resource
+        .fields
+        .iter()
+        .filter(|f| f.name == NAME || f.name.starts_with(LOCATION_PREFIX))
+        .map(|f| f.name.clone())
+        .collect();
+    resource.form_layout = FormLayout::new().columns(2).schema([
+        Group::make([Section::make("Menu Settings").schema(settings)]).column_span(1),
+        Group::make([Section::make("Menu Structure").schema([ITEMS])]).column_span(1),
+    ]);
     resource.columns = vec![
         column(COL_NAME, "Name", true, true),
         column(COL_LOCATIONS, "Theme Locations", false, false),

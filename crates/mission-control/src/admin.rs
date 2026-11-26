@@ -276,7 +276,9 @@ pub(crate) async fn mount_panel(
         .brand_logo(BRAND_LOGO)
         .brand_logo_height(BRAND_LOGO_HEIGHT)
         .favicon(FAVICON)
-        .navigation_groups(navigation::GROUPS);
+        .navigation_groups(navigation::GROUPS)
+        // Ask before a changed form is left unsaved (posts, pages, settings, menus).
+        .unsaved_changes_alerts();
     ignite_core::register_editor(editor_script_url());
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {
         log::error!("The admin could not reserve `{INSTALL_SLUG}`: {e}");
