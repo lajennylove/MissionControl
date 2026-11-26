@@ -21,7 +21,7 @@ mission-control-core = { path = "../mission-control-core" }
 # The admin panel, whose migrations (the `users`, roles and sessions tables) the installer runs
 # before the core ones (MIT). `sqlite` and `postgres` add the drivers beside MySQL and MariaDB.
 # Built on Orbit 0.4, the same Orbit as Mission Control, so its `Database` is Mission Control's.
-ignite-panel = { version = "0.6.3", features = ["postgres", "sqlite"] }
+ignite-panel = { version = "0.6.4", features = ["postgres", "sqlite"] }
 log = "0.4"
 # Opens the database the installer's database step tests, and runs the core migrations.
 orbit-orm.workspace = true
