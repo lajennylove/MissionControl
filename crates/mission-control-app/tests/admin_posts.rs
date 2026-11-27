@@ -17,7 +17,7 @@ use mission_control::{AppOptions, rocket_with_options};
 use mission_control_app::install::run::run_migrations;
 use mission_control_core::config::{Config, Environment, TrustedProxies};
 use mission_control_core::content::{
-    NewPost, Post, PostStatus, get_post_meta, set_option, set_post_meta,
+    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, get_post_meta, set_option, set_post_meta,
 };
 use mission_control_core::migrations::migrator;
 use mission_control_testing::{ScratchDatabase, create_users_table, scratch_database};
@@ -1101,9 +1101,28 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
     assert!(body.contains("Title is required."), "{body}");
     assert_eq!(count().await, before, "a refused save creates no post");
 
+    // The default category, as the installer creates it.
+    let uncategorized = Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("Uncategorized"))
+        .await
+        .expect("creates the default category");
+    set_option(db, "default_category", &json!(uncategorized.term_id))
+        .await
+        .unwrap();
+
     // The first save creates the post, owned by the editor, a Draft when no status is chosen,
-    // and opens its edit form; the list shows it.
+    // and opens its edit form; the list shows it. Saved with no category, it gets the default
+    // one, as `wp_insert_post` gives it.
     let id = new_post(client, "post", &[("title", "Written in the admin")]).await;
+    let categories = find(db, id)
+        .await
+        .unwrap()
+        .terms(db, &Taxonomy::CATEGORY)
+        .await
+        .unwrap();
+    assert_eq!(
+        categories.iter().map(|t| t.term_id).collect::<Vec<_>>(),
+        [uncategorized.term_id]
+    );
     assert_eq!(count().await, before + 1);
     let created = find(db, id).await.unwrap();
     assert_eq!(created.status, PostStatus::Draft);

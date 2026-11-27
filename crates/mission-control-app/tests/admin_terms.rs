@@ -430,7 +430,8 @@ async fn slug_unique(client: &Client, db: &Database) {
     assert!(tag_by_slug(db, "rust-edition").await.is_some());
 }
 
-/// The default category cannot be deleted, as WordPress keeps "Uncategorized".
+/// The default category cannot be deleted, as WordPress keeps "Uncategorized": the request is
+/// refused before anything changes, with the message.
 async fn default_category_kept(client: &Client, db: &Database, uncategorized: &Term) {
     let (status, _, body) = post(
         client,
@@ -439,6 +440,10 @@ async fn default_category_kept(client: &Client, db: &Database, uncategorized: &T
     )
     .await;
     assert_eq!(status, Status::Forbidden, "{body}");
+    assert!(
+        body.contains("The default category cannot be deleted."),
+        "{body}"
+    );
     assert!(
         Term::find(db, uncategorized.term_taxonomy_id)
             .await

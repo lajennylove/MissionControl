@@ -1234,6 +1234,15 @@ fn text_of(value: &Value) -> Option<String> {
 }
 
 /// The ids a relationship value holds: its JSON list (as text) of ids.
+/// The `default_category` option's term id, or `None` when it is unset or not an id.
+async fn default_category(db: &Database) -> Result<Option<i64>, Error> {
+    match get_option(db, "default_category").await {
+        Ok(value) => Ok(value.as_ref().and_then(id_of)),
+        Err(MetaError::InvalidJson(_)) => Ok(None),
+        Err(MetaError::Database(e)) => Err(e),
+    }
+}
+
 fn row_ids(value: &Value) -> Vec<i64> {
     let list = match value {
         Value::String(text) => serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
@@ -2284,7 +2293,19 @@ impl PostTypeData {
             }
         }
         for taxonomy in &self.taxonomies {
+            // `wp_insert_post`: a post (not an auto-draft) with no category gets the default.
+            let gives_default = post.post_type == "post"
+                && taxonomy.taxonomy.name == Taxonomy::CATEGORY.name
+                && post.status != PostStatus::AutoDraft;
             let Some(value) = input.get(&taxonomy.field) else {
+                // A form that sends no categories keeps the post's own; a post that has none
+                // gets the default one.
+                if gives_default
+                    && post.terms(db, &Taxonomy::CATEGORY).await?.is_empty()
+                    && let Some(default) = default_category(db).await?
+                {
+                    set_post_terms(db, post, &taxonomy.taxonomy, &[default]).await?;
+                }
                 continue;
             };
             let mut ids = row_ids(value);
@@ -2303,18 +2324,8 @@ impl PostTypeData {
                     }
                 }
             }
-            // `wp_insert_post`: a post with no category gets the default one.
-            if ids.is_empty()
-                && post.post_type == "post"
-                && taxonomy.taxonomy.name == Taxonomy::CATEGORY.name
-                && post.status != PostStatus::AutoDraft
-            {
-                let default = match get_option(db, "default_category").await {
-                    Ok(value) => value.as_ref().and_then(id_of),
-                    Err(MetaError::InvalidJson(_)) => None,
-                    Err(MetaError::Database(e)) => return Err(e),
-                };
-                ids.extend(default);
+            if ids.is_empty() && gives_default {
+                ids.extend(default_category(db).await?);
             }
             set_post_terms(db, post, &taxonomy.taxonomy, &ids).await?;
         }

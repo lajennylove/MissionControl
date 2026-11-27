@@ -114,6 +114,57 @@ fn make_slug_transliterates_non_ascii() {
     assert_eq!(make_slug("Ünïcode 日本"), "unicode-ri-ben");
 }
 
+/// The examples WordPress's `sanitize_title` gives (`remove_accents`, then
+/// `sanitize_title_with_dashes`).
+#[test]
+fn make_slug_gives_wordpresss_examples() {
+    for (title, slug) in [
+        ("Hello, World!", "hello-world"),
+        ("Ünïcödé Tëst", "unicode-test"),
+        ("  multiple   spaces  ", "multiple-spaces"),
+        ("Crème Brûlée", "creme-brulee"),
+        ("a -- b", "a-b"),
+    ] {
+        assert_eq!(make_slug(title), slug, "{title:?}");
+    }
+}
+
+#[tokio::test]
+async fn published_pages_get_a_number_and_drafts_keep_their_slug() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let page = |title: &str, status: PostStatus| NewPost {
+        status,
+        title: title.to_owned(),
+        ..NewPost::new(author, "page")
+    };
+    let first = Post::create(db, page("About", PostStatus::Publish))
+        .await
+        .unwrap();
+    let second = Post::create(db, page("About", PostStatus::Publish))
+        .await
+        .unwrap();
+    assert_eq!(
+        (first.slug.as_str(), second.slug.as_str()),
+        ("about", "about-2")
+    );
+    // A draft given the taken slug keeps it until it is published.
+    let mut draft = Post::create(
+        db,
+        NewPost {
+            slug: "About".to_owned(),
+            ..page("About", PostStatus::Draft)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(draft.slug, "about");
+    draft.status = PostStatus::Publish;
+    draft.save(db).await.unwrap();
+    assert_eq!(draft.slug, "about-3");
+}
+
 #[test]
 fn make_slug_falls_back_to_code_points_when_nothing_transliterates() {
     // Private-use characters have no transliteration.
