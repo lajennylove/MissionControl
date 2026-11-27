@@ -1008,11 +1008,14 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     assert!(!wordpress.contains("ig-nav-link"), "{wordpress}");
     assert!(!wordpress.contains("aria-label=\"Main\""), "{wordpress}");
     // The groups are separated, without their headings.
-    assert!(!wordpress.contains(">Content<"), "{wordpress}");
+    let menu_start = wordpress.find("<ul id=\"adminmenu\">").unwrap();
+    let menu = &wordpress[menu_start..];
+    let menu = &menu[..menu.find("</div>\n</div>").unwrap()];
+    assert!(!menu.contains(">Content<"), "{menu}");
     // On a child's page its parent's submenu is open, with the child current.
     let (_, categories) = get(client, "/mc-admin/category").await;
     assert!(
-        categories.contains("<li class=\"menu-top current wp-has-current-submenu\"><a class=\"menu-top\" href=\"/mc-admin/post\">"),
+        categories.contains("<li class=\"wp-has-submenu wp-has-current-submenu wp-menu-open menu-top current\"><a class=\"wp-has-submenu wp-has-current-submenu wp-menu-open menu-top\" href=\"/mc-admin/post\">"),
         "{categories}"
     );
     assert!(

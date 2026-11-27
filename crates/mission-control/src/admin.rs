@@ -96,13 +96,13 @@ use std::sync::{Arc, OnceLock};
 use ignite_panel::authz::{self, AuthzError};
 use ignite_panel::{AdminUser, Ignite, NavigationItem, ignite_core};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
-use mission_control_core::admin::navigation;
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
     TERM_SCREENS, attachment_post_type, authorize_menus_screen, authorize_post_screen,
     authorize_settings_screen, authorize_term_screen, may_use_post_screens,
     register_nav_menus_resource, register_settings_resources, register_term_resources,
 };
+use mission_control_core::admin::{dashboard, navigation};
 use mission_control_core::config::Config;
 use mission_control_core::media::ImageSizes;
 use mission_control_core::rest::KsesLimiter;
@@ -285,6 +285,9 @@ pub(crate) async fn mount_panel(
             .group(navigation::SITE)
             .sort(navigation::SETTINGS)
             .icon(navigation::SETTINGS_ICON)])
+        // WordPress's dashboard: At a Glance, then Activity's recently published posts.
+        .widget(dashboard::AtAGlance)
+        .widget(dashboard::Activity)
         // Ask before a changed form is left unsaved (posts, pages, settings, menus).
         .unsaved_changes_alerts();
     ignite_core::register_editor(editor_script_url());

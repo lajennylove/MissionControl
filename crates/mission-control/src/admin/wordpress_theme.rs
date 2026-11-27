@@ -10,6 +10,8 @@
 //!   own. They post the same fields to the same actions as the panel's pages. A signed-out page
 //!   renders in the site's default admin theme (see `ignite_panel::theme`), so they show while
 //!   this theme is the site's default.
+//! - Its own dashboard: the panel's cards as WordPress's dashboard boxes, and WordPress's Quick
+//!   Draft box, whose form saves a draft through the Posts screen's create.
 //! - WordPress's Dashicons for the menu, with the Dashicons stylesheet loaded only while this
 //!   theme is the page's theme.
 
@@ -53,8 +55,9 @@ const TOP_BAR: &str = "themes.wordpress.partials.topbar";
 /// The flash message, as an admin notice.
 const FLASH: &str = "themes.wordpress.partials.flash";
 
-/// The theme's views by name, built into the binary. `login`, `forgot` and `reset` replace the
-/// panel's pages of those names.
+/// The theme's views by name, built into the binary. `dashboard` (WordPress's dashboard boxes
+/// and its Quick Draft form), `login`, `forgot` and `reset` replace the panel's pages of those
+/// names.
 const VIEWS: &[(&str, &str)] = &[
     (
         LAYOUT,
@@ -75,6 +78,10 @@ const VIEWS: &[(&str, &str)] = &[
     (
         FLASH,
         include_str!("../../views/admin/wordpress/partials/flash.propel"),
+    ),
+    (
+        "dashboard",
+        include_str!("../../views/admin/wordpress/dashboard.propel"),
     ),
     (
         "login",

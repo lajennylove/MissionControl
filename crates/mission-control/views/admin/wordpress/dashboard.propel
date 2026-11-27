@@ -1,0 +1,81 @@
+{{-- The WordPress admin theme's dashboard (`wp-admin/index.php`): the panel's dashboard with WordPress's boxes. Each card of the panel's widgets (At a Glance's counts, Activity's recently published posts) is a box with its title, its value and its description; then WordPress's "Quick Draft" box (`wp_dashboard_quick_press`), whose form saves a draft through the Posts screen's create, the normal post save path. --}}@extends('ignite::layouts.app')
+
+@section('ignite_brand_name'){{ $brand.name }}@endsection
+
+@section('ignite_favicon')@include('ignite::partials.favicon')@endsection
+
+@section('ignite_stylesheets')@include('ignite::partials.stylesheets')@endsection
+
+@section('ignite_head')@if (theme_style)<style>{!! $theme_style !!}</style>@endif@endsection
+
+@section('ignite_html')data-theme="{{ $theme }}"@endsection
+
+@section('ignite_aside')
+  @include('ignite::partials.nav')
+@endsection
+
+@section('ignite_column')ig-with-sidebar@endsection
+
+@section('ignite_bar')
+  <header class="sticky top-0 z-20 flex items-center border-b border-border bg-page px-5 py-3">
+    @include('ignite::partials.topbar')
+  </header>
+@endsection
+
+@section('ignite_flash')
+  @include('ignite::partials.flash')
+@endsection
+
+@section('title')
+  {{ $title }}
+@endsection
+
+@section('content')
+<style>
+#dashboard-widgets { display: grid; gap: 20px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); margin-top: 10px; }
+#dashboard-widgets .postbox { background: #fff; border: 1px solid #c3c4c7; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04); min-width: 0; }
+#dashboard-widgets .postbox h2 { border-bottom: 1px solid #c3c4c7; color: #1d2327; font-size: 14px; font-weight: 600; line-height: 1.4; margin: 0; padding: 8px 12px; }
+#dashboard-widgets .inside { margin: 0; padding: 0 12px 12px; }
+#dashboard-widgets .inside p { margin: 12px 0 0; }
+#dashboard-widgets .mc-count { color: #1d2327; font-size: 21px; overflow-wrap: anywhere; }
+#dashboard_quick_press { grid-column: 1 / -1; max-width: 640px; }
+#dashboard_quick_press label { display: block; margin: 12px 0 4px; }
+#dashboard_quick_press input[type="text"], #dashboard_quick_press textarea { border: 1px solid #8c8f94; border-radius: 4px; box-sizing: border-box; padding: 0 8px; width: 100%; }
+#dashboard_quick_press input[type="text"] { min-height: 30px; }
+#dashboard_quick_press textarea { padding: 6px 8px; }
+#dashboard_quick_press .submit { margin: 12px 0 0; }
+#dashboard_quick_press .button-primary { background: #2271b1; border: 1px solid #2271b1; border-radius: 3px; color: #fff; cursor: pointer; font-size: 13px; line-height: 2.15; min-height: 30px; padding: 0 10px; }
+</style>
+<h1>{{ $title }}</h1>
+<div id="dashboard-widgets-wrap">
+<div id="dashboard-widgets" class="metabox-holder">
+@forelse (card in cards)<div class="postbox">
+<h2>{{ $card.label }}</h2>
+<div class="inside"><p class="mc-count">{{ $card.value }}</p>@if (card.has_description)<p>{{ $card.description }}</p>@endif</div>
+</div>
+@empty<p>Nothing to show yet.</p>
+@endforelse<div id="dashboard_quick_press" class="postbox">
+<h2>Quick Draft</h2>
+<div class="inside">
+<form name="post" action="{{ $home_url }}/post" method="post" id="quick-press" class="initial-form">
+<input type="hidden" name="_token" value="{{ $csrf_token }}">
+<label for="title">Title</label>
+<input type="text" name="title" id="title" autocomplete="off">
+<label for="content">Content</label>
+<textarea name="content" id="content" placeholder="What&#8217;s on your mind?" class="mceEditor" rows="3" cols="15" autocomplete="off"></textarea>
+<p class="submit"><input type="submit" name="save" id="save-post" class="button button-primary" value="Save Draft"></p>
+</form>
+</div>
+</div>
+</div>
+</div>
+@foreach (table in tables)
+<div class="postbox">
+<h2>{{ $table.title }}</h2>
+<table class="widefat striped">
+<thead><tr>@foreach (head in table.headers)<th>{{ $head.label }}</th>@endforeach</tr></thead>
+<tbody>@forelse (row in table.rows)<tr>@foreach (cell in row.cells)<td>{{ $cell.text }}</td>@endforeach</tr>@empty<tr><td>No records yet.</td></tr>@endforelse</tbody>
+</table>
+</div>
+@endforeach
+@endsection
