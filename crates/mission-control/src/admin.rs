@@ -71,7 +71,8 @@
 //!   `manage_options` (`manage_privacy_options` for Privacy) and refuses New, Ignite's create
 //!   and Delete with WordPress's message for a page it does not have.
 //! - The Menus screen (Task 6.5, Ruling R133) at `/mc-admin/nav-menus`: the `nav_menu` terms,
-//!   their theme locations and their items; the fairing checks `edit_theme_options`.
+//!   their theme locations and their items; the fairing checks `edit_theme_options`. Its forms
+//!   get WordPress's menu builder (the `menus` submodule).
 //! - The Categories and Tags screens (WordPress's Posts > Categories and Posts > Tags) at
 //!   `/mc-admin/category` and `/mc-admin/post_tag` (see `mission_control_core::admin::terms`):
 //!   their policy checks the taxonomy's `manage_terms`, `edit_terms`, `edit_term` and
@@ -126,6 +127,7 @@ use crate::rest::auth::AuthSettings;
 
 mod locks;
 mod media;
+mod menus;
 mod wordpress_theme;
 
 /// Where the admin is mounted (Ruling R120).
@@ -325,7 +327,9 @@ pub(crate) async fn mount_panel(
     let resources = PostTypeResources::new(Arc::clone(&registry))
         .with_page_templates(theme.page_templates())
         .with_access(access);
-    let menus = match register_nav_menus_resource(theme, menu_object_types(&resources, &registry)) {
+    let menu_types = menu_object_types(&resources, &registry);
+    let menu_sources = menus::menu_sources(&menu_types, &resources, &registry);
+    let menus = match register_nav_menus_resource(theme, menu_types) {
         Ok(()) => true,
         Err(e) => {
             log::error!("The Menus screen is not served by this app: {e}");
@@ -387,7 +391,11 @@ pub(crate) async fn mount_panel(
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
+        .attach(menus::MenuBuilderViews)
         .mount(ADMIN_PATH, locks::routes())
+        .mount(ADMIN_PATH, menus::routes())
+        .mount("/", menus::include_routes())
+        .manage(menu_sources)
         .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))

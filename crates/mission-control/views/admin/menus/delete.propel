@@ -1,0 +1,5 @@
+{{-- nav-menus.php's "Delete Menu", under the menu's form: Ignite's Delete of the menu. The menu builder's script asks first, with nav-menu.js's warning (`menus.deleteWarning`). --}}
+<form method="post" action="{{ $delete_url }}" class="mc-menu-delete" data-confirm="You are about to permanently delete this menu. 'Cancel' to stop, 'OK' to delete.">
+<input type="hidden" name="_token" value="{{ $token }}">
+<button type="submit" class="mc-menu-delete-link">Delete Menu</button>
+</form>

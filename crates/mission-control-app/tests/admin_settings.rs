@@ -783,6 +783,9 @@ async fn menus(client: &Client, db: &Database, author: i64) {
     assert_eq!(status, Status::Ok);
     assert!(html.contains("loc_primary"), "{html}");
     assert!(html.contains("Menu Name"), "{html}");
+    // WordPress's menu builder joins the form; the items field stays for the form without it.
+    assert!(html.contains("id=\"mc-menu-builder\""), "{html}");
+    assert!(html.contains("name=\"items\""), "{html}");
     let items = json!([
         {"title": "", "type": "page", "object_id": about.id},
         {"title": "Docs", "type": "custom", "url": "https://rocketboost.rs/docs/", "new_tab": true},
@@ -833,6 +836,18 @@ async fn menus(client: &Client, db: &Database, author: i64) {
     assert_eq!(response.status(), Status::UnprocessableEntity);
     let body = response.into_string().await.unwrap();
     assert!(body.contains("Menu Name is already taken."), "{body}");
+
+    // A blank name is refused with `nav-menus.php`'s message, under the name.
+    let response = post(
+        client,
+        "/mc-admin/nav-menus",
+        &[("_token", &csrf), ("name", ""), ("items", "[]")],
+    )
+    .await;
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    let body = response.into_string().await.unwrap();
+    assert!(body.contains("Please enter a valid menu name."), "{body}");
+    assert!(body.contains("id=\"mc-menu-builder\""), "{body}");
 
     // Rename and unassign, through the edit form.
     let id = list

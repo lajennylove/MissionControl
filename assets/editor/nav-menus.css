@@ -1,0 +1,220 @@
+/* Mission Control's menu builder (nav-menus.js): WordPress's Menus screen layout, in the
+   admin's own colours (it inherits the text colour and uses translucent borders, so it fits the
+   Ignite theme, its dark mode and the WordPress theme). */
+
+.mc-menu-columns {
+  display: grid;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+@media (min-width: 64rem) {
+  .mc-menu-columns {
+    grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr);
+  }
+}
+
+.mc-menu-main {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.mc-menu-builder-heading {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.mc-menu-box {
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 0.375rem;
+  margin-bottom: 0.5rem;
+  background: rgba(127, 127, 127, 0.04);
+}
+
+.mc-menu-box > summary {
+  cursor: pointer;
+  padding: 0.625rem 0.75rem;
+  font-weight: 600;
+}
+
+.mc-menu-box-body {
+  padding: 0 0.75rem 0.75rem;
+}
+
+.mc-menu-box-body p {
+  margin: 0.5rem 0;
+}
+
+.mc-menu-checklist {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 0.25rem;
+}
+
+.mc-menu-checklist li {
+  margin: 0.125rem 0;
+}
+
+.mc-menu-box-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.mc-menu-status:empty {
+  display: none;
+}
+
+.mc-menu-status,
+.mc-menu-help,
+.mc-menu-instructions {
+  font-size: 0.875rem;
+  opacity: 0.8;
+}
+
+.mc-menu-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-width: 40rem;
+}
+
+.mc-menu-item {
+  margin-bottom: 0.5rem;
+}
+
+.mc-menu-item-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  border-radius: 0.25rem;
+  background: rgba(127, 127, 127, 0.06);
+}
+
+.mc-menu-item-invalid .mc-menu-item-bar {
+  border-color: #d63638;
+}
+
+.mc-menu-item-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mc-menu-item-sub,
+.mc-menu-item-type {
+  font-size: 0.8125rem;
+  opacity: 0.75;
+}
+
+.mc-menu-item-type {
+  margin-left: auto;
+}
+
+.mc-menu-item-edit,
+.mc-menu-move button,
+.mc-menu-item-actions button,
+.mc-menu-delete-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
+.mc-menu-item-settings {
+  padding: 0.5rem 0.75rem 0.75rem;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  border-top: 0;
+  border-radius: 0 0 0.25rem 0.25rem;
+}
+
+.mc-menu-setting {
+  margin: 0.5rem 0;
+}
+
+.mc-menu-help {
+  display: block;
+  margin-top: 0.25rem;
+}
+
+.mc-menu-move {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.875rem;
+}
+
+.mc-menu-original {
+  font-size: 0.875rem;
+}
+
+.mc-menu-item-delete,
+.mc-menu-delete-link {
+  color: #d63638 !important;
+}
+
+.mc-menu-delete {
+  margin: 0;
+}
+
+.mc-menu-announce,
+.mc-menu-structure .screen-reader-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* The top of the screen: the tabs and "Select a menu to edit". */
+.mc-menu-manage {
+  margin: 0 0 1.25rem;
+}
+
+.mc-menu-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.35);
+  margin-bottom: 0.75rem;
+}
+
+.mc-menu-tab {
+  padding: 0.5rem 0.875rem;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 0.375rem 0.375rem 0 0;
+  color: inherit;
+  text-decoration: none;
+  margin-bottom: -1px;
+}
+
+.mc-menu-tab[aria-current="page"] {
+  border-color: rgba(127, 127, 127, 0.35);
+  background: rgba(127, 127, 127, 0.06);
+  font-weight: 600;
+}
+
+.mc-menu-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.mc-menu-switch select {
+  width: auto;
+  min-width: 12rem;
+}

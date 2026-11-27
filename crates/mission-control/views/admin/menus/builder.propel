@@ -1,0 +1,32 @@
+{{-- The menu builder's "Add menu items" column (nav-menus.php's `wp_nav_menu_setup` meta boxes: one box per post type, Custom Links, one box per taxonomy). Hidden: assets/editor/nav-menus.js shows it beside the form and fills the boxes. Without the script the form's own fields edit the menu. --}}
+<div id="mc-menu-builder" class="mc-menu-builder" hidden data-search-url="{{ $search_url }}" data-max-depth="{{ $max_depth }}">
+<h2 class="mc-menu-builder-heading">Add menu items</h2>
+@foreach (source in sources)
+@if (source.custom)
+<details class="mc-menu-box mc-menu-box-custom" data-kind="custom" data-object="custom" data-label="Custom Link">
+<summary>Custom Links</summary>
+<div class="mc-menu-box-body">
+<p><label class="ig-label" for="mc-custom-menu-item-url">URL</label>
+<input type="url" id="mc-custom-menu-item-url" class="ig-input mc-custom-url" value="https://" placeholder="https://"></p>
+<p><label class="ig-label" for="mc-custom-menu-item-name">Link Text</label>
+<input type="text" id="mc-custom-menu-item-name" class="ig-input mc-custom-text"></p>
+<p class="mc-menu-status" role="status" aria-live="polite"></p>
+<p class="mc-menu-box-actions"><button type="button" class="ig-btn ig-btn-outline mc-menu-add-custom">Add to Menu</button></p>
+</div>
+</details>
+@else
+<details class="mc-menu-box" data-kind="{{ $source.kind }}" data-object="{{ $source.object }}" data-label="{{ $source.singular }}">
+<summary>{{ $source.plural }}</summary>
+<div class="mc-menu-box-body">
+<p class="mc-menu-search"><label class="ig-label" for="mc-menu-search-{{ $source.object }}">Search</label>
+<input type="search" id="mc-menu-search-{{ $source.object }}" class="ig-input" autocomplete="off"></p>
+<ul class="mc-menu-checklist" aria-label="{{ $source.plural }}"></ul>
+<p class="mc-menu-status" role="status" aria-live="polite"></p>
+<p><button type="button" class="ig-btn ig-btn-outline mc-menu-more" hidden>Load more</button></p>
+<p class="mc-menu-box-actions"><label><input type="checkbox" class="mc-menu-select-all"> Select All</label>
+<button type="button" class="ig-btn ig-btn-outline mc-menu-add">Add to Menu</button></p>
+</div>
+</details>
+@endif
+@endforeach
+</div>

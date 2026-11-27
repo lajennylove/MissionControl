@@ -312,15 +312,17 @@ async fn settings(client: &Client) {
     }
 }
 
-/// The Menus screen: two equal columns, and the unsaved changes alert.
+/// The Menus screen: `nav-menus.php`'s edit column (the menu builder's script puts the "Add
+/// menu items" column beside it), the Menu Structure over the Menu Settings, and the unsaved
+/// changes alert.
 async fn menus(client: &Client) {
     let (status, html) = get(client, "/mc-admin/nav-menus/new").await;
     assert_eq!(status, Status::Ok, "{html}");
     let form = form_of(&html);
-    assert!(form.contains(GRID_2), "{form}");
-    assert_eq!(form.matches(SIDE).count(), 2, "{form}");
-    let side = &form[form.rfind(SIDE).unwrap()..];
-    assert!(side.contains("Menu Structure"), "{side}");
+    assert!(!form.contains(GRID_2), "{form}");
+    let structure = form.find("Menu Structure").expect("the Menu Structure");
+    let settings = form.find("Menu Settings").expect("the Menu Settings");
+    assert!(structure < settings, "{form}");
     assert!(form.contains(ALERT), "{form}");
     assert!(has_form_script(&html), "{html}");
 }

@@ -1,0 +1,21 @@
+{{-- nav-menus.php's top of the screen: the "Edit Menus" and "Create New Menu" tabs, and the "Select a menu to edit" dropdown with its Select button (a GET form, so it works without JavaScript) and "or create a new menu". --}}
+<div class="mc-menu-manage">
+<nav class="mc-menu-tabs" aria-label="Menus">
+<a href="{{ $list_url }}" class="mc-menu-tab"@if (editing) aria-current="page"@endif>Edit Menus</a>
+<a href="{{ $new_url }}" class="mc-menu-tab"@if (creating) aria-current="page"@endif>Create New Menu</a>
+</nav>
+@if (has_menus)
+<form method="get" action="{{ $switch_url }}" class="mc-menu-switch">
+<label for="mc-select-menu-to-edit">Select a menu to edit:</label>
+<select name="menu" id="mc-select-menu-to-edit" class="ig-input">
+@foreach (menu in menus)
+<option value="{{ $menu.id }}"@if (menu.selected) selected@endif>{{ $menu.name }}</option>
+@endforeach
+</select>
+<button type="submit" class="ig-btn ig-btn-outline">Select</button>
+<span class="mc-menu-add-new">or <a href="{{ $new_url }}">create a new menu</a>.</span>
+</form>
+@else
+<p class="mc-menu-switch">No menus yet: <a href="{{ $new_url }}">create a new menu</a>.</p>
+@endif
+</div>
