@@ -192,10 +192,7 @@ fn title_and_content_in_supports_make_those_fields() {
     assert!(!field(&resource, "status").required);
     assert!(!field(&resource, "slug").required);
     let columns: Vec<&str> = resource.columns.iter().map(|c| c.key.as_str()).collect();
-    assert_eq!(
-        columns,
-        ["col_title", "col_state", "col_status", "col_date"]
-    );
+    assert_eq!(columns, ["col_title", "col_status", "col_date"]);
 
     // A type with no supports has the slug, status, date and password only.
     let bare = post_type_resource(&post_type("rs_bare", Vec::new()), &Registry::default());
@@ -238,13 +235,21 @@ fn the_builtin_types_have_wordpress_s_boxes() {
         columns,
         [
             "col_title",
-            "col_state",
             "col_author",
             "col_status",
             "col_tax_category",
             "col_tax_post_tag",
             "col_date"
         ]
+    );
+    // The post's state is a badge inside the title cell, on the All tab only.
+    let badges = &post.column_badges;
+    assert_eq!(badges.inside_of("col_state"), Some("col_title"));
+    assert!(badges.shows_on("col_state", Some("all")));
+    assert!(!badges.shows_on("col_state", Some("draft")));
+    assert_eq!(
+        badges.color("col_state", "Pending"),
+        Some(ignite_core::BadgeColor::Warning)
     );
 
     let page = post_type_resource(&page, &Registry::default());
@@ -410,10 +415,10 @@ async fn create_writes_the_post_and_an_auto_draft_is_hidden_from_the_list() {
     assert_eq!(saved["status"], "draft");
     let page = resource.data.list(db, &first_page(None)).await.unwrap();
     assert_eq!(ids(&page.rows), [draft.id]);
-    // The title is the title; the draft's state, as `_post_states` names it, is in the state
-    // column on the All tab only.
+    // The title is the title; the draft's state, as `_post_states` names it, is in every row
+    // (the panel shows it as a badge inside the title cell on the All tab only).
     assert_eq!(page.rows[0]["col_title"], "First");
-    assert_eq!(page.rows[0]["col_state"], "");
+    assert_eq!(page.rows[0]["col_state"], "Draft");
     assert_eq!(page.rows[0]["col_status"], "Draft");
     let tabs = resource.tabs.clone();
     let tab = |key: &str| tabs.iter().find(|t| t.key == key).unwrap().filter.clone();
@@ -443,7 +448,7 @@ async fn create_writes_the_post_and_an_auto_draft_is_hidden_from_the_list() {
             .unwrap();
         assert_eq!(page.total, total, "{key}");
         if let Some(row) = page.rows.first() {
-            assert_eq!(row["col_state"], "", "{key}");
+            assert_eq!(row["col_state"], "Draft", "{key}");
         }
     }
     // The panel counts a tab with `per_page` 0: the total, no rows.

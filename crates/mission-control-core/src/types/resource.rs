@@ -52,15 +52,20 @@
 //! The form is laid out as WordPress's editor with its settings sidebar: a main column two
 //! thirds wide (title, slug, content, excerpt, field groups) and a sidebar one third wide
 //! (Publish, featured image, Page Attributes, taxonomies); see `editor_layout`. The slug follows
-//! the title until it is edited by hand (Ignite's `slug_from`).
+//! the title until it is edited by hand (Ignite's `slug_from`), or until the post is published.
 //!
-//! The list's columns are the title (sortable, searchable), the post's state (no heading), the
-//! author, the status, the terms of `category`, `post_tag` and each custom taxonomy with
-//! `show_admin_column`, and the date (sortable). Their keys start with `col_`, which no field
-//! name does, so a column is never read as a field's stored value. The list has WordPress's
-//! status links as tabs (All, Published, Scheduled, Drafts, Pending, Private, Trash), and on
-//! the All tab the state column shows the post's state (Draft, Pending, Private or Scheduled)
+//! The list's columns are the title (sortable, searchable), the author, the status, the terms
+//! of `category`, `post_tag` and each custom taxonomy with `show_admin_column`, and the date
+//! (sortable). Their keys start with `col_`, which no field name does, so a column is never
+//! read as a field's stored value. The list has WordPress's status links as tabs (All,
+//! Published, Scheduled, Drafts, Pending, Private, Trash; a tab with no posts is left out, All
+//! is always shown, and each counts all its posts, whatever the search), and on the All tab
+//! the title cell shows the post's state (Draft, Pending, Private or Scheduled) after the title
 //! as a small badge; see [`status_tabs`](super::status_tabs).
+//!
+//! On the edit form, the slug follows the title until it is edited by hand, and not at all once
+//! the stored post is published (Ignite's `slug_locked_when`), so a published URL does not change
+//! with its title.
 //!
 //! # Trust
 //!
@@ -202,7 +207,7 @@ const STICKY: &str = "sticky";
 const TEMPLATE: &str = "template";
 
 // The columns' keys.
-const COL_TITLE: &str = "col_title";
+pub(super) const COL_TITLE: &str = "col_title";
 const COL_AUTHOR: &str = "col_author";
 const COL_STATUS: &str = "col_status";
 const COL_DATE: &str = "col_date";
@@ -757,9 +762,9 @@ pub fn post_type_resource_with_access(
         sortable,
         searchable,
     };
+    // The post's state is not a column: it shows as a badge inside the title cell on the All
+    // tab, after the title as `_post_states` writes it ([`status_tabs`]).
     let mut columns = vec![column(COL_TITLE, "Title", true, true)];
-    // The post's state, after the title as `_post_states` writes it, with no heading.
-    columns.push(column(status_tabs::COL_STATE, "", false, false));
     if data.author {
         columns.push(column(COL_AUTHOR, "Author", false, false));
     }
@@ -793,8 +798,16 @@ pub fn post_type_resource_with_access(
     resource.columns = columns;
     resource.form_layout = layout;
     if has_title {
-        // WordPress's permalink follows the title until it is edited by hand.
-        resource = resource.slug_from(SLUG, TITLE);
+        // WordPress's permalink follows the title until it is edited by hand, and stays as it
+        // is once the post is published, so its URL does not change with the title.
+        resource = resource
+            .slug_from(SLUG, TITLE)
+            .slug_locked_when(SLUG, |form| {
+                form.record()
+                    .and_then(|record| record.get(STATUS))
+                    .and_then(Value::as_str)
+                    == Some(PostStatus::Publish.as_str())
+            });
     }
     resource
 }
@@ -1413,8 +1426,9 @@ impl PostTypeData {
     }
 
     /// The column values of `post`: the title ("(no title)" when empty), the author's name, the
-    /// status, the term names and the date (published, or last modified when it has none). The
-    /// state column is empty: the list fills it on the All tab ([`status_tabs`]).
+    /// status, the term names, the date (published, or last modified when it has none) and the
+    /// state `_post_states` names, empty for a published post, which the list shows inside the
+    /// title cell on the All tab ([`status_tabs`]).
     fn columns(
         &self,
         row: &mut Row,
@@ -1429,7 +1443,10 @@ impl PostTypeData {
             post.title.clone()
         };
         row.insert(COL_TITLE.into(), Value::from(title));
-        row.insert(status_tabs::COL_STATE.into(), Value::from(""));
+        row.insert(
+            status_tabs::COL_STATE.into(),
+            Value::from(status_tabs::post_state(post.status).unwrap_or_default()),
+        );
         if self.author {
             row.insert(
                 COL_AUTHOR.into(),
@@ -1671,16 +1688,12 @@ impl PostTypeData {
             HashMap::new()
         };
         let terms = self.post_terms(db, &ids, MAX_TERMS_SHOWN).await?;
-        let states = status_tabs::is_all_tab(&query.filter);
         let rows = posts
             .iter()
             .map(|post| {
                 let mut row = Row::new();
                 row.insert("id".into(), Value::from(post.id));
                 self.columns(&mut row, post, &authors, &terms, offset);
-                if let Some(state) = status_tabs::post_state(post.status).filter(|_| states) {
-                    row.insert(status_tabs::COL_STATE.into(), Value::from(state));
-                }
                 row
             })
             .collect();

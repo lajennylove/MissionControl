@@ -1,8 +1,8 @@
 //! The layout of the admin's forms: the post and page editors in two columns (a main column two
 //! thirds wide and a sidebar one third wide, as WordPress's editor with its settings sidebar),
 //! the settings screens and the Menus screen in two equal columns, Ignite's unsaved changes
-//! alert on each of them, the slug that follows the title, and the category checklist's and the
-//! tags box's new terms, created by the save.
+//! alert on each of them, the slug that follows the title (but not once the post is published),
+//! and the category checklist's and the tags box's new terms, created by the save.
 //!
 //! The panel runs on MySQL and MariaDB only (Ruling R119), so the flow runs when
 //! `MC_TEST_DATABASE_URL` is a `mysql://` or `mariadb://` URL, on a database of its own
@@ -17,7 +17,7 @@ use ignite_panel::{authz, users};
 use mission_control::{AppOptions, rocket_with_options};
 use mission_control_app::install::run::run_migrations;
 use mission_control_core::config::{Config, Environment, TrustedProxies};
-use mission_control_core::content::{NewTerm, Post, Taxonomy, Term};
+use mission_control_core::content::{NewPost, NewTerm, Post, PostStatus, Taxonomy, Term};
 use mission_control_testing::{ScratchDatabase, scratch_database};
 use orbit_orm::{Database, Model};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -183,7 +183,7 @@ async fn flows(scratch: &ScratchDatabase) {
     .await
     .expect("the app ignites");
     let email = "ada@example.test";
-    users::create_user(&db, "ada", email, PASSWORD)
+    let ada = users::create_user(&db, "ada", email, PASSWORD)
         .await
         .expect("creates the user");
     authz::assign_role(&db, email, "administrator")
@@ -192,6 +192,7 @@ async fn flows(scratch: &ScratchDatabase) {
     sign_in(&client, email).await;
 
     editors(&client).await;
+    locked_slugs(&client, &db, ada.id).await;
     settings(&client).await;
     menus(&client).await;
     new_terms(&client, &db).await;
@@ -222,15 +223,13 @@ async fn editors(client: &Client) {
                 "{uri}: {name} not in the main column"
             );
         }
-        // The slug follows the title (Ignite's `slug_from`).
-        let slug = form
-            .find(r#"id="slug" name="slug""#)
-            .unwrap_or_else(|| panic!("{uri}: a slug input in {form}"));
-        let tag = &form[slug..slug + form[slug..].find('>').unwrap()];
+        // The slug follows the title (Ignite's `slug_from`), and a new post is not locked.
+        let tag = slug_tag(form);
         assert!(
             tag.contains(r#"data-ignite-slug-from="title""#),
             "{uri}: {tag}"
         );
+        assert!(!tag.contains("data-ignite-slug-locked"), "{uri}: {tag}");
         // Ignite's unsaved changes alert, and the script that asks.
         assert!(form.contains(ALERT), "{uri}: {form}");
         assert!(has_form_script(&html), "{uri}: {html}");
@@ -246,6 +245,47 @@ async fn editors(client: &Client) {
         "tax_input_post_tag",
     ] {
         assert!(side.contains(&format!("name=\"{name}\"")), "{name}: {side}");
+    }
+}
+
+/// The `<input>` tag of the slug field in `form`.
+fn slug_tag(form: &str) -> &str {
+    let slug = form
+        .find(r#"id="slug" name="slug""#)
+        .unwrap_or_else(|| panic!("a slug input in {form}"));
+    &form[slug..slug + form[slug..].find('>').unwrap()]
+}
+
+/// The slug of a published post or page stays as it is when its title changes (Ignite's
+/// `slug_locked_when`): its input is marked locked. A draft's slug still follows its title.
+async fn locked_slugs(client: &Client, db: &Database, author: i64) {
+    for post_type in ["post", "page"] {
+        for (status, locked) in [(PostStatus::Publish, true), (PostStatus::Draft, false)] {
+            let post = Post::create(
+                db,
+                NewPost {
+                    status,
+                    title: format!("Locked {post_type} {}", status.as_str()),
+                    slug: format!("locked-{post_type}-{}", status.as_str()),
+                    ..NewPost::new(author, post_type)
+                },
+            )
+            .await
+            .unwrap();
+            let uri = format!("/mc-admin/{post_type}/{}/edit", post.id);
+            let (code, html) = get(client, &uri).await;
+            assert_eq!(code, Status::Ok, "{uri}: {html}");
+            let tag = slug_tag(form_of(&html));
+            assert!(
+                tag.contains(r#"data-ignite-slug-from="title""#),
+                "{uri}: {tag}"
+            );
+            assert_eq!(
+                tag.contains("data-ignite-slug-locked"),
+                locked,
+                "{uri}: {tag}"
+            );
+        }
     }
 }
 

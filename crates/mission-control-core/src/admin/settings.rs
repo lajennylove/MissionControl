@@ -708,14 +708,10 @@ pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> 
         super::navigation::SETTINGS + i32::try_from(index).unwrap_or_default(),
         super::navigation::SETTINGS_ICON,
     );
-    // WordPress's Settings menu: its entry opens General, and the other screens are its
-    // submenu, by their menu titles.
-    if screen == SettingsScreen::General {
-        resource.navigation_label = Some(super::navigation::SETTINGS_LABEL.to_owned());
-    } else {
-        resource.navigation_label = Some(screen.menu_title().to_owned());
-        resource.navigation_parent_item = Some(super::navigation::SETTINGS_PARENT.to_owned());
-    }
+    // WordPress's Settings menu: a label-only Settings entry (declared on the panel) that opens
+    // General, with every screen under it by its menu title.
+    resource.navigation_label = Some(screen.menu_title().to_owned());
+    resource.navigation_parent_item = Some(super::navigation::SETTINGS_PARENT.to_owned());
     resource
 }
 

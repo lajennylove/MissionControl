@@ -5,9 +5,15 @@
 //! tab filters on the post's `status` (the form's field key), which the list's SQL applies
 //! ([`status_conditions`]).
 //!
-//! On the All tab, the state column shows the post's state as `_post_states` names it (Draft,
-//! Pending, Private or Scheduled; a published post has none) as a small badge. WordPress leaves
-//! out the state of the status a view lists, so the other tabs, each one status, show none.
+//! On the All tab, the title cell shows the post's state after the title, as `_post_states`
+//! names it (Draft, Pending, Private or Scheduled; a published post has none), as a small badge
+//! (Ignite's `badge_inside` and `badge_on_tabs`): the state has no column of its own. WordPress
+//! leaves out the state of the status a view lists, so the other tabs, each one status, show
+//! none.
+//!
+//! Each tab's count is the number of all its posts, whatever the search, as WordPress's status
+//! links count them, and a tab with no posts is left out, as WordPress leaves out a status link
+//! with none; All is always shown (Ignite's defaults).
 
 use ignite_core::{BadgeColor, ColumnBadges, FilterCondition, ListFilter, RuntimeResource, Tab};
 use orbit_orm::Value as Sql;
@@ -21,7 +27,8 @@ const STATUS: &str = "status";
 /// The key of the All tab.
 pub const ALL_TAB: &str = "all";
 
-/// The key of the state column: the post's state, as a badge on the All tab.
+/// The key of the post's state in each list row, shown as a badge inside the title cell on
+/// the All tab. It is not a list column.
 pub const COL_STATE: &str = "col_state";
 
 /// The status links after All, with WordPress's labels.
@@ -50,15 +57,14 @@ pub fn status_tabs() -> Vec<Tab> {
     tabs
 }
 
-/// Gives `resource` (a post type's list) the status tabs, and its state column's badge.
+/// Gives `resource` (a post type's list) the status tabs, and the state badge inside the title
+/// cell on the All tab.
 pub fn add_status_tabs(resource: &mut RuntimeResource) {
     resource.tabs = status_tabs();
-    resource.column_badges = ColumnBadges::new().badge_color(COL_STATE, state_color);
-}
-
-/// Whether `filter` is the All tab's, whose rows show their state.
-pub fn is_all_tab(filter: &ListFilter) -> bool {
-    *filter == all_tab_filter()
+    resource.column_badges = ColumnBadges::new()
+        .badge_color(COL_STATE, state_color)
+        .badge_inside(COL_STATE, super::resource::COL_TITLE)
+        .badge_on_tabs(COL_STATE, [ALL_TAB]);
 }
 
 /// The state `_get_post_states` names for a post of `status`, shown on the All tab: none for a
@@ -143,9 +149,7 @@ mod tests {
                 "Trash"
             ]
         );
-        assert!(is_all_tab(&tabs[0].filter));
-        assert!(!is_all_tab(&tabs[3].filter));
-        assert!(!is_all_tab(&ListFilter::new()));
+        assert_eq!(tabs[0].filter, all_tab_filter());
     }
 
     #[test]

@@ -232,13 +232,12 @@ async fn delete(client: &Client, post_type: &str, id: i64) -> Status {
 }
 
 /// The New screen's refusal (Ruling R115): 403 with WordPress's message.
-/// Whether the list row titled `title` shows the state badge `state` in `color` right after its
-/// title cell, as the All tab shows a post's state.
+/// Whether the list row titled `title` shows the state badge `state` in `color` inside its
+/// title cell, after the title, as the All tab shows a post's state.
 fn badge_after(list: &str, title: &str, color: &str, state: &str) -> bool {
-    let cell = format!("<td>{title}</td>");
-    let badge = format!("<td><span class=\"ig-badge ig-badge-{color}\">{state}</span></td>");
-    list.match_indices(&cell)
-        .any(|(at, _)| list[at + cell.len()..].trim_start().starts_with(&badge))
+    list.contains(&format!(
+        "<td>{title} <span class=\"ig-badge ig-badge-{color}\">{state}</span></td>"
+    ))
 }
 
 /// The count a list's tab `label` shows, as "Drafts (3)".
@@ -376,9 +375,11 @@ async fn flows(scratch: &ScratchDatabase) {
 
 /// WordPress's status links on the Posts and Pages lists, as Ignite's tabs at `?tab=`: All
 /// (every status but Trash), Published, Scheduled, Drafts, Pending, Private and Trash, each with
-/// the number of the type's posts in it. A tab lists only its posts, and the search, the sort and
-/// the pages stay in it. On the All tab, a post's state (Draft, Pending, Private, Scheduled) is a
-/// small badge after its title; the other tabs show none.
+/// the number of all the type's posts in it, whatever the search, as WordPress counts them. A tab
+/// with no posts is left out, as WordPress leaves out an empty status link; All always shows. A
+/// tab lists only its posts, and the search, the sort and the pages stay in it. On the All tab,
+/// a post's state (Draft, Pending, Private, Scheduled) is a small badge inside the title cell,
+/// after the title, with no column of its own; the other tabs show none.
 async fn status_tabs(client: &Client, db: &Database, editor: i64) {
     let future = chrono::Utc::now().naive_utc() + chrono::Duration::days(30);
     for (post_type, status, title) in [
@@ -430,20 +431,25 @@ async fn status_tabs(client: &Client, db: &Database, editor: i64) {
     for post_type in ["post", "page"] {
         let (status, list) = get(client, &format!("/mc-admin/{post_type}")).await;
         assert_eq!(status, Status::Ok, "{list}");
-        // The tabs, in WordPress's order, with their links.
+        // The tabs, in WordPress's order, with their links; an empty one is left out, but All.
         let mut at = 0;
         for (label, status) in tabs {
             let key = status.map_or("all", PostStatus::as_str);
             let link = format!("href=\"/mc-admin/{post_type}?tab={key}\"");
+            let total = count(post_type, status).await;
+            if total == 0 && status.is_some() {
+                assert!(
+                    !list.contains(&link),
+                    "{post_type}: {label} is empty: {list}"
+                );
+                assert_eq!(tab_count(&list, label), None, "{post_type}: {label}");
+                continue;
+            }
             let found = list[at..]
                 .find(&link)
                 .unwrap_or_else(|| panic!("{post_type}: the {label} tab after byte {at}: {list}"));
             at += found + link.len();
-            assert_eq!(
-                tab_count(&list, label),
-                Some(count(post_type, status).await),
-                "{post_type}: {label}"
-            );
+            assert_eq!(tab_count(&list, label), Some(total), "{post_type}: {label}");
         }
         // All is the default tab and leaves out the trash.
         assert!(
@@ -456,8 +462,21 @@ async fn status_tabs(client: &Client, db: &Database, editor: i64) {
         assert!(!list.contains("Tabbed page trashed"), "{list}");
     }
 
-    // The All tab: each state is a badge after the title; a published post has none.
+    // The All tab: each state is a badge after the title, in the title cell; a published post
+    // has none. The state has no column of its own (see the core's `types_resource` tests).
     let (_, all) = get(client, "/mc-admin/post?tab=all&q=Tabbed").await;
+    // The counts are of all the type's posts, not of the search's, as WordPress's status links.
+    for (label, status) in [("All", None), ("Drafts", Some(PostStatus::Draft))] {
+        assert_eq!(
+            tab_count(&all, label),
+            Some(count("post", status).await),
+            "{label}: {all}"
+        );
+    }
+    assert!(
+        count("post", None).await > 5,
+        "the seed's posts are not counted"
+    );
     for (title, color, state) in [
         ("Tabbed draft", "gray", "Draft"),
         ("Tabbed pending", "warning", "Pending"),
@@ -702,7 +721,8 @@ fn assert_in_order(nav: &str, entries: &[&str]) {
 }
 
 /// WordPress's submenus as Ignite's child entries: Categories and Tags under Posts, in Content;
-/// the settings screens under Settings (General's entry), in Site. Menus stays in Site, alone.
+/// the seven settings screens under Settings, in Site: a label-only entry (Ignite's
+/// `NavigationItem`) that opens General, its first screen. Menus stays in Site, alone.
 async fn sidebar_children(client: &Client) {
     let child = |uri: &str, label: &str, active: bool| {
         if active {
@@ -745,6 +765,7 @@ async fn sidebar_children(client: &Client) {
         assert!(!nav.contains("/mc-admin/options-writing\""), "{uri}: {nav}");
     }
     let settings = [
+        ("options-general", "General"),
         ("options-writing", "Writing"),
         ("options-reading", "Reading"),
         ("options-discussion", "Discussion"),
@@ -915,7 +936,7 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "<ul id=\"adminmenu\">",
         "<span class=\"dashicons dashicons-admin-post\"></span></div><div class=\"wp-menu-name\">Posts</div>",
         "<li><a href=\"/mc-admin/post/new\">Add New</a></li><li><a href=\"/mc-admin/category\">Categories</a></li><li><a href=\"/mc-admin/post_tag\">Tags</a></li></ul>",
-        "<div class=\"wp-menu-name\">Settings</div></a>\n<ul class=\"wp-submenu\"><li class=\"wp-submenu-head\" aria-hidden=\"true\">Settings</li><li><a href=\"/mc-admin/options-writing\">Writing</a></li>",
+        "<div class=\"wp-menu-name\">Settings</div></a>\n<ul class=\"wp-submenu\"><li class=\"wp-submenu-head\" aria-hidden=\"true\">Settings</li><li><a href=\"/mc-admin/options-general\">General</a></li><li><a href=\"/mc-admin/options-writing\">Writing</a></li>",
         "<li><a href=\"/mc-admin/options-permalink\">Permalinks</a></li><li><a href=\"/mc-admin/options-privacy\">Privacy</a></li></ul>",
         "<li class=\"wp-menu-separator\" aria-hidden=\"true\"></li>",
         "<div id=\"wpbody\" role=\"main\">",
@@ -1101,7 +1122,7 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
         "{list}"
     );
     // The saved draft is listed with its state after the title, as `_post_states` writes it,
-    // as a badge on the All tab; the published post has none.
+    // as a badge inside the title cell on the All tab; the published post has none.
     assert!(
         badge_after(&list, "Written in the admin", "gray", "Draft"),
         "{list}"

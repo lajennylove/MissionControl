@@ -695,6 +695,33 @@ fn settings_need_manage_options_and_menus_edit_theme_options() {
 }
 
 /// A theme with a `primary` and a `footer` menu location, in a temporary folder.
+/// The seven settings screens are listed under the Settings entry, a label the panel declares
+/// (`SETTINGS_PARENT`), in Site, by their menu titles and in WordPress's submenu order (80 to
+/// 86), so the entry opens General, the first.
+#[test]
+fn settings_screens_are_listed_under_settings_in_wordpresss_order() {
+    use mission_control_core::admin::navigation::{SETTINGS, SETTINGS_PARENT, SITE};
+    let mut sorts = Vec::new();
+    for screen in SettingsScreen::ALL {
+        let resource = settings_resource(screen, SettingsServices::default());
+        assert_eq!(resource.navigation_group.as_deref(), Some(SITE));
+        assert_eq!(
+            resource.navigation_parent_item.as_deref(),
+            Some(SETTINGS_PARENT),
+            "{}",
+            screen.slug()
+        );
+        assert_eq!(
+            resource.navigation_label.as_deref(),
+            Some(screen.menu_title())
+        );
+        sorts.push(resource.navigation_sort.unwrap());
+    }
+    assert_eq!(sorts, (SETTINGS..SETTINGS + 7).collect::<Vec<_>>());
+    assert_eq!(SettingsScreen::ALL[0], SettingsScreen::General);
+    assert_eq!(SETTINGS_PARENT, "Settings");
+}
+
 fn theme() -> (tempfile::TempDir, Theme) {
     let dir = tempfile::tempdir().unwrap();
     let theme_dir = dir.path().join("menus-theme");

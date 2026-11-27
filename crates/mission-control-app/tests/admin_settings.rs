@@ -248,8 +248,9 @@ async fn flows(scratch: &ScratchDatabase) {
     sign_in(&client, &admin).await;
     let (status, dashboard) = get(&client, "/mc-admin").await;
     assert_eq!(status, Status::Ok);
-    // The sidebar's Settings entry opens General; the other screens are its children, shown
-    // on a settings screen.
+    // The sidebar's Settings entry is a label (Ignite's `NavigationItem`) that opens General,
+    // its first screen; the seven screens, General first, are its children, shown on a
+    // settings screen.
     for entry in [
         "href=\"/mc-admin/options-general\"><i class=\"ti ti-settings text-lg\"></i>Settings</a>",
         "</i>Menus</a>",
@@ -258,6 +259,7 @@ async fn flows(scratch: &ScratchDatabase) {
     }
     let (_, general) = get(&client, "/mc-admin/options-general/1/edit").await;
     for child in [
+        "General",
         "Writing",
         "Reading",
         "Discussion",
@@ -269,7 +271,13 @@ async fn flows(scratch: &ScratchDatabase) {
             "Permalinks" => "permalink".to_owned(),
             other => other.to_lowercase(),
         };
-        let link = format!("href=\"/mc-admin/options-{slug}\">{child}</a>");
+        // General is the current page.
+        let current = if child == "General" {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
+        let link = format!("href=\"/mc-admin/options-{slug}\"{current}>{child}</a>");
         assert!(general.contains(&link), "{link}: {general}");
     }
     // The list address opens the one record's form.
@@ -322,6 +330,8 @@ async fn flows(scratch: &ScratchDatabase) {
         !dashboard.contains("/mc-admin/options-general"),
         "{dashboard}"
     );
+    // The Settings entry has no screen the editor may see, so it is not listed at all.
+    assert!(!dashboard.contains("</i>Settings</a>"), "{dashboard}");
     assert!(!dashboard.contains("/mc-admin/nav-menus"), "{dashboard}");
     for uri in [
         "/mc-admin/options-general",

@@ -92,7 +92,7 @@
 use std::sync::{Arc, OnceLock};
 
 use ignite_panel::authz::{self, AuthzError};
-use ignite_panel::{AdminUser, Ignite, ignite_core};
+use ignite_panel::{AdminUser, Ignite, NavigationItem, ignite_core};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
 use mission_control_core::admin::navigation;
 use mission_control_core::admin::{
@@ -277,6 +277,12 @@ pub(crate) async fn mount_panel(
         .brand_logo_height(BRAND_LOGO_HEIGHT)
         .favicon(FAVICON)
         .navigation_groups(navigation::GROUPS)
+        // WordPress's Settings menu: a label-only entry in Site, after Menus, that opens its
+        // first screen (General) and lists the seven settings screens under it.
+        .navigation_items([NavigationItem::make(navigation::SETTINGS_PARENT)
+            .group(navigation::SITE)
+            .sort(navigation::SETTINGS)
+            .icon(navigation::SETTINGS_ICON)])
         // Ask before a changed form is left unsaved (posts, pages, settings, menus).
         .unsaved_changes_alerts();
     ignite_core::register_editor(editor_script_url());
