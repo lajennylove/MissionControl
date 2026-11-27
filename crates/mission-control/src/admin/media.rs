@@ -43,8 +43,9 @@ use std::sync::Arc;
 
 use ignite_panel::{AdminUser, CsrfToken, ignite_core};
 use mission_control_core::admin::media::{
-    AttachmentQuery, Attachments, UploadRefusal, attachment_for_js, may_upload, query_attachments,
-    register_attachment_resource, upload_to_library,
+    AttachmentDetails, AttachmentQuery, Attachments, UploadRefusal, attachment_details,
+    attachment_for_js, attachment_for_user, may_upload, query_attachments,
+    register_attachment_resource, size_format, upload_to_library,
 };
 use mission_control_core::media::{ImageSizes, Storage, validate};
 use mission_control_core::types::PostTypeResources;
@@ -58,7 +59,7 @@ use rocket::{Build, Data, Request, Response, Rocket, Route};
 use serde_json::{Value, json};
 
 use super::ADMIN_PATH;
-use crate::editor::{editor_stylesheet_url, media_grid_script_url};
+use crate::editor::{editor_stylesheet_url, media_grid_script_url, media_upload_script_url};
 use crate::rest::auth::AuthSettings;
 use crate::rest::media::{BodyError, MULTIPART_OVERHEAD, UploadSettings, read_body};
 
@@ -509,8 +510,10 @@ async fn async_upload(
 }
 
 /// `GET /mc-admin/admin-ajax.php`: `action=query-attachments`, a page of the attachments the
-/// user may read, as JSON; see the [module](self).
-#[rocket::get("/admin-ajax.php?<action>&<search>&<page>&<per_page>&<type>")]
+/// user may read, as JSON, or `action=get-attachment` with `id`, one of them; see the
+/// [module](self).
+#[rocket::get("/admin-ajax.php?<action>&<search>&<page>&<per_page>&<type>&<uploaded_to>&<id>")]
+#[allow(clippy::too_many_arguments)]
 async fn admin_ajax(
     session: Session,
     db: &rocket::State<Arc<Database>>,
@@ -519,7 +522,13 @@ async fn admin_ajax(
     page: Option<&str>,
     per_page: Option<&str>,
     r#type: Option<&str>,
+    uploaded_to: Option<&str>,
+    id: Option<&str>,
 ) -> Result<Json, (Status, &'static str)> {
+    let number = |text: Option<&str>| text.and_then(|t| t.trim().parse::<i64>().ok());
+    if action == Some("get-attachment") {
+        return Ok(get_attachment_json(session, db, number(id)).await);
+    }
     if action != Some("query-attachments") {
         return Err((Status::BadRequest, "0"));
     }
@@ -532,12 +541,13 @@ async fn admin_ajax(
         let refusal = UploadRefusal::NotAllowed;
         return Ok(Json::error(refusal.status(), &refusal.message(), ""));
     }
-    let number = |text: Option<&str>| text.and_then(|t| t.trim().parse::<i64>().ok());
     let query = AttachmentQuery {
         search: search.map(str::to_owned).filter(|s| !s.trim().is_empty()),
         page: number(page).unwrap_or(1),
         per_page: number(per_page).unwrap_or(0),
         media_type: r#type.map(str::to_owned),
+        // The media modal's "Uploaded to this post": a post's id; anything else lists all.
+        uploaded_to: number(uploaded_to).filter(|id| *id > 0),
     };
     match query_attachments(db, &caps, &query).await {
         Ok(found) => {
@@ -565,6 +575,36 @@ async fn admin_ajax(
     }
 }
 
+/// `action=get-attachment` (WordPress's `wp_ajax_get_attachment`): attachment `id` as the
+/// picker reads it, with its `editLink`, when the user may read it; `{"success": false}` with
+/// 404 otherwise, as WordPress answers `wp_send_json_error()`.
+async fn get_attachment_json(session: Session, db: &Database, id: Option<i64>) -> Json {
+    let caps = match session {
+        Session::User(caps) => caps,
+        Session::Visitor => return signed_out(),
+        Session::Failed => return server_error(),
+    };
+    if !may_upload(&caps) {
+        let refusal = UploadRefusal::NotAllowed;
+        return Json::error(refusal.status(), &refusal.message(), "");
+    }
+    let not_found = || Json::new(Status::NotFound, json!({ "success": false }));
+    let Some(id) = id else {
+        return not_found();
+    };
+    match attachment_for_user(db, &caps, id).await {
+        Ok(Some(mut item)) => {
+            item["editLink"] = json!(edit_link(id));
+            Json::new(Status::Ok, json!({ "success": true, "data": item }))
+        }
+        Ok(None) => not_found(),
+        Err(e) => {
+            log::error!("Could not read attachment {id}: {e}");
+            Json::error(500, "The media library could not be read.", "")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The upload page
 
@@ -584,111 +624,109 @@ pub(super) fn escape(text: &str) -> String {
     out
 }
 
-/// WordPress's `media-new.php`: a file field that posts to the browser uploader. `error` is
-/// shown above the form; every value is escaped.
-fn upload_page(token: &str, max_bytes: u64, error: Option<&str>) -> RawHtml<String> {
-    let notice = error.map_or_else(String::new, |message| {
-        format!(
-            "<div class=\"mc-upload-error\" role=\"alert\"><p>{}</p></div>\n",
-            escape(message)
-        )
-    });
+/// The cookie that carries a failed browser upload's message to the upload page shown next.
+const UPLOAD_ERROR_COOKIE: &str = "mc_upload_error";
+
+/// The upload page's path, which the cookie is scoped to.
+fn upload_path() -> String {
+    format!("{ADMIN_PATH}/{ATTACHMENT}/new")
+}
+
+/// `text` as lowercase hexadecimal UTF-8, a cookie value that needs no quoting.
+fn hex_encode(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The text of [`hex_encode`], or `None` when `hex` is not one.
+fn hex_decode(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) || hex.len() > 4096 {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    String::from_utf8(bytes?).ok()
+}
+
+/// A page refused before Ignite's layout can show it: the session or the roles could not be
+/// read, or the user may not upload. Every value is escaped.
+fn refused_page(message: &str) -> RawHtml<String> {
     RawHtml(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Upload New Media</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="{stylesheet}">
-</head>
-<body class="mc-upload-page">
-<main>
-<p><a href="{admin}/{slug}">Media Library</a></p>
-<h1>Upload New Media</h1>
-{notice}<form method="post" action="{admin}/{slug}/new" enctype="multipart/form-data">
-<input type="hidden" name="_token" value="{token}">
-<p><label for="async-upload">Select a file to upload</label><br>
-<input type="file" id="async-upload" name="async-upload" required aria-describedby="mc-upload-limit"></p>
-<p><button type="submit">Upload</button></p>
-</form>
-<p id="mc-upload-limit">Maximum upload file size: {kb} KB.</p>
-</main>
-</body>
-</html>"#,
-        stylesheet = escape(&editor_stylesheet_url()),
-        admin = ADMIN_PATH,
-        slug = ATTACHMENT,
-        notice = notice,
-        token = escape(token),
-        kb = max_bytes / 1024,
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"robots\" content=\"noindex\">\n<title>Add New Media File</title>\n\
+         </head>\n<body>\n<div role=\"alert\"><p>{}</p></div>\n</body>\n</html>",
+        escape(message)
     ))
 }
 
-/// `GET /mc-admin/attachment/new` (Ruling R129): the upload page. The fairing has checked the
-/// screen's capabilities; a visitor fails [`AdminUser`] with 401, which Ignite sends to its
-/// sign-in page.
-#[rocket::get("/attachment/new")]
-fn upload_page_route(
-    _user: AdminUser,
-    session: Session,
-    token: CsrfToken,
-    app: App<'_>,
-) -> (Status, RawHtml<String>) {
-    match session {
-        Session::Failed => (
-            Status::InternalServerError,
-            upload_page(token.value(), app.max_bytes, Some(FAILED)),
-        ),
-        Session::User(caps) if may_upload(&caps) => {
-            (Status::Ok, upload_page(token.value(), app.max_bytes, None))
+/// Why the upload page is refused: the user may not upload (403), or their session or roles
+/// could not be read (500). A user who may upload is forwarded to Ignite's New screen, which
+/// [`MediaViews`] turns into the upload page, inside the admin layout.
+struct UploadPageRefused(Status, &'static str);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for UploadPageRefused {
+    type Error = std::convert::Infallible;
+
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match request.guard::<Session>().await {
+            Outcome::Success(Session::User(caps)) if may_upload(&caps) => {
+                Outcome::Forward(Status::NotFound)
+            }
+            Outcome::Success(Session::Failed) => {
+                Outcome::Success(Self(Status::InternalServerError, FAILED))
+            }
+            _ => Outcome::Success(Self(
+                Status::Forbidden,
+                "Sorry, you are not allowed to upload files.",
+            )),
         }
-        _ => (
-            Status::Forbidden,
-            upload_page(
-                token.value(),
-                app.max_bytes,
-                Some(&UploadRefusal::NotAllowed.message()),
-            ),
-        ),
     }
 }
 
-/// The answer of the browser uploader: the new attachment's edit form, or the page again with
-/// the error.
-type BrowserUpload = Result<Redirect, (Status, RawHtml<String>)>;
+/// `GET /mc-admin/attachment/new` (Ruling R129), WordPress's `media-new.php`: refused here for a
+/// user who may not upload; otherwise Ignite's New screen answers, inside the admin layout, and
+/// [`MediaViews`] puts the upload area in place of its form. A visitor fails [`AdminUser`]
+/// with 401, which Ignite sends to its sign-in page.
+#[rocket::get("/attachment/new")]
+fn upload_page_route(_user: AdminUser, refused: UploadPageRefused) -> (Status, RawHtml<String>) {
+    (refused.0, refused_page(refused.1))
+}
 
 /// `POST /mc-admin/attachment/new`: `media-new.php`'s browser uploader. Stores the file in the
-/// `async-upload` part (with the form's `_token`) and goes to its edit form (303), or shows the
-/// page again with WordPress's message.
+/// `async-upload` part (with the form's `_token`) and goes to its edit form (303). A refused
+/// upload goes back to the upload page (303), which shows WordPress's message: the message
+/// travels in a short-lived cookie scoped to that page, read and cleared when it is shown.
 #[rocket::post("/attachment/new", data = "<data>")]
+#[allow(clippy::too_many_arguments)]
 async fn browser_upload(
     _user: AdminUser,
     session: Session,
     token: CsrfToken,
     headers: UploadHeaders,
     content_type: Option<&ContentType>,
+    cookies: &rocket::http::CookieJar<'_>,
     app: App<'_>,
     data: Data<'_>,
-) -> BrowserUpload {
-    let refused = |status: u16, message: &str| {
-        Err((
-            Status::new(status),
-            upload_page(token.value(), app.max_bytes, Some(message)),
-        ))
+) -> Redirect {
+    let refused = |message: &str| {
+        cookies.add(
+            rocket::http::Cookie::build((UPLOAD_ERROR_COOKIE, hex_encode(message)))
+                .path(upload_path())
+                .http_only(true)
+                .same_site(rocket::http::SameSite::Lax)
+                .max_age(rocket::time::Duration::minutes(5)),
+        );
+        Redirect::to(upload_path())
     };
     let caps = match session {
         Session::User(caps) => caps,
-        Session::Visitor => {
-            return refused(401, "Your session has expired. Please sign in again.");
-        }
-        Session::Failed => return refused(500, FAILED),
+        Session::Visitor => return refused("Your session has expired. Please sign in again."),
+        Session::Failed => return refused(FAILED),
     };
     if !may_upload(&caps) {
-        let refusal = UploadRefusal::NotAllowed;
-        return refused(refusal.status(), &refusal.message());
+        return refused(&UploadRefusal::NotAllowed.message());
     }
     let form = match read_upload(
         data,
@@ -700,30 +738,63 @@ async fn browser_upload(
     .await
     {
         Ok(form) => form,
-        Err(RequestError::Token) => return refused(419, "The link you followed has expired."),
+        Err(RequestError::Token) => return refused("The link you followed has expired."),
         Err(RequestError::TooLarge(max)) => {
-            let refusal = UploadRefusal::TooLarge(max);
-            return refused(refusal.status(), &refusal.message());
+            return refused(&UploadRefusal::TooLarge(max).message());
         }
-        Err(RequestError::Unreadable) => {
-            return refused(400, &UploadRefusal::NoFile.message());
-        }
+        Err(RequestError::Unreadable) => return refused(&UploadRefusal::NoFile.message()),
     };
     let submitted = form.token.clone().or(headers.csrf);
     if !token_matches(&token, submitted.as_deref()) {
-        return refused(419, "The link you followed has expired.");
+        return refused("The link you followed has expired.");
     }
     match store_upload(&app, &caps, form).await {
-        Ok((id, _)) => Ok(Redirect::to(edit_link(id))),
+        Ok((id, _)) => Redirect::to(edit_link(id)),
         Err((refusal, filename)) => {
             let message = if filename.is_empty() {
                 refusal.message()
             } else {
                 format!("“{filename}” has failed to upload. {}", refusal.message())
             };
-            refused(refusal.status(), &message)
+            refused(&message)
         }
     }
+}
+
+/// The upload area of `media-new.php` (`media_upload_form`): the drop zone with "Drop files to
+/// upload", "or" and "Select Files", the browser uploader's file field and Upload button (the
+/// whole form without JavaScript), the maximum upload size (`size_format`), and the list the
+/// uploads are shown in. `assets/editor/upload.js` uploads each file dropped or selected to
+/// `async-upload.php`. `error` is shown above it; every value is escaped.
+fn upload_markup(token: &str, max_bytes: u64, error: Option<&str>) -> String {
+    let notice = error.map_or_else(String::new, |message| {
+        format!(
+            "<div class=\"mc-upload-error\" role=\"alert\"><p>{}</p></div>\n",
+            escape(message)
+        )
+    });
+    format!(
+        r#"<div id="mc-upload" class="mc-upload" data-ajax="{admin}/async-upload.php" data-max="{max_bytes}" data-token="{token}">
+{notice}<form id="file-form" class="mc-upload-form" method="post" action="{admin}/{slug}/new" enctype="multipart/form-data">
+<input type="hidden" name="_token" value="{token}">
+<div id="drag-drop-area" class="mc-drop-area">
+<div class="mc-drop-inside">
+<p class="mc-drop-info">Drop files to upload</p>
+<p>or</p>
+<p class="mc-drop-buttons"><label for="async-upload" class="ig-btn ig-btn-outline mc-select-files">Select Files</label></p>
+<p class="mc-browser-upload"><input type="file" id="async-upload" name="async-upload" required aria-describedby="mc-upload-limit"> <button type="submit" class="ig-btn ig-btn-primary">Upload</button></p>
+</div>
+</div>
+</form>
+<p id="mc-upload-limit" class="mc-max-upload-size">Maximum upload file size: {size}.</p>
+<ul id="media-items" class="mc-upload-items" aria-live="polite"></ul>
+</div>
+"#,
+        admin = ADMIN_PATH,
+        slug = ATTACHMENT,
+        token = escape(token),
+        size = size_format(max_bytes, 0),
+    )
 }
 
 #[cfg(test)]
@@ -731,15 +802,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_page_escapes_what_it_shows() {
-        let page = upload_page("tok\"<en>", 2048, Some("<script>x</script> & “it”")).0;
-        assert!(page.contains(r#"value="tok&quot;&lt;en&gt;""#), "{page}");
+    fn the_upload_area_escapes_what_it_shows() {
+        let area = upload_markup("tok\"<en>", 2048, Some("<script>x</script> & “it”"));
+        assert!(area.contains(r#"value="tok&quot;&lt;en&gt;""#), "{area}");
         assert!(
-            page.contains("&lt;script&gt;x&lt;/script&gt; &amp; “it”"),
-            "{page}"
+            area.contains("&lt;script&gt;x&lt;/script&gt; &amp; “it”"),
+            "{area}"
         );
-        assert!(!page.contains("<script>"), "{page}");
-        assert!(page.contains("Maximum upload file size: 2 KB."), "{page}");
+        assert!(!area.contains("<script>"), "{area}");
+        assert!(area.contains("Maximum upload file size: 2 KB."), "{area}");
+        assert!(area.contains("Drop files to upload"), "{area}");
+        assert!(area.contains(">Select Files</label>"), "{area}");
+    }
+
+    #[test]
+    fn a_message_survives_its_cookie() {
+        let message = "“<b>a b</b>.exe” has failed to upload.";
+        assert_eq!(hex_decode(&hex_encode(message)).as_deref(), Some(message));
+        assert_eq!(hex_decode("zz"), None);
+        assert_eq!(hex_decode("abc"), None);
     }
 
     #[test]
@@ -755,17 +836,51 @@ mod tests {
 // ---------------------------------------------------------------------------------------------
 // The grid and the list (Task A8)
 
-/// The grid, the list and the switch between them, inside the admin layout.
+/// The media library's pages inside the admin layout: the grid, the list and the switch
+/// between them; the upload page; and the file and its details on the edit form.
 ///
-/// Both views are Ignite's own screen at `/mc-admin/attachment`, so both render in the active
-/// admin theme's layout (sidebar, top bar, content wrapper). This fairing changes the answer
-/// of that one `GET`: it adds the grid/list switch under the heading, and in the grid mode,
-/// the default, it puts the grid (`assets/editor/grid.js`) where Ignite's table is. WordPress
-/// keeps the mode in `media_library_mode`; here it is in the address, `?mode=grid` or
-/// `?mode=list`, so the switch is two links and works without JavaScript. Without `mode`, the
-/// list's own search, sort and page mean the list, as Ignite's links to them carry no `mode`;
-/// the plain address is the grid.
+/// Each is Ignite's own screen at `/mc-admin/attachment`, so each renders in the active admin
+/// theme's layout (sidebar, top bar, content wrapper). This fairing changes the answer of their
+/// `GET`:
+///
+/// - The list (`/mc-admin/attachment`): it adds the grid/list switch under the heading, and in
+///   the grid mode, the default, it puts the grid (`assets/editor/grid.js`) where Ignite's table
+///   is. WordPress keeps the mode in `media_library_mode`; here it is in the address,
+///   `?mode=grid` or `?mode=list`, so the switch is two links and works without JavaScript.
+///   Without `mode`, the list's own search, sort and page mean the list, as Ignite's links to
+///   them carry no `mode`; the plain address is the grid. In the list mode, the Thumbnail
+///   column shows each image's thumbnail, as `WP_Media_List_Table::column_title` does.
+/// - The upload page (`/mc-admin/attachment/new`, `media-new.php`): Ignite's New screen, titled
+///   "Add New Media File", with the upload area ([`upload_markup`]) in place of its form, and
+///   the message of a refused browser upload.
+/// - The edit form (`/mc-admin/attachment/<id>/edit`): the file's preview and its facts above
+///   the fields, as WordPress's attachment edit screen shows them ([`details_markup`]).
 struct MediaViews;
+
+/// The media library page a `GET` is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPage {
+    List,
+    Upload,
+    Edit(i64),
+}
+
+/// The media library page at `path`, if it is one.
+fn media_page(path: &str) -> Option<MediaPage> {
+    let screen = format!("{ADMIN_PATH}/{ATTACHMENT}");
+    let rest = path.trim_end_matches('/').strip_prefix(&screen)?;
+    match rest {
+        "" => Some(MediaPage::List),
+        "/new" => Some(MediaPage::Upload),
+        _ => rest
+            .strip_prefix('/')?
+            .strip_suffix("/edit")?
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .map(MediaPage::Edit),
+    }
+}
 
 #[rocket::async_trait]
 impl Fairing for MediaViews {
@@ -777,9 +892,7 @@ impl Fairing for MediaViews {
     }
 
     async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
-        let screen = format!("{ADMIN_PATH}/{ATTACHMENT}");
         if request.method() != Method::Get
-            || request.uri().path().as_str().trim_end_matches('/') != screen
             || response.status() != Status::Ok
             || response.content_type() != Some(ContentType::HTML)
             || !request
@@ -789,16 +902,192 @@ impl Fairing for MediaViews {
         {
             return;
         }
+        let Some(page) = media_page(request.uri().path().as_str()) else {
+            return;
+        };
         let Some(token) = request.guard::<CsrfToken>().await.succeeded() else {
             return;
         };
         let Ok(html) = response.body_mut().to_string().await else {
             return;
         };
-        let html = with_views(&html, wants_grid(request), token.value());
+        let html = match page {
+            MediaPage::List => with_views(&html, wants_grid(request), token.value()),
+            MediaPage::Upload => {
+                let max_bytes = request
+                    .rocket()
+                    .state::<UploadSettings>()
+                    .map_or(0, |settings| settings.max_bytes);
+                let error = request
+                    .cookies()
+                    .get(UPLOAD_ERROR_COOKIE)
+                    .and_then(|cookie| hex_decode(cookie.value()));
+                if error.is_some() {
+                    // Shown once: the cookie is cleared with this answer.
+                    let removal = rocket::http::Cookie::build((UPLOAD_ERROR_COOKIE, ""))
+                        .path(upload_path())
+                        .max_age(rocket::time::Duration::ZERO)
+                        .build();
+                    response.adjoin_header(removal);
+                }
+                with_upload_area(
+                    &html,
+                    &upload_markup(token.value(), max_bytes, error.as_deref()),
+                )
+            }
+            MediaPage::Edit(id) => {
+                let rocket = request.rocket();
+                let details = match (
+                    rocket.state::<Arc<Database>>(),
+                    rocket.state::<Arc<dyn Storage>>(),
+                ) {
+                    (Some(db), Some(storage)) => match attachment_details(db, storage, id).await {
+                        Ok(details) => details,
+                        Err(e) => {
+                            log::error!("Could not read the details of attachment {id}: {e}");
+                            None
+                        }
+                    },
+                    _ => None,
+                };
+                match details {
+                    Some(details) => with_details(&html, &details_markup(&details)),
+                    None => html,
+                }
+            }
+        };
         response.set_header(Header::new("Cache-Control", "no-store"));
         response.set_sized_body(html.len(), Cursor::new(html));
     }
+}
+
+/// `html` with the editor's stylesheet linked before `</head>`, and `script` (when given) loaded
+/// before `</body>`.
+fn with_assets(html: &str, script: Option<&str>) -> String {
+    let head = format!(
+        "<link rel=\"stylesheet\" href=\"{}\">\n</head>",
+        escape(&editor_stylesheet_url())
+    );
+    let out = html.replacen("</head>", &head, 1);
+    match script {
+        Some(url) => out.replacen(
+            "</body>",
+            &format!("<script src=\"{}\"></script>\n</body>", escape(url)),
+            1,
+        ),
+        None => out,
+    }
+}
+
+/// The heading of Ignite's New screen of the media library, and WordPress's for it.
+const NEW_HEADING: (&str, &str) = ("New Media", "Add New Media File");
+
+/// Ignite's New screen `html` as the upload page: the title and the heading "Add New Media
+/// File", and `area` in place of the form. A page without the form is returned as it is.
+fn with_upload_area(html: &str, area: &str) -> String {
+    let Some(heading) = html.find(&format!(">{}</h1>", NEW_HEADING.0)) else {
+        return html.to_owned();
+    };
+    let Some(form_start) = html[heading..].find("<form").map(|at| heading + at) else {
+        return html.to_owned();
+    };
+    let Some(form_end) = html[form_start..]
+        .find("</form>")
+        .map(|at| form_start + at + "</form>".len())
+    else {
+        return html.to_owned();
+    };
+    let mut out = String::with_capacity(html.len() + area.len());
+    let (before, after) = (&html[..form_start], &html[form_end..]);
+    // The `<title>` and the `<h1>`: both say "New Media", in the head and before the form.
+    let before = match (before.find("<title>"), before.find("</title>")) {
+        (Some(open), Some(close)) if open < close => format!(
+            "{}{}{}",
+            &before[..open],
+            before[open..close].replacen(NEW_HEADING.0, NEW_HEADING.1, 1),
+            &before[close..]
+        ),
+        _ => before.to_owned(),
+    };
+    out.push_str(&before.replacen(
+        &format!(">{}</h1>", NEW_HEADING.0),
+        &format!(">{}</h1>", NEW_HEADING.1),
+        1,
+    ));
+    out.push_str(area);
+    out.push_str(after);
+    with_assets(&out, Some(&media_upload_script_url()))
+}
+
+/// The edit form `html` with `details` after its heading. A page without a heading is returned
+/// as it is.
+fn with_details(html: &str, details: &str) -> String {
+    let Some(at) = html.find("</h1>").map(|at| at + "</h1>".len()) else {
+        return html.to_owned();
+    };
+    let out = format!("{}\n{details}{}", &html[..at], &html[at..]);
+    with_assets(&out, None)
+}
+
+/// WordPress's attachment edit screen in small: the file (`wp_get_attachment_image` at 900 by
+/// 450, or a link to a file that is not an image) and `attachment_submitbox_metadata`'s facts:
+/// the upload date, the uploader, the file's address, name, type and size (two decimals, as
+/// it shows them), and an image's dimensions. Every value is escaped.
+fn details_markup(details: &AttachmentDetails) -> String {
+    let preview = if details.preview_url.is_empty() {
+        format!(
+            "<p class=\"mc-attachment-file\"><a href=\"{}\">{}</a></p>",
+            escape(&details.url),
+            escape(if details.title.is_empty() {
+                &details.file_name
+            } else {
+                &details.title
+            })
+        )
+    } else {
+        format!(
+            "<img class=\"mc-attachment-image\" src=\"{}\" alt=\"{}\">",
+            escape(&details.preview_url),
+            escape(&details.alt)
+        )
+    };
+    let mut facts = String::new();
+    let mut fact = |label: &str, value: &str| {
+        facts.push_str(&format!(
+            "<div class=\"mc-attachment-fact\">{label} <strong>{}</strong></div>\n",
+            escape(value)
+        ));
+    };
+    fact("Uploaded on:", &details.uploaded_on);
+    if !details.uploaded_by.is_empty() {
+        fact("Uploaded by:", &details.uploaded_by);
+    }
+    let url = format!(
+        "<div class=\"mc-attachment-fact\"><label for=\"attachment_url\">File URL:</label> \
+         <input type=\"text\" class=\"ig-input mc-attachment-url\" id=\"attachment_url\" readonly \
+         value=\"{}\"></div>\n",
+        escape(&details.url)
+    );
+    let mut more = String::new();
+    let mut fact = |label: &str, value: &str| {
+        more.push_str(&format!(
+            "<div class=\"mc-attachment-fact\">{label} <strong>{}</strong></div>\n",
+            escape(value)
+        ));
+    };
+    fact("File name:", &details.file_name);
+    fact("File type:", &details.file_type);
+    if let Some(size) = details.file_size.filter(|size| *size > 0) {
+        fact("File size:", &size_format(size, 2));
+    }
+    if let Some((width, height)) = details.dimensions {
+        fact("Dimensions:", &format!("{width} by {height} pixels"));
+    }
+    format!(
+        "<section class=\"ig-card mc-attachment-details\" aria-label=\"Attachment details\">\n\
+         <div class=\"mc-attachment-preview\">{preview}</div>\n\
+         <div class=\"mc-attachment-facts\">\n{facts}{url}{more}</div>\n</section>\n"
+    )
 }
 
 /// Whether the request asks for the grid: `mode=grid`, or no `mode` and none of the list's own
@@ -860,20 +1149,67 @@ fn with_views(html: &str, grid: bool, token: &str) -> String {
         out.push_str(&grid_markup(token));
         out.push_str(rest);
     } else {
-        out.push_str(&html[start..]);
+        out.push_str(&with_thumbnails(&html[start..]));
     }
-    let head = format!(
-        "<link rel=\"stylesheet\" href=\"{}\">\n</head>",
-        escape(&editor_stylesheet_url())
-    );
-    let script = format!(
-        "<script src=\"{}\"></script>\n</body>",
-        escape(&media_grid_script_url())
-    );
-    let mut out = out.replacen("</head>", &head, 1);
-    if grid {
-        out = out.replacen("</body>", &script, 1);
+    with_assets(&out, grid.then(media_grid_script_url).as_deref())
+}
+
+/// HTML text unescaped: what Propel's `{{ }}` escaped, before it is escaped again for an
+/// attribute.
+fn unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// The list's table with each row's first cell, the Thumbnail column (the thumbnail's address,
+/// [`mission_control_core::admin::media::COL_THUMB`]), shown as the image, 60 pixels wide, as
+/// WordPress's media list shows it (`alt=""`: the title is beside it). Only an address of the
+/// site (`/...`) or of the web (`http://`, `https://`) is shown; an empty cell stays empty.
+fn with_thumbnails(html: &str) -> String {
+    let Some(body) = html.find("<tbody>") else {
+        return html.to_owned();
+    };
+    let end = html[body..]
+        .find("</tbody>")
+        .map_or(html.len(), |at| body + at);
+    let mut out = String::with_capacity(html.len() + 1024);
+    out.push_str(&html[..body]);
+    let mut rest = &html[body..end];
+    while let Some(row) = rest.find("<tr>") {
+        let cell_start = row + "<tr>".len();
+        out.push_str(&rest[..cell_start]);
+        rest = &rest[cell_start..];
+        let trimmed = rest.trim_start();
+        let gap = rest.len() - trimmed.len();
+        if !trimmed.starts_with("<td>") {
+            continue;
+        }
+        let Some(close) = trimmed.find("</td>") else {
+            continue;
+        };
+        let url = unescape(&trimmed["<td>".len()..close]);
+        let image = if url.starts_with('/') && !url.starts_with("//")
+            || url.starts_with("http://")
+            || url.starts_with("https://")
+        {
+            format!(
+                "<img src=\"{}\" alt=\"\" width=\"60\" height=\"60\" loading=\"lazy\">",
+                escape(&url)
+            )
+        } else {
+            String::new()
+        };
+        out.push_str(&rest[..gap]);
+        out.push_str(&format!("<td class=\"mc-list-thumb\">{image}</td>"));
+        rest = &trimmed[close + "</td>".len()..];
     }
+    out.push_str(rest);
+    out.push_str(&html[end..]);
     out
 }
 
@@ -890,7 +1226,10 @@ fn grid_markup(token: &str) -> String {
 <ul class="mc-grid-items"></ul>
 <aside class="mc-grid-details" hidden aria-label="Attachment details"></aside>
 </div>
-<p><button type="button" class="mc-grid-more" hidden>Load more</button></p>
+<div class="mc-grid-load-more">
+<p class="mc-grid-count"></p>
+<p><button type="button" class="ig-btn ig-btn-outline mc-grid-more" hidden>Load more</button></p>
+</div>
 </div>
 "#,
         admin = ADMIN_PATH,

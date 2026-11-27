@@ -107,7 +107,9 @@ const ALT_FIELD: &str = "alt";
 const CAPTION: &str = "caption";
 const DESCRIPTION: &str = "description";
 
-/// The list's columns.
+/// The list's columns. `col_thumb` holds the address of the attachment's thumbnail (empty for a
+/// file that is not an image); the `mission-control` crate shows it as the image.
+pub const COL_THUMB: &str = "col_thumb";
 const COL_TITLE: &str = "col_title";
 const COL_FILE: &str = "col_file";
 const COL_MIME: &str = "col_mime";
@@ -178,6 +180,7 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
         field(DESCRIPTION, "Description", FieldKindDef::Textarea),
     ];
     resource.columns = vec![
+        column(COL_THUMB, "Thumbnail", false, false),
         column(COL_TITLE, "Title", true, true),
         column(COL_FILE, "File", false, false),
         column(COL_MIME, "Type", false, false),
@@ -368,6 +371,7 @@ fn attachment_filter(
     statuses: &[PostStatus],
     search: Option<&str>,
     media_type: Option<&str>,
+    uploaded_to: Option<i64>,
 ) -> (String, Vec<Sql>) {
     let mut filter = format!(
         "FROM posts p WHERE p.post_type = ? AND p.status IN ({})",
@@ -378,6 +382,10 @@ fn attachment_filter(
     if let Some(family) = media_type {
         filter.push_str(" AND p.mime_type LIKE ? ESCAPE '!'");
         binds.push(format!("{}/%", escape_like(family)).into());
+    }
+    if let Some(parent) = uploaded_to {
+        filter.push_str(" AND p.parent_id = ?");
+        binds.push(parent.into());
     }
     if let Some(search) = search {
         let mut cut = search.len().min(MAX_SEARCH_BYTES);
@@ -431,8 +439,12 @@ fn upload_date(post: &Post) -> NaiveDateTime {
 }
 
 impl AttachmentData {
-    /// The list's column values of `post`.
-    fn columns(row: &mut Row, post: &Post, loaded: &Loaded, offset: FixedOffset) {
+    /// The list's column values of `post`; `base` is the uploads' address.
+    fn columns(row: &mut Row, post: &Post, loaded: &Loaded, offset: FixedOffset, base: &str) {
+        row.insert(
+            COL_THUMB.into(),
+            Value::from(thumbnail_url(base, &loaded.attachment(post))),
+        );
         let title = if post.title.is_empty() {
             "(no title)".to_owned()
         } else {
@@ -464,6 +476,7 @@ impl AttachmentData {
             &[PostStatus::Inherit, PostStatus::Private],
             query.search.as_deref(),
             None,
+            None,
         );
         let date = "COALESCE(p.published_at, p.modified_at)";
         let order = match &query.sort {
@@ -482,13 +495,14 @@ impl AttachmentData {
         let (ids, total) = page_ids(db, &filter, binds, &order, query.page, query.per_page).await?;
         let loaded = Loaded::load(db, &ids).await?;
         let offset = crate::content::gmt_offset(db).await?;
+        let base = uploads_url(db).await?;
         let rows = loaded
             .posts
             .iter()
             .map(|post| {
                 let mut row = Row::new();
                 row.insert("id".into(), Value::from(post.id));
-                Self::columns(&mut row, post, &loaded, offset);
+                Self::columns(&mut row, post, &loaded, offset, &base);
                 row
             })
             .collect();
@@ -506,13 +520,14 @@ impl AttachmentData {
         };
         let attachment = loaded.attachment(post);
         let offset = crate::content::gmt_offset(db).await?;
+        let base = uploads_url(db).await?;
         let mut row = Row::new();
         row.insert("id".into(), Value::from(id));
         row.insert(TITLE.into(), Value::from(attachment.title));
         row.insert(ALT_FIELD.into(), Value::from(attachment.alt));
         row.insert(CAPTION.into(), Value::from(attachment.caption));
         row.insert(DESCRIPTION.into(), Value::from(attachment.description));
-        Self::columns(&mut row, post, &loaded, offset);
+        Self::columns(&mut row, post, &loaded, offset, &base);
         Ok(Some(row))
     }
 
@@ -601,6 +616,68 @@ fn file_url(base: &str, path: &str) -> String {
     }
 }
 
+/// The address of `attachment`'s thumbnail, as the list's File column shows it
+/// (`WP_Media_List_Table::column_title`, a 60 by 60 `wp_get_attachment_image`): its `thumbnail`
+/// sub-size, or the image itself when it has none; empty for a file that is not an image.
+pub fn thumbnail_url(base: &str, attachment: &Attachment) -> String {
+    if !attachment.mime_type.starts_with("image/") {
+        return String::new();
+    }
+    if let Some(size) = attachment
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.sizes.get("thumbnail"))
+    {
+        let folder = attachment
+            .file
+            .rsplit_once('/')
+            .map_or(String::new(), |(folder, _)| format!("{folder}/"));
+        return file_url(base, &format!("{folder}{}", size.file));
+    }
+    file_url(base, &attachment.file)
+}
+
+/// WordPress's `size_format`: `bytes` in the largest unit (B, KB, MB, GB, TB, of 1024) it
+/// reaches, with `decimals` decimals, as `number_format_i18n` writes them in English (`1,024`).
+pub fn size_format(bytes: u64, decimals: usize) -> String {
+    const UNITS: [(&str, u64); 5] = [
+        ("TB", 1 << 40),
+        ("GB", 1 << 30),
+        ("MB", 1 << 20),
+        ("KB", 1 << 10),
+        ("B", 1),
+    ];
+    let (unit, magnitude) = UNITS
+        .into_iter()
+        .find(|(_, magnitude)| bytes >= *magnitude)
+        .unwrap_or(("B", 1));
+    #[allow(clippy::cast_precision_loss)]
+    let value = bytes as f64 / magnitude as f64;
+    format!("{} {unit}", number_format(value, decimals))
+}
+
+/// WordPress's `number_format_i18n` in English: rounded half away from zero to `decimals`, the
+/// thousands separated by commas.
+fn number_format(value: f64, decimals: usize) -> String {
+    let scale = 10f64.powi(i32::try_from(decimals).unwrap_or(0));
+    let rounded = (value * scale).round() / scale;
+    let text = format!("{rounded:.decimals$}");
+    let (whole, fraction) = text
+        .split_once('.')
+        .map_or((text.as_str(), None), |(w, f)| (w, Some(f)));
+    let mut grouped = String::new();
+    for (i, digit) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    match fraction {
+        Some(fraction) => format!("{grouped}.{fraction}"),
+        None => grouped,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The picker
 
@@ -684,6 +761,13 @@ pub fn prepare_attachment_for_js(
             }),
         );
         let object = item.as_object_mut().expect("an object");
+        if metadata.filesize > 0 {
+            object.insert("filesizeInBytes".into(), json!(metadata.filesize));
+            object.insert(
+                "filesizeHumanReadable".into(),
+                json!(size_format(metadata.filesize, 0)),
+            );
+        }
         object.insert("width".into(), json!(metadata.width));
         object.insert("height".into(), json!(metadata.height));
         object.insert(
@@ -695,8 +779,8 @@ pub fn prepare_attachment_for_js(
     item
 }
 
-/// What the picker asks for: `query-attachments`'s `s`, `paged`, `posts_per_page` and
-/// `post_mime_type`.
+/// What the picker asks for: `query-attachments`'s `s`, `paged`, `posts_per_page`,
+/// `post_mime_type` and `post_parent` (the media modal's `uploadedTo`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AttachmentQuery {
     /// The search, if any; cut to [`MAX_SEARCH_BYTES`].
@@ -708,6 +792,9 @@ pub struct AttachmentQuery {
     /// A MIME type family (`image`, `audio`, `video`, `application`, `text`), if any. Anything
     /// that is not lowercase letters is ignored.
     pub media_type: Option<String>,
+    /// Only the attachments uploaded to this post (`post_parent`, the media modal's "Uploaded to
+    /// this post"), if any.
+    pub uploaded_to: Option<i64>,
 }
 
 /// One page of the picker's attachments.
@@ -752,7 +839,12 @@ pub async fn query_attachments(
         .media_type
         .as_deref()
         .filter(|t| !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_lowercase()));
-    let (filter, binds) = attachment_filter(&statuses, query.search.as_deref(), media_type);
+    let (filter, binds) = attachment_filter(
+        &statuses,
+        query.search.as_deref(),
+        media_type,
+        query.uploaded_to,
+    );
     let order = "COALESCE(p.published_at, p.modified_at) DESC, p.id DESC";
     let (ids, total) = page_ids(db, &filter, binds, order, query.page, per_page).await?;
     let loaded = Loaded::load(db, &ids).await?;
@@ -796,6 +888,150 @@ pub async fn attachment_for_js(db: &Database, id: i64) -> Result<Option<Value>, 
         &loaded.attachment(post),
         author,
     )))
+}
+
+/// WordPress's `wp_ajax_get_attachment`: attachment `id` as [`prepare_attachment_for_js`] shapes
+/// it, when `user` may read it: `upload_files`, and an attachment that is `inherit`, or `private`
+/// with `read_private_posts` (what [`query_attachments`] lists). `None` otherwise.
+///
+/// # Errors
+///
+/// The database's error.
+pub async fn attachment_for_user(
+    db: &Database,
+    user: &UserCaps,
+    id: i64,
+) -> Result<Option<Value>, Error> {
+    if !has_cap(user, UPLOAD_FILES) || id <= 0 {
+        return Ok(None);
+    }
+    let Some(post) = Post::query().find(db, id).await? else {
+        return Ok(None);
+    };
+    let readable = match post.status {
+        PostStatus::Inherit => true,
+        PostStatus::Private => has_cap(user, &attachment_post_type().caps().read_private_posts),
+        _ => false,
+    };
+    if post.post_type != ATTACHMENT || !readable {
+        return Ok(None);
+    }
+    attachment_for_js(db, id).await
+}
+
+/// What the edit form of an attachment shows above its fields, as WordPress's attachment edit
+/// screen shows the file (`wp_get_attachment_image` at 900 by 450) and its facts
+/// (`attachment_submitbox_metadata`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentDetails {
+    /// The attachment's id.
+    pub id: i64,
+    /// The file's address.
+    pub url: String,
+    /// The address of the preview: the `large` sub-size, or the image itself; empty for a file
+    /// that is not an image.
+    pub preview_url: String,
+    /// The alternative text, for the preview.
+    pub alt: String,
+    /// The title, for the link to a file that is not an image.
+    pub title: String,
+    /// The file name: `photo.jpg`.
+    pub file_name: String,
+    /// The file type as WordPress shows it: the extension in capitals (`JPG`), or the MIME
+    /// subtype in capitals when the file has no extension.
+    pub file_type: String,
+    /// The file's size in bytes, when it is known.
+    pub file_size: Option<u64>,
+    /// The image's width and height, for an image.
+    pub dimensions: Option<(u32, u32)>,
+    /// The upload date in the site's time zone, as WordPress writes it (`Nov 27, 2026 at 09:30`).
+    pub uploaded_on: String,
+    /// The name of the user who uploaded it.
+    pub uploaded_by: String,
+}
+
+/// The file type `attachment_submitbox_metadata` shows: the extension of `file` in capitals,
+/// or the MIME type's subtype in capitals (`image/` removed) when it has none.
+fn file_type(file: &str, mime: &str) -> String {
+    let name = file_name(file);
+    match name.rsplit_once('.') {
+        Some((_, extension))
+            if !extension.is_empty()
+                && extension.chars().all(|c| c.is_alphanumeric() || c == '_') =>
+        {
+            extension.to_uppercase()
+        }
+        _ => mime.trim_start_matches("image/").to_uppercase(),
+    }
+}
+
+/// The facts of attachment `id` for its edit form ([`AttachmentDetails`]); `storage` gives the
+/// size of a file that has no image metadata. `None` when the screen does not list it.
+///
+/// # Errors
+///
+/// The database's error.
+pub async fn attachment_details(
+    db: &Database,
+    storage: &Arc<dyn Storage>,
+    id: i64,
+) -> Result<Option<AttachmentDetails>, Error> {
+    if listed_attachment(db, id).await?.is_none() {
+        return Ok(None);
+    }
+    let loaded = Loaded::load(db, &[id]).await?;
+    let Some(post) = loaded.posts.first() else {
+        return Ok(None);
+    };
+    let attachment = loaded.attachment(post);
+    let base = uploads_url(db).await?;
+    let offset = crate::content::gmt_offset(db).await?;
+    let uploaded = upload_date(post) + Duration::seconds(i64::from(offset.local_minus_utc()));
+    let image = attachment.mime_type.starts_with("image/");
+    let preview_url = if !image {
+        String::new()
+    } else if let Some(large) = attachment
+        .metadata
+        .as_ref()
+        .and_then(|m| m.sizes.get("large"))
+    {
+        let folder = attachment
+            .file
+            .rsplit_once('/')
+            .map_or(String::new(), |(folder, _)| format!("{folder}/"));
+        file_url(&base, &format!("{folder}{}", large.file))
+    } else {
+        file_url(&base, &attachment.file)
+    };
+    let file_size = match &attachment.metadata {
+        Some(metadata) if metadata.filesize > 0 => Some(metadata.filesize),
+        _ if attachment.file.is_empty() => None,
+        _ => match storage.open(&attachment.file) {
+            Ok(crate::media::OpenedFile::File(_, length)) => Some(length),
+            Ok(crate::media::OpenedFile::Bytes(bytes)) => Some(bytes.len() as u64),
+            Err(e) => {
+                log::warn!("Could not read the size of attachment {id}'s file: {e}");
+                None
+            }
+        },
+    };
+    Ok(Some(AttachmentDetails {
+        id,
+        url: file_url(&base, &attachment.file),
+        preview_url,
+        alt: attachment.alt.clone(),
+        title: attachment.title.clone(),
+        file_name: file_name(&attachment.file).to_owned(),
+        file_type: file_type(&attachment.file, &attachment.mime_type),
+        file_size,
+        dimensions: attachment.metadata.as_ref().map(|m| (m.width, m.height)),
+        uploaded_on: uploaded.format("%b %-d, %Y at %H:%M").to_string(),
+        uploaded_by: loaded
+            .authors
+            .get(&post.author_id)
+            .cloned()
+            .unwrap_or_default(),
+    }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1022,6 +1258,23 @@ mod tests {
             UploadRefusal::File(UploadError::TypeNotAllowed { extension: None }).message(),
             "Sorry, you are not allowed to upload this file type."
         );
+    }
+
+    #[test]
+    fn sizes_are_formatted_as_wordpress_does() {
+        assert_eq!(size_format(0, 0), "0 B");
+        assert_eq!(size_format(512 * 1024, 0), "512 KB");
+        assert_eq!(size_format(2 * 1024 * 1024, 0), "2 MB");
+        assert_eq!(size_format(59_610, 2), "58.21 KB");
+        assert_eq!(size_format(1023, 0), "1,023 B");
+        assert_eq!(size_format(1536, 0), "2 KB");
+    }
+
+    #[test]
+    fn file_types_are_the_extension_in_capitals() {
+        assert_eq!(file_type("2026/11/photo.jpg", "image/jpeg"), "JPG");
+        assert_eq!(file_type("2026/11/report.pdf", "application/pdf"), "PDF");
+        assert_eq!(file_type("2026/11/noext", "image/png"), "PNG");
     }
 
     #[test]

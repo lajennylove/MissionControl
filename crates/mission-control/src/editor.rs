@@ -14,6 +14,9 @@
 //!   picks one from the media library, and inserts it as WordPress's editor does.
 //! - `terms.js`, the post editor's category checklist and tags box, which `editor.js` loads
 //!   when the form has a taxonomy's field for new terms (see `mission_control_core::types`).
+//! - `featured.js`, the post editor's featured image box and its picker, which `editor.js`
+//!   loads when the form has the `featured_media` field.
+//! - `grid.js` and `upload.js`, the media library's grid and the upload page's uploader.
 //! - `editor.css`, the tabs, the Add Media button, the picker and the media library's upload
 //!   page.
 //! - `tinymce/`, the parts of TinyMCE 7.9.3 (GPL-2.0-or-later, see `NOTICE`) the toolbar uses,
@@ -94,6 +97,8 @@ static BUNDLE: &[Asset] = bundle! {
     "js/media.js" => "media.js",
     "js/terms.js" => "terms.js",
     "js/media-grid.js" => "grid.js",
+    "js/media-upload.js" => "upload.js",
+    "js/featured-image.js" => "featured.js",
     "css/editor.css" => "editor.css",
     "js/tinymce/tinymce.min.js" => "tinymce/tinymce.min.js",
     "js/tinymce/license.md" => "tinymce/license.md",
@@ -163,6 +168,15 @@ pub(crate) fn editor_stylesheet_url() -> String {
 /// The URL of the media library's grid script (Task A8), `/mc-includes/js/media-grid.js?ver=...`.
 pub(crate) fn media_grid_script_url() -> String {
     format!("{INCLUDES_PATH}/js/media-grid.js?ver={}", editor_version())
+}
+
+/// The URL of the upload page's script, `/mc-includes/js/media-upload.js?ver=...`, which uploads
+/// the files dropped or selected on `/mc-admin/attachment/new`.
+pub(crate) fn media_upload_script_url() -> String {
+    format!(
+        "{INCLUDES_PATH}/js/media-upload.js?ver={}",
+        editor_version()
+    )
 }
 
 /// The URL of WordPress's Dashicons stylesheet, `/mc-includes/css/dashicons.css?ver=...`, which
@@ -262,6 +276,8 @@ mod tests {
     fn only_the_files_of_the_bundle_are_found() {
         assert!(find(&["js", "editor.js"]).is_some());
         assert!(find(&["js", "terms.js"]).is_some());
+        assert!(find(&["js", "featured-image.js"]).is_some());
+        assert!(find(&["js", "media-upload.js"]).is_some());
         assert!(find(&["js", "tinymce", "tinymce.min.js"]).is_some());
         assert!(find(&["images", "mission-control-mark.webp"]).is_some());
         for refused in [

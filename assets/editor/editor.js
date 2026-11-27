@@ -35,6 +35,7 @@
   var stylesheet = new URL('../css/editor.css', scriptUrl).href + query;
   var mediaScript = new URL('media.js', scriptUrl).href + query;
   var termsScript = new URL('terms.js', scriptUrl).href + query;
+  var featuredScript = new URL('featured-image.js', scriptUrl).href + query;
 
   /** The key under which the last tab used is remembered, as WordPress's `editor` setting. */
   var MODE_KEY = 'mc-editor-mode';
@@ -755,9 +756,25 @@
     document.head.appendChild(tag);
   }
 
+  /**
+   * Loads the featured image box and its picker (`featured-image.js`) when the form has the
+   * featured image's field (`featured_media`).
+   */
+  function loadFeaturedImage() {
+    if (api.featuredImage || !document.querySelector('[data-ignite-field="featured_media"]')) {
+      return;
+    }
+    addStylesheet();
+    var tag = document.createElement('script');
+    tag.src = featuredScript;
+    tag.async = true;
+    document.head.appendChild(tag);
+  }
+
   function start() {
     startLock();
     loadTermBoxes();
+    loadFeaturedImage();
     document.addEventListener('click', function (event) {
       if (event.target.closest && event.target.closest('a[href]')) {
         saveAll();

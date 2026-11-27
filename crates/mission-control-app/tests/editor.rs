@@ -129,6 +129,16 @@ async fn files_are_served() {
         ),
         ("css/editor.css", "editor.css", "text/css; charset=utf-8"),
         (
+            "js/featured-image.js",
+            "featured.js",
+            "text/javascript; charset=utf-8",
+        ),
+        (
+            "js/media-upload.js",
+            "upload.js",
+            "text/javascript; charset=utf-8",
+        ),
+        (
             "js/tinymce/skins/ui/oxide/skin.min.css",
             "tinymce/skins/ui/oxide/skin.min.css",
             "text/css; charset=utf-8",
@@ -152,6 +162,22 @@ async fn files_are_served() {
         let body = response.into_bytes().await.unwrap();
         assert_eq!(body, std::fs::read(assets().join(file)).unwrap(), "{uri}");
     }
+
+    // The editor script loads the featured image box when the form has its field, and the
+    // dialogs open centred over the page (the panel's reset takes their `margin: auto` away).
+    let script = std::fs::read_to_string(assets().join("editor.js")).unwrap();
+    assert!(script.contains("'featured-image.js'"), "editor.js");
+    assert!(
+        script.contains("[data-ignite-field=\"featured_media\"]"),
+        "editor.js"
+    );
+    let css = std::fs::read_to_string(assets().join("editor.css")).unwrap();
+    let centred = css
+        .split_once(".mc-editor-dialog,\n.mc-media-dialog {")
+        .map(|(_, rule)| rule.split_once('}').map_or("", |(rule, _)| rule))
+        .unwrap_or_default();
+    assert!(centred.contains("margin: auto;"), "{centred}");
+    assert!(centred.contains("position: fixed;"), "{centred}");
 
     // HEAD answers with the same headers and no body.
     let response = client
@@ -322,6 +348,16 @@ async fn form_flow(scratch: &ScratchDatabase) {
     );
     let script = format!(r#"<script src="{}" defer></script>"#, editor_script_url());
     assert!(new.contains(&script), "{script} in {new}");
+    // The featured image's field, which the editor script turns into WordPress's box.
+    assert!(
+        new.contains(r#"<div data-ignite-field="featured_media">"#),
+        "{new}"
+    );
+    assert!(
+        new.contains(r#"name="featured_media" type="number""#)
+            && new.contains(r#"data-ignite-media="image""#),
+        "{new}"
+    );
 
     // The script it names is served, cached for a year.
     let response = client.get(editor_script_url()).dispatch().await;

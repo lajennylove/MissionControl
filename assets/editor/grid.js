@@ -1,9 +1,11 @@
 /*!
  * Mission Control's media library grid (Task A8). GPL-2.0-or-later.
  *
- * WordPress's Media Library in its grid mode: the attachments as thumbnails, newest first, a
- * search, "Load more", and the attachment details panel of the selected item, with its edit
- * link and Delete permanently. The page (`/mc-admin/attachment`) is Mission Control's; the
+ * WordPress's Media Library in its grid mode: the attachments as thumbnails (each with its
+ * alternative text as its `alt`), newest first, a search, "Showing X of Y media items" and the
+ * "Load more" button WordPress shows since 5.8 (its infinite scrolling is off by default,
+ * `media_library_infinite_scrolling`), and the attachment details panel of the selected item,
+ * with its edit link and Delete permanently. The page (`/mc-admin/attachment`) is Mission Control's; the
  * items come from `admin-ajax.php?action=query-attachments`, as the Add Media picker reads
  * them. Every value is written as text, never as HTML.
  */
@@ -20,15 +22,19 @@
   var list = root.querySelector('.mc-grid-items');
   var more = root.querySelector('.mc-grid-more');
   var status = root.querySelector('.mc-grid-status');
+  var count = root.querySelector('.mc-grid-count');
   var search = root.querySelector('#mc-grid-search');
   var details = root.querySelector('.mc-grid-details');
   var PER_PAGE = 40;
   var page = 0;
   var totalPages = 1;
+  var total = 0;
   var query = '';
   var items = {};
   /** The latest request: an older answer that arrives later is dropped. */
   var latest = 0;
+  /** Whether the next page's first item takes the focus (a "Load more" press). */
+  var focusNew = false;
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -52,8 +58,10 @@
     if (reset) {
       page = 0;
       totalPages = 1;
+      total = 0;
       items = {};
       list.textContent = '';
+      count.textContent = '';
     }
     if (page >= totalPages) {
       return;
@@ -73,6 +81,7 @@
       .then(function (response) {
         if (request === latest) {
           totalPages = parseInt(response.headers.get('X-MC-TotalPages') || '1', 10) || 1;
+          total = parseInt(response.headers.get('X-MC-Total') || '0', 10) || 0;
         }
         return response.json();
       })
@@ -84,9 +93,24 @@
           failed();
           return;
         }
-        body.data.forEach(add);
+        var first = null;
+        body.data.forEach(function (item) {
+          var button = add(item);
+          first = first || button;
+        });
         status.textContent = list.children.length ? '' : 'No media items found.';
         more.hidden = page >= totalPages;
+        // WordPress's count under the grid (`load-more-count`).
+        count.textContent = list.children.length
+          ? 'Showing ' + list.children.length + ' of ' + Math.max(total, list.children.length) +
+            ' media items'
+          : '';
+        if (focusNew && first) {
+          // After "Load more", the focus goes to the first item it loaded, as WordPress's
+          // "Jump to first loaded item" does.
+          first.focus();
+        }
+        focusNew = false;
       })
       .catch(function () {
         if (request === latest) {
@@ -112,7 +136,8 @@
     if (src) {
       var img = el('img');
       img.src = src;
-      img.alt = '';
+      // The alternative text, as the owner asked (WordPress's grid writes `alt=""`).
+      img.alt = item.alt || '';
       img.loading = 'lazy';
       button.appendChild(img);
     } else {
@@ -123,6 +148,7 @@
     });
     cell.appendChild(button);
     list.appendChild(cell);
+    return button;
   }
 
   /** WordPress's attachment details: the item's facts, its links, and Delete permanently. */
@@ -164,6 +190,7 @@
     fact('Uploaded by', item.authorName);
     fact('File name', item.filename);
     fact('File type', item.mime);
+    fact('File size', item.filesizeHumanReadable);
     var full = item.sizes && item.sizes.full;
     if (full && full.width && full.height) {
       fact('Dimensions', full.width + ' by ' + full.height + ' pixels');
@@ -230,16 +257,30 @@
   });
 
   more.addEventListener('click', function () {
+    focusNew = true;
     load(false);
   });
   var timer = null;
+  function searchNow() {
+    window.clearTimeout(timer);
+    var typed = search.value.trim();
+    if (typed === query) {
+      return;
+    }
+    query = typed;
+    details.hidden = true;
+    load(true);
+  }
   search.addEventListener('input', function () {
     window.clearTimeout(timer);
-    timer = window.setTimeout(function () {
-      query = search.value.trim();
-      details.hidden = true;
-      load(true);
-    }, 300);
+    timer = window.setTimeout(searchNow, 300);
+  });
+  search.addEventListener('search', searchNow);
+  search.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      searchNow();
+    }
   });
   load(true);
 }());

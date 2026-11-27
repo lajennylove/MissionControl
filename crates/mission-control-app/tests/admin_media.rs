@@ -228,6 +228,13 @@ async fn upload<'c>(
     request.dispatch().await
 }
 
+/// `bytes` in KB with two decimals, as `size_format( $bytes, 2 )` writes them.
+fn format_kb(bytes: usize) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let kb = (bytes as f64 / 1024.0 * 100.0).round() / 100.0;
+    format!("{kb:.2}")
+}
+
 async fn attachments(db: &Database) -> i64 {
     Post::query()
         .where_eq("post_type", "attachment")
@@ -517,6 +524,10 @@ async fn flow(scratch: &ScratchDatabase) {
     assert!(grid.contains("<header"), "{grid}");
     assert!(grid.contains("class=\"mc-view-switch\""), "{grid}");
     assert!(!grid.contains("<table"), "{grid}");
+    // WordPress's "Load more" under the grid, with its count (WordPress 5.8 and later).
+    assert!(grid.contains(">Load more</button>"), "{grid}");
+    assert!(grid.contains("class=\"mc-grid-count\""), "{grid}");
+    assert!(grid.contains("<label for=\"mc-grid-search\">"), "{grid}");
     let (_, explicit) = get(&client, "/mc-admin/attachment?mode=grid").await;
     assert!(explicit.contains("id=\"mc-media-grid\""), "{explicit}");
     let response = client
@@ -527,6 +538,10 @@ async fn flow(scratch: &ScratchDatabase) {
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::Ok);
+    let script = response.into_string().await.unwrap();
+    // Each thumbnail carries the item's alternative text.
+    assert!(script.contains("img.alt = item.alt || '';"), "the grid");
+    assert!(script.contains("media items"), "the grid's count");
     // The list view, and the list's own search, sort and pages, are Ignite's list.
     let (status, list) = get(&client, "/mc-admin/attachment?mode=list").await;
     assert_eq!(status, Status::Ok);
@@ -558,6 +573,19 @@ async fn flow(scratch: &ScratchDatabase) {
     );
     let (_, plain) = get(&client, "/mc-admin/attachment").await;
     assert!(plain.contains("mc-media-grid"), "{plain}");
+    // The list's Thumbnail column shows each image's thumbnail (WordPress's 60 by 60 icon in
+    // `WP_Media_List_Table`), and nothing for a file that is not an image.
+    assert!(list.contains("Thumbnail"), "{list}");
+    assert!(
+        list.contains(&format!(
+            "<td class=\"mc-list-thumb\"><img src=\"{thumbnail}\" alt=\"\" width=\"60\" height=\"60\""
+        )),
+        "{list}"
+    );
+    assert!(
+        list.contains("<td class=\"mc-list-thumb\"></td>"),
+        "the PDF: {list}"
+    );
     // Listed with the file name and type, searchable.
     assert!(list.contains("Harbour Boats"), "{list}");
     assert!(list.contains("Harbour-Boats.jpg"), "{list}");
@@ -605,6 +633,69 @@ async fn flow(scratch: &ScratchDatabase) {
     let (_, list) = get(&client, "/mc-admin/attachment?q=dawn").await;
     assert!(list.contains("Boats at dawn"), "{list}");
     assert!(!list.contains("Annual Report"), "{list}");
+    // The search also matches the file name, as `wp_query_attachment_filenames` adds it.
+    let response = client
+        .get("/mc-admin/admin-ajax.php?action=query-attachments&search=Harbour-Boats")
+        .dispatch()
+        .await;
+    let (_, body, total) = json_of(response).await;
+    assert_eq!(total, "1", "{body}");
+    let response = client
+        .get("/mc-admin/admin-ajax.php?action=query-attachments&search=no-such-media")
+        .dispatch()
+        .await;
+    assert_eq!(json_of(response).await.2, "0");
+
+    // The edit form shows the file and its facts, as WordPress's attachment edit screen
+    // (`attachment_submitbox_metadata`): the preview with its alternative text, the upload
+    // date, the file's address, name, type, size and dimensions.
+    let (status, edit_form) = get(&client, &format!("/mc-admin/attachment/{photo}/edit")).await;
+    assert_eq!(status, Status::Ok);
+    assert!(
+        edit_form.contains(&format!(
+            "<img class=\"mc-attachment-image\" src=\"{url}\" alt=\"Fishing boats in the harbour\">"
+        )),
+        "{edit_form}"
+    );
+    assert!(edit_form.contains("Uploaded on: <strong>"), "{edit_form}");
+    assert!(
+        edit_form.contains(&format!("id=\"attachment_url\" readonly value=\"{url}\"")),
+        "{edit_form}"
+    );
+    assert!(
+        edit_form.contains("File name: <strong>Harbour-Boats.jpg</strong>"),
+        "{edit_form}"
+    );
+    assert!(
+        edit_form.contains("File type: <strong>JPG</strong>"),
+        "{edit_form}"
+    );
+    assert!(
+        edit_form.contains(&format!(
+            "File size: <strong>{} KB</strong>",
+            format_kb(jpeg.len())
+        )),
+        "{edit_form}"
+    );
+    assert!(
+        edit_form.contains("Dimensions: <strong>800 by 600 pixels</strong>"),
+        "{edit_form}"
+    );
+    // The fields are still there, after the facts.
+    let facts_at = edit_form.find("mc-attachment-details").unwrap();
+    let alt_at = edit_form.find("name=\"alt\"").unwrap();
+    assert!(facts_at < alt_at);
+    let (_, pdf_form) = get(&client, &format!("/mc-admin/attachment/{report}/edit")).await;
+    assert!(
+        pdf_form.contains("File type: <strong>PDF</strong>"),
+        "{pdf_form}"
+    );
+    assert!(
+        pdf_form.contains(&format!("File size: <strong>{}.00 B</strong>", pdf.len())),
+        "{pdf_form}"
+    );
+    assert!(!pdf_form.contains("Dimensions:"), "{pdf_form}");
+    assert!(pdf_form.contains("Annual Report</a>"), "{pdf_form}");
 
     // Ignite's create is refused: files are uploaded.
     let response = post(
@@ -615,9 +706,36 @@ async fn flow(scratch: &ScratchDatabase) {
     .await;
     assert_eq!(response.status(), Status::Forbidden);
 
-    // The upload page (Ruling R129): a form that works without JavaScript.
+    // The upload page (Ruling R129, `media-new.php`): inside the admin layout, titled as the
+    // other screens are, with WordPress's upload area; a form that works without JavaScript.
     let (status, page) = get(&client, "/mc-admin/attachment/new").await;
     assert_eq!(status, Status::Ok, "{page}");
+    let title = page
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>"))
+        .map(|(title, _)| title.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    assert!(title.starts_with("Add New Media File · "), "{title}");
+    let (_, list_page) = get(&client, "/mc-admin/attachment").await;
+    let list_title = list_page
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>"))
+        .map(|(title, _)| title.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    assert_eq!(
+        title.strip_prefix("Add New Media File"),
+        list_title.strip_prefix("Media"),
+        "the same pattern: {title} / {list_title}"
+    );
+    assert!(page.contains(">Add New Media File</h1>"), "{page}");
+    assert!(page.contains("aria-label=\"Main\""), "{page}");
+    assert!(page.contains("<aside"), "{page}");
+    assert!(page.contains("<main"), "{page}");
+    assert!(page.contains("<header"), "{page}");
+    assert_eq!(page.matches("<html").count(), 1, "{page}");
+    assert!(page.contains("Drop files to upload"), "{page}");
+    assert!(page.contains(">or</p>"), "{page}");
+    assert!(page.contains(">Select Files</label>"), "{page}");
     assert!(page.contains("enctype=\"multipart/form-data\""), "{page}");
     assert!(page.contains("name=\"async-upload\""), "{page}");
     assert!(
@@ -625,6 +743,8 @@ async fn flow(scratch: &ScratchDatabase) {
         "{page}"
     );
     assert!(page.contains("Maximum upload file size: 512 KB."), "{page}");
+    // Ignite's own New form (its fields and its Create button) is gone.
+    assert!(!page.contains("name=\"caption\""), "{page}");
     assert!(
         page.contains(&format!(
             "/mc-includes/css/editor.css?ver={}",
@@ -632,6 +752,24 @@ async fn flow(scratch: &ScratchDatabase) {
         )),
         "{page}"
     );
+    assert!(
+        page.contains(&format!(
+            "/mc-includes/js/media-upload.js?ver={}",
+            editor_version()
+        )),
+        "{page}"
+    );
+    let response = client
+        .get(format!(
+            "/mc-includes/js/media-upload.js?ver={}",
+            editor_version()
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let script = response.into_string().await.unwrap();
+    assert!(script.contains("async-upload"), "the uploader");
+    assert!(script.contains("has failed to upload."), "the uploader");
     let page_token = token_in(&page);
     assert_eq!(page_token, csrf);
     let browser_upload = |fields: Vec<(&'static str, String)>, file: (&'static str, Vec<u8>)| {
@@ -656,14 +794,23 @@ async fn flow(scratch: &ScratchDatabase) {
         .parse()
         .unwrap();
     assert_eq!(get(&client, &to).await.0, Status::Ok);
+    // A refused upload goes back to the upload page, which shows WordPress's message once.
     let response = browser_upload(vec![], ("Lighthouse.jpg", jpeg.clone()))
         .dispatch()
         .await;
-    assert_eq!(response.status().code, 419);
-    let body = response.into_string().await.unwrap();
+    assert_eq!(response.status(), Status::SeeOther);
+    assert_eq!(header(&response, "Location"), "/mc-admin/attachment/new");
+    let (status, body) = get(&client, "/mc-admin/attachment/new").await;
+    assert_eq!(status, Status::Ok);
     assert!(
         body.contains("The link you followed has expired."),
         "{body}"
+    );
+    assert!(body.contains("role=\"alert\""), "{body}");
+    let (_, again) = get(&client, "/mc-admin/attachment/new").await;
+    assert!(
+        !again.contains("The link you followed has expired."),
+        "shown once: {again}"
     );
     let response = browser_upload(
         vec![("_token", csrf.clone())],
@@ -671,9 +818,12 @@ async fn flow(scratch: &ScratchDatabase) {
     )
     .dispatch()
     .await;
-    assert_eq!(response.status(), Status::BadRequest);
-    let body = response.into_string().await.unwrap();
-    assert!(body.contains("&lt;b&gt;evil&lt;/b&gt;.exe"), "{body}");
+    assert_eq!(response.status(), Status::SeeOther);
+    let (_, body) = get(&client, "/mc-admin/attachment/new").await;
+    assert!(
+        body.contains("“&lt;b&gt;evil&lt;/b&gt;.exe” has failed to upload."),
+        "{body}"
+    );
     assert!(!body.contains("<b>evil"), "{body}");
     assert_eq!(attachments(&db).await, 3);
 
