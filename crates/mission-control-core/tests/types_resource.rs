@@ -192,7 +192,10 @@ fn title_and_content_in_supports_make_those_fields() {
     assert!(!field(&resource, "status").required);
     assert!(!field(&resource, "slug").required);
     let columns: Vec<&str> = resource.columns.iter().map(|c| c.key.as_str()).collect();
-    assert_eq!(columns, ["col_title", "col_state", "col_status", "col_date"]);
+    assert_eq!(
+        columns,
+        ["col_title", "col_state", "col_status", "col_date"]
+    );
 
     // A type with no supports has the slug, status, date and password only.
     let bare = post_type_resource(&post_type("rs_bare", Vec::new()), &Registry::default());
@@ -235,6 +238,7 @@ fn the_builtin_types_have_wordpress_s_boxes() {
         columns,
         [
             "col_title",
+            "col_state",
             "col_author",
             "col_status",
             "col_tax_category",
