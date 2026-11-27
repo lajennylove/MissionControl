@@ -847,8 +847,8 @@ async fn flow(scratch: &ScratchDatabase) {
     }
     assert_eq!(attachments(&db).await, 3);
 
-    // Ignite's Image field (the featured image): an attachment's id is accepted and shown,
-    // anything else refused.
+    // The featured image: an attachment's id is accepted, anything else refused with
+    // WordPress's message on the field.
     let response = post(
         &client,
         &format!("/mc-admin/post/{post_id}"),
@@ -863,7 +863,8 @@ async fn flow(scratch: &ScratchDatabase) {
     let status = response.status();
     let body = response.into_string().await.unwrap_or_default();
     assert_eq!(status, Status::UnprocessableEntity, "{body}");
-    assert!(body.contains("must be the id of a media item"), "{body}");
+    assert!(body.contains("Invalid featured media ID."), "{body}");
+    assert!(!body.contains("must be the id of a media item"), "{body}");
     let response = post(
         &client,
         &format!("/mc-admin/post/{post_id}"),
@@ -881,9 +882,12 @@ async fn flow(scratch: &ScratchDatabase) {
         Some(json!(photo))
     );
     let (_, edit_page) = get(&client, &edit).await;
-    assert!(edit_page.contains("Boats at dawn"), "{edit_page}");
     assert!(
-        edit_page.contains("href=\"/mc-admin/attachment\""),
+        edit_page.contains("name=\"featured_media\" type=\"number\""),
+        "{edit_page}"
+    );
+    assert!(
+        edit_page.contains(&format!("value=\"{photo}\"")),
         "{edit_page}"
     );
     // The editor's form loads editor.js, which loads the picker, served from the bundle.

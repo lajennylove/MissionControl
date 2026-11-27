@@ -224,7 +224,7 @@ fn the_builtin_types_have_wordpress_s_boxes() {
         ]
     );
     assert_eq!(field(&post, "author").kind, FieldKindDef::User);
-    assert_eq!(field(&post, "featured_media").kind, FieldKindDef::Image);
+    assert_eq!(field(&post, "featured_media").kind, FieldKindDef::Number);
     assert_eq!(
         field(&post, "tax_category").kind,
         FieldKindDef::Relationship

@@ -3,16 +3,17 @@
  *
  * WordPress's Featured image meta box (`post_thumbnail_meta_box` and `_wp_post_thumbnail_html`)
  * and its media frame (`wp.media.featuredImage`): `editor.js` loads this script when the form
- * has the `featured_media` field (Ignite's Image field, a number field holding the media id).
+ * has the `featured_media` field (a number field holding the media id).
  *
  * - The box: "Set featured image" when there is none; otherwise the image (with its alternative
  *   text), "Click the image to edit or update" and "Remove featured image".
  * - "Set featured image" (or the image) opens the modal "Featured image" with two tabs, in this
- *   order: "Uploaded to this post" (the images attached to the post, shown first) and "Media
- *   Library" (every image, with a search). Both load 40 items at a time with "Load more".
+ *   order: "Uploaded to this post" (the media attached to the post, shown first) and "Media
+ *   Library" (every media item, of every type, with a search; a file that is not an image shows
+ *   its type's icon). Both load 40 items at a time with "Load more".
  * - Selecting an item and pressing the modal's "Set featured image" writes its id in the
- *   field, which the form saves as before (the server still refuses an id that is not a media
- *   item); "Remove featured image" empties it.
+ *   field, which the form saves as before (the server refuses an id that is not a media item
+ *   with WordPress's "Invalid featured media ID."); "Remove featured image" empties it.
  *
  * Nothing changes until the user does, so the panel's unsaved changes alert stays quiet on an
  * unchanged form. Without this script the field shows as Ignite renders it. Every value from
@@ -67,6 +68,9 @@
 
   /** The URL an item shows at `preferred` size (falling back to smaller ones, then the file). */
   function imageUrl(item, preferred) {
+    if (!item || (item.type && item.type !== 'image')) {
+      return '';
+    }
     var sizes = (item && item.sizes) || {};
     var order = preferred === 'medium'
       ? ['medium', 'large', 'full', 'thumbnail']
@@ -77,6 +81,30 @@
       }
     }
     return item && item.url ? item.url : '';
+  }
+
+  /**
+   * The icon of a file that is not an image, as WordPress's media modal shows its type's icon
+   * (`wp_mime_type_icon`): a page with the file's extension (or type) on it.
+   */
+  function typeIcon(item) {
+    var label = String(
+      (item.filename && item.filename.indexOf('.') !== -1 && item.filename.split('.').pop()) ||
+      item.subtype || item.type || 'file'
+    ).toUpperCase().slice(0, 5);
+    var icon = el('span', {
+      'class': 'mc-media-icon mc-media-icon-' + String(item.type || 'file').replace(/[^a-z]/g, ''),
+      'aria-hidden': 'true'
+    });
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 48 64');
+    svg.setAttribute('focusable', 'false');
+    var page = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    page.setAttribute('d', 'M2 2h30l14 14v46H2z M32 2v14h14');
+    svg.appendChild(page);
+    icon.appendChild(svg);
+    icon.appendChild(el('span', { 'class': 'mc-media-icon-label' }, label));
+    return icon;
   }
 
   /** Reads an `admin-ajax.php` answer: `{ data, total }`, or an error with its message. */
@@ -182,7 +210,7 @@
       this.status.textContent = 'No media items found.';
       return;
     }
-    var query = 'action=query-attachments&type=image&page=' + (this.page + 1) +
+    var query = 'action=query-attachments&page=' + (this.page + 1) +
       '&per_page=' + PER_PAGE;
     if (this.uploadedTo) {
       query += '&uploaded_to=' + encodeURIComponent(this.uploadedTo);
@@ -239,6 +267,8 @@
     var src = imageUrl(item, 'thumbnail');
     if (src) {
       button.appendChild(el('img', { src: src, alt: item.alt || '', loading: 'lazy' }));
+    } else {
+      button.appendChild(typeIcon(item));
     }
     button.appendChild(el('span', { 'class': 'mc-media-name' }, item.title || item.filename || ''));
     button.addEventListener('click', function () {
@@ -385,13 +415,15 @@
     var item = this.selected;
     details.textContent = '';
     if (!item) {
-      details.appendChild(el('p', {}, 'Select an image.'));
+      details.appendChild(el('p', {}, 'Select a media item.'));
       return;
     }
     details.appendChild(el('h3', {}, 'Attachment details'));
     var src = imageUrl(item, 'medium');
     if (src) {
       details.appendChild(el('img', { 'class': 'mc-featured-preview', src: src, alt: item.alt || '' }));
+    } else {
+      details.appendChild(typeIcon(item));
     }
     var facts = el('dl', { 'class': 'mc-grid-facts' });
     var fact = function (label, value) {
@@ -402,6 +434,7 @@
       facts.appendChild(el('dd', {}, value));
     };
     fact('File name', item.filename);
+    fact('File type', item.mime);
     fact('Uploaded on', item.dateFormatted);
     fact('File size', item.filesizeHumanReadable);
     if (positive(item.width) && positive(item.height)) {
@@ -445,14 +478,8 @@
     input.parentNode.insertBefore(this.box, input.nextSibling);
     var id = positive(input.value);
     if (id) {
-      // What Ignite showed until the item is read: its address and title.
-      var shown = field.querySelector('p img');
-      this.current = {
-        id: id,
-        url: shown ? shown.getAttribute('src') : '',
-        alt: '',
-        title: shown ? shown.getAttribute('alt') : ''
-      };
+      // The stored id until the item is read.
+      this.current = { id: id, alt: '', title: '' };
       window.fetch(ADMIN + '/admin-ajax.php?action=get-attachment&id=' + id, {
         credentials: 'same-origin',
         headers: { Accept: 'application/json' }
@@ -495,8 +522,12 @@
     var src = imageUrl(item, 'medium');
     if (src) {
       image.appendChild(el('img', { src: src, alt: item.alt || '' }));
+    } else if (item.type) {
+      // A file that is not an image: its type's icon and its name.
+      image.appendChild(typeIcon(item));
+      image.appendChild(el('span', { 'class': 'mc-media-name' }, item.title || item.filename || ''));
     }
-    if (!item.alt) {
+    if ((src || !item.type) && !item.alt) {
       // The button's name, when the image has no alternative text.
       image.appendChild(el('span', { 'class': 'mc-visually-hidden' },
         item.title || 'Featured image'));
@@ -545,7 +576,7 @@
 
   function start() {
     var field = document.querySelector('[data-ignite-field="' + FIELD + '"]');
-    var input = field && field.querySelector('input[name="' + FIELD + '"][data-ignite-media="image"]');
+    var input = field && field.querySelector('input[name="' + FIELD + '"]');
     if (input && !field.querySelector('.mc-featured')) {
       api.featuredBox = new Box(field, input);
     }

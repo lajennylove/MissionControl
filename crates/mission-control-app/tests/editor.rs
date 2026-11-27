@@ -354,8 +354,7 @@ async fn form_flow(scratch: &ScratchDatabase) {
         "{new}"
     );
     assert!(
-        new.contains(r#"name="featured_media" type="number""#)
-            && new.contains(r#"data-ignite-media="image""#),
+        new.contains(r#"name="featured_media" type="number""#),
         "{new}"
     );
 

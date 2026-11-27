@@ -426,6 +426,30 @@
   max-width: 100%;
   height: auto;
 }
+/* The type icon of a file that is not an image (`wp_mime_type_icon`). */
+.mc-media-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 6.5rem;
+  color: #646970;
+}
+.mc-media-icon svg {
+  width: 3rem;
+  height: 4rem;
+  fill: #fff;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+.mc-media-icon-label {
+  position: absolute;
+  bottom: 1.75rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.mc-featured-image .mc-media-icon {
+  justify-items: start;
+}
 .mc-featured-toolbar {
   display: flex;
   justify-content: flex-end;

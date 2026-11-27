@@ -30,7 +30,7 @@
 //! | `page-attributes` | `parent`         | post object (a hierarchical type only)       |
 //! | `page` only       | `template`       | select: "Default template" and the theme's page templates, when it has any (`_wp_page_template`) |
 //! | `page-attributes` | `menu_order`     | number                                       |
-//! | `thumbnail`       | `featured_media` | image (`_thumbnail_id`)                      |
+//! | `thumbnail`       | `featured_media` | number: the media id (`_thumbnail_id`); an id that is not a media item is refused with "Invalid featured media ID." |
 //! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash; blank keeps the post's (Draft on a new post) |
 //! | always            | `date`           | date and time, in the site's time zone; blank is "Publish immediately" |
 //! | always            | `password`       | text (stored as written, as `post_password`) |
@@ -151,8 +151,8 @@ use chrono::{Duration, FixedOffset, NaiveDate, NaiveDateTime};
 use ignite_core::{
     ActingUser, ActionAbility, ActionResult, BadgeColor, ColumnDef, Direction,
     FieldDef as IgniteFieldDef, FormLayout, Group, ListFilter, ListQuery, Page, Row, RowAction,
-    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, register_policy,
-    register_runtime, unregister_policy, unregister_runtime,
+    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, ValidationError,
+    register_policy, register_runtime, unregister_policy, unregister_runtime,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -235,6 +235,10 @@ pub const DELETE_PERMANENTLY_CONFIRMATION: &str = "You are about to permanently 
 
 /// The post meta that holds a post's featured image.
 const THUMBNAIL_META: &str = "_thumbnail_id";
+
+/// WordPress's refusal of a featured image that is not a media item
+/// (`rest_invalid_featured_media`), shown on the field.
+pub const INVALID_FEATURED_MEDIA: &str = "Invalid featured media ID.";
 
 /// The post meta that holds a page's template.
 const TEMPLATE_META: &str = "_wp_page_template";
@@ -653,7 +657,10 @@ pub fn post_type_resource_with_access(
             .featured_image
             .as_deref()
             .unwrap_or("Featured image");
-        fields.push(field(FEATURED_MEDIA, label, FieldKindDef::Image, false));
+        // A number field holding the media id: the editor's script shows it as WordPress's
+        // Featured image box, and the save refuses an id that is not a media item with
+        // WordPress's message (`featured_media_refusal`), not Ignite's media check.
+        fields.push(field(FEATURED_MEDIA, label, FieldKindDef::Number, false));
     }
     let statuses = STATUSES
         .iter()
@@ -2840,6 +2847,43 @@ impl PostTypeData {
     }
 }
 
+impl PostTypeData {
+    /// WordPress's check of the featured image (`rest_invalid_featured_media`): a value sent
+    /// that is not empty, `0` (no featured image) or the id of an attachment is refused with
+    /// [`INVALID_FEATURED_MEDIA`] on the field.
+    async fn featured_media_refusal(
+        &self,
+        db: &Database,
+        input: &Row,
+    ) -> Result<Option<ValidationError>, Error> {
+        if !self.thumbnail {
+            return Ok(None);
+        }
+        let refusal = || {
+            Some(ValidationError::with_messages([(
+                FEATURED_MEDIA,
+                INVALID_FEATURED_MEDIA,
+            )]))
+        };
+        let id = match input.get(FEATURED_MEDIA) {
+            None | Some(Value::Null) => return Ok(None),
+            Some(Value::String(text)) if text.trim().is_empty() || text.trim() == "0" => {
+                return Ok(None);
+            }
+            Some(Value::Number(number)) if number.as_i64() == Some(0) => return Ok(None),
+            Some(value) => match id_of(value) {
+                Some(id) => id,
+                None => return Ok(refusal()),
+            },
+        };
+        let is_attachment = Post::query()
+            .find(db, id)
+            .await?
+            .is_some_and(|post| post.post_type == "attachment");
+        Ok(if is_attachment { None } else { refusal() })
+    }
+}
+
 impl RuntimeData for PostTypeData {
     fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
         Box::pin(async move { self.list_page(db, query, None).await })
@@ -2937,6 +2981,37 @@ impl RuntimeData for PostTypeData {
                 self.access.record_created(actor.id, &self.post_type, id);
             }
             Ok(row)
+        })
+    }
+
+    /// [`create_for`](RuntimeData::create_for), after WordPress's check of the featured image.
+    fn try_create_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move {
+            if let Some(refused) = self.featured_media_refusal(db, &input).await? {
+                return Ok(Err(refused));
+            }
+            self.create_for(db, user, input).await.map(Ok)
+        })
+    }
+
+    /// [`update_for`](RuntimeData::update_for), after WordPress's check of the featured image.
+    fn try_update_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move {
+            if let Some(refused) = self.featured_media_refusal(db, &input).await? {
+                return Ok(Err(refused));
+            }
+            self.update_for(db, user, id, input).await.map(Ok)
         })
     }
 
