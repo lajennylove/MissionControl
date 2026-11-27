@@ -441,7 +441,7 @@ async fn default_category_kept(client: &Client, db: &Database, uncategorized: &T
     .await;
     assert_eq!(status, Status::Forbidden, "{body}");
     assert!(
-        body.contains("The default category cannot be deleted."),
+        body.contains("Sorry, you are not allowed to delete this item."),
         "{body}"
     );
     assert!(

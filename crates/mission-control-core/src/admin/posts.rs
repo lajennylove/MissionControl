@@ -158,7 +158,7 @@ impl Refusal {
                 "Sorry, you are not allowed to edit theme options on this site."
             }
             Self::NoSuchPage => "Sorry, you are not allowed to access this page.",
-            Self::DefaultCategory => "The default category cannot be deleted.",
+            Self::DefaultCategory => "Sorry, you are not allowed to delete this item.",
         }
     }
 }
