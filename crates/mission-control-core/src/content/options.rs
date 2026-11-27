@@ -336,13 +336,18 @@ pub(crate) fn esc_url_raw(url: &str) -> String {
 }
 
 /// Whether `url` is a link a custom menu item can hold: not empty, no spaces or control
-/// characters (the menu editor's URL field is an `<input type="url">`), and a URL `esc_url_raw`
-/// keeps: a path, query or fragment (`/about`, `?p=2`, `#top`), an allowed protocol
-/// (`https://example.com`, `mailto:...`), or an address `esc_url` completes with `http://`
-/// (`example.com`). `https://` with nothing after it is no link.
+/// characters (the menu editor's URL field is an `<input type="url">`), matching the menu
+/// editor's check ([`matches_menu_url_pattern`], `nav-menu.js`' `urlRegex`), and a URL
+/// `esc_url_raw` keeps: a path, query or fragment (`/about`, `?p=2`, `#top`), or an allowed
+/// protocol (`https://example.com`, `mailto:...`). A bare word or host without a protocol
+/// (`notaurl`, `example.com`) is no link, as WordPress's menu editor refuses it, and neither is
+/// `https://` with nothing after it.
 pub fn is_valid_link_url(url: &str) -> bool {
     let url = url.trim();
     if url.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    if !matches_menu_url_pattern(url) {
         return false;
     }
     if url.starts_with(['/', '#', '?']) {
@@ -363,6 +368,26 @@ pub fn is_valid_link_url(url: &str) -> bool {
             .split_once(':')
             .is_some_and(|(_, rest)| !rest.is_empty()),
     }
+}
+
+/// Whether `url` matches the regular expression WordPress's menu editor checks a custom link's
+/// URL with (`nav-menu.js`, `addCustomLink` and the Add to Menu button):
+/// `^((\w+:)?\/\/\w.*|\w+:(?!\/\/$)|\/|\?|#)`: a protocol followed by anything but a
+/// lone `//`, or a URL that starts with `/`, `?` or `#`.
+fn matches_menu_url_pattern(url: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // `\/` matches `//...` too.
+    if url.starts_with(['/', '?', '#']) {
+        return true;
+    }
+    let scheme_end = url.find(|c: char| !word(c)).unwrap_or(url.len());
+    if scheme_end == 0 {
+        return false;
+    }
+    // `\w+:(?!\/\/$)`, or `\w+:\/\/\w.*`: both hold unless only `//` follows the colon.
+    url[scheme_end..]
+        .strip_prefix(':')
+        .is_some_and(|rest| rest != "//")
 }
 
 /// Whether `url` holds `http://` or `https://` and an address after it, as `sanitize_option`
@@ -441,7 +466,7 @@ mod tests {
         for valid in [
             "https://example.com",
             "http://example.com/a?b=c#d",
-            "example.com",
+            "//example.com/a",
             "/about/",
             "#top",
             "?p=2",
@@ -454,6 +479,8 @@ mod tests {
             "",
             "   ",
             "not a url",
+            "notaurl",
+            "example.com",
             "https://",
             "http://",
             "javascript:alert(1)",

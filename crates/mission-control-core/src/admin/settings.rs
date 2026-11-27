@@ -1447,10 +1447,26 @@ async fn screen_errors(
                 );
             }
         }
+        SettingsScreen::Permalink => {
+            // WordPress's Custom Structure needs a tag: an empty one is no structure at all
+            // (Plain is its own choice), so it gets the message of a structure without a tag.
+            let custom = input_text(input, "permalink_selection").as_deref() == Some(CUSTOM);
+            let structure = input_text(input, "permalink_structure").unwrap_or_default();
+            if custom && structure.trim().is_empty() {
+                errors.insert(
+                    "permalink_structure".to_owned(),
+                    STRUCTURE_TAG_REQUIRED.to_owned(),
+                );
+            }
+        }
         _ => {}
     }
     Ok(errors)
 }
+
+/// The message of a custom permalink structure without a structure tag, an empty one included.
+pub const STRUCTURE_TAG_REQUIRED: &str =
+    "A structure tag is required when using custom permalinks.";
 
 /// The error a refused save returns (Ruling R135): Ignite answers it with its error page.
 pub(crate) fn refused_save(reason: &str) -> Error {

@@ -267,6 +267,14 @@ async fn flows(scratch: &ScratchDatabase) {
     profile_picture_too_large(&client).await;
     new_post_is_a_draft(&client, &db).await;
     sticky_posts_have_no_password(&client, &db).await;
+
+    // The second QA round.
+    new_posts_are_not_trashed(&client, &db).await;
+    term_names_are_checked(&client, &db).await;
+    reading_needs_a_homepage(&client, &db).await;
+    settings_screens_have_their_names(&client).await;
+    custom_links_match_wordpress_s_pattern(&client).await;
+    custom_permalinks_need_a_tag(&client, &db).await;
     sign_out(&client).await;
 
     // A super-admin passes every policy, and the default category still has no Delete.
@@ -769,5 +777,436 @@ async fn sticky_posts_have_no_password(client: &Client, db: &Database) {
     assert_eq!(
         get_option(db, "sticky_posts").await.unwrap(),
         Some(json!([id]))
+    );
+}
+
+// The second end-to-end QA round's defects (`flows` runs them after the first round's):
+//
+// 1. A new post is not created in the trash: the New screen has no Trash, and a create that
+//    sends it is refused on the field; an edit that moves a post to the trash goes to the list
+//    with "1 post moved to the Trash." (`edit.php?trashed=1&ids=…`), and no "Record created."
+//    or "Changes saved." is left queued.
+// 2. A term name over 200 characters (the `terms.name` column) is refused on the field.
+// 3. A rename to a name another term has is refused on the field, tags without regard to case.
+// 4. Settings > Reading: "A static page" with no homepage is refused on the field.
+// 5. The settings screens are named as WordPress names them, without "Edit" and "#1".
+// 6. A custom link's URL must match WordPress's pattern: `notaurl` is refused.
+// 7. Permalinks: an empty Custom Structure is refused.
+
+/// The values of `option`s of the select named `name` in `html`.
+fn options_of(html: &str, name: &str) -> Vec<String> {
+    select(html, name)
+        .split("<option value=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Round 2, defect 1.
+async fn new_posts_are_not_trashed(client: &Client, db: &Database) {
+    for post_type in ["post", "page"] {
+        let (status, page) = get(client, &format!("/mc-admin/{post_type}/new")).await;
+        assert_eq!(status, Status::Ok, "{page}");
+        let statuses = options_of(&page, "status");
+        assert!(!statuses.contains(&"trash".to_owned()), "{statuses:?}");
+        assert!(statuses.contains(&"draft".to_owned()), "{statuses:?}");
+    }
+    let count = async || Post::query().count(db).await.unwrap();
+    let before = count().await;
+    let (status, _, body) = post(
+        client,
+        "/mc-admin/post",
+        &[("title", "Born in the trash"), ("status", "trash")],
+    )
+    .await;
+    assert_on_form(status, &body, "Choose one of the options.");
+    assert_eq!(count().await, before, "no post is left behind");
+    // Nothing is queued for a later page.
+    let (_, list) = get(client, "/mc-admin/post").await;
+    assert!(!list.contains("Record created."), "{list}");
+
+    // An existing post moved to the trash from its edit form: the list, with WordPress's notice.
+    for (post_type, notice) in [
+        ("post", "1 post moved to the Trash."),
+        ("page", "1 page moved to the Trash."),
+    ] {
+        let id = new_post(
+            client,
+            post_type,
+            &[("title", "Short-lived"), ("status", "publish")],
+        )
+        .await;
+        let (_, edit) = get(client, &format!("/mc-admin/{post_type}/{id}/edit")).await;
+        assert!(
+            options_of(&edit, "status").contains(&"trash".to_owned()),
+            "{edit}"
+        );
+        let csrf = token(client).await;
+        let response = client
+            .post(format!("/mc-admin/{post_type}/{id}"))
+            .header(ContentType::Form)
+            .body(form(&[
+                ("_token", &csrf),
+                ("title", "Short-lived"),
+                ("status", "trash"),
+            ]))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::SeeOther);
+        assert_eq!(
+            location(&response),
+            format!("/mc-admin/{post_type}?trashed=1&ids={id}")
+        );
+        assert!(
+            response
+                .headers()
+                .get("Set-Cookie")
+                .all(|cookie| !cookie.starts_with("ignite_flash=")),
+            "Ignite's \"Changes saved.\" is not queued"
+        );
+        drop(response);
+        assert_eq!(find(db, id).await.status, PostStatus::Trash);
+        let (status, list) =
+            get(client, &format!("/mc-admin/{post_type}?trashed=1&ids={id}")).await;
+        assert_eq!(status, Status::Ok, "{list}");
+        assert!(list.contains(notice), "{list}");
+        assert!(!list.contains("Changes saved."), "{list}");
+        let (_, again) = get(client, &format!("/mc-admin/{post_type}")).await;
+        assert!(!again.contains(notice), "{again}");
+    }
+}
+
+/// Round 2, defects 2 and 3.
+async fn term_names_are_checked(client: &Client, db: &Database) {
+    let long = "n".repeat(300);
+    let (status, _, body) = post(client, "/mc-admin/category", &[("name", &long)]).await;
+    assert_on_form(status, &body, "Name must not exceed 200 characters.");
+    let (status, _, body) = post(client, "/mc-admin/post_tag", &[("name", &long)]).await;
+    assert_on_form(status, &body, "Name must not exceed 200 characters.");
+    let exactly = "n".repeat(200);
+    let (status, _, body) = post(client, "/mc-admin/category", &[("name", &exactly)]).await;
+    assert_eq!(status, Status::SeeOther, "200 characters are kept: {body}");
+
+    let a = Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("QA Cat A"))
+        .await
+        .unwrap();
+    let b = Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("QA Cat B"))
+        .await
+        .unwrap();
+    let rename = async |screen: &str, id: i64, name: &str| {
+        post(
+            client,
+            &format!("/mc-admin/{screen}/{id}"),
+            &[("name", name), ("slug", ""), ("description", "")],
+        )
+        .await
+    };
+    let (status, _, body) = rename("category", b.term_id, "QA Cat A").await;
+    assert_on_form(status, &body, "Name is already taken.");
+    let (status, _, body) = rename("category", b.term_id, &long).await;
+    assert_on_form(status, &body, "Name must not exceed 200 characters.");
+    // Its own name, and a free one, are saved.
+    let (status, _, body) = rename("category", a.term_id, "QA Cat A").await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+    let (status, _, body) = rename("category", b.term_id, "QA Cat C").await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+
+    let alpha = Term::create(db, &Taxonomy::POST_TAG, NewTerm::new("Alpha"))
+        .await
+        .unwrap();
+    let beta = Term::create(db, &Taxonomy::POST_TAG, NewTerm::new("Beta"))
+        .await
+        .unwrap();
+    let (status, _, body) = rename("post_tag", beta.term_id, "alpha").await;
+    assert_on_form(status, &body, "Name is already taken.");
+    let (status, _, body) = post(client, "/mc-admin/post_tag", &[("name", "ALPHA")]).await;
+    assert_on_form(status, &body, "Name is already taken.");
+    let kept = Term::find(db, beta.term_taxonomy_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.name, "Beta");
+    assert_eq!(
+        Term::find(db, alpha.term_taxonomy_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "Alpha"
+    );
+}
+
+/// The fields of the form in `html` as a browser sends them: each named input's value (a
+/// checked radio or checkbox only), each select's selected option, each textarea's text.
+fn form_fields(html: &str) -> Vec<(String, String)> {
+    let attribute = |tag: &str, name: &str| {
+        let marker = format!(" {name}=\"");
+        tag.find(&marker).map(|at| {
+            let rest = &tag[at + marker.len()..];
+            rest[..rest.find('"').unwrap_or(rest.len())].to_owned()
+        })
+    };
+    let decode = |text: &str| {
+        text.replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&#x27;", "'")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&")
+    };
+    let mut fields = Vec::new();
+    for chunk in html.split("<input").skip(1) {
+        let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+        let Some(name) = attribute(tag, "name") else {
+            continue;
+        };
+        let kind = attribute(tag, "type").unwrap_or_default();
+        if matches!(kind.as_str(), "radio" | "checkbox")
+            && !tag.split([' ', '"']).any(|t| t == "checked")
+        {
+            continue;
+        }
+        if matches!(kind.as_str(), "submit" | "button" | "file") {
+            continue;
+        }
+        fields.push((name, decode(&attribute(tag, "value").unwrap_or_default())));
+    }
+    for chunk in html.split("<select").skip(1) {
+        let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+        let Some(name) = attribute(tag, "name") else {
+            continue;
+        };
+        let body = &chunk[..chunk.find("</select>").unwrap_or(chunk.len())];
+        let selected = body
+            .split("<option")
+            .skip(1)
+            .find(|option| {
+                let tag = &option[..option.find('>').unwrap_or(option.len())];
+                tag.split([' ', '"']).any(|t| t == "selected")
+            })
+            .or_else(|| body.split("<option").nth(1))
+            .and_then(|option| attribute(option, "value"))
+            .unwrap_or_default();
+        fields.push((name, decode(&selected)));
+    }
+    for chunk in html.split("<textarea").skip(1) {
+        let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+        let Some(name) = attribute(tag, "name") else {
+            continue;
+        };
+        let text = &chunk[chunk.find('>').map_or(0, |at| at + 1)..];
+        let text = &text[..text.find("</textarea>").unwrap_or(text.len())];
+        fields.push((name, decode(text)));
+    }
+    fields
+}
+
+/// Posts the form of the page at `page` to `action` as a browser does, with `changes` in place
+/// of the form's values.
+async fn submit(
+    client: &Client,
+    page: &str,
+    action: &str,
+    changes: &[(&str, &str)],
+) -> (Status, String, String) {
+    let (status, html) = get(client, page).await;
+    assert_eq!(status, Status::Ok, "{html}");
+    let start = html
+        .find(&format!("action=\"{action}\""))
+        .unwrap_or_else(|| panic!("a form posting to {action}: {html}"));
+    let form_html = &html[start
+        ..html[start..]
+            .find("</form>")
+            .map_or(html.len(), |e| start + e)];
+    let mut fields = form_fields(form_html);
+    // A changed field's other values go, except the empty value of the hidden input Ignite puts
+    // before a radio group or a checkbox, which a browser sends first.
+    let mut seen = std::collections::HashSet::new();
+    fields.retain(|(name, value)| {
+        let changed = changes.iter().any(|(changed, _)| changed == name);
+        let first = seen.insert(name.clone());
+        !changed
+            || (first
+                && value.is_empty()
+                && form_html.contains(&format!(
+                    "<input type=\"hidden\" name=\"{name}\" value=\"\">"
+                )))
+    });
+    fields.extend(
+        changes
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
+    let pairs: Vec<(&str, &str)> = fields
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let response = client
+        .post(action.to_owned())
+        .header(ContentType::Form)
+        .body(form(&pairs))
+        .dispatch()
+        .await;
+    let status = response.status();
+    let to = location(&response);
+    (status, to, response.into_string().await.unwrap_or_default())
+}
+
+/// Round 2, defect 4: the Reading form as a browser sends it, with "A static page" and no
+/// homepage, is refused on the Homepage field; the same page twice still is.
+async fn reading_needs_a_homepage(client: &Client, db: &Database) {
+    let home = new_post(client, "page", &[("title", "Home"), ("status", "publish")]).await;
+    let page = "/mc-admin/options-reading/1/edit";
+    let action = "/mc-admin/options-reading/1";
+    // From "Your latest posts", as a site starts.
+    let (status, _, body) = submit(
+        client,
+        page,
+        action,
+        &[
+            ("show_on_front", "posts"),
+            ("page_on_front", ""),
+            ("page_for_posts", ""),
+        ],
+    )
+    .await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+    let (status, _, body) = submit(
+        client,
+        page,
+        action,
+        &[("show_on_front", "page"), ("page_on_front", "")],
+    )
+    .await;
+    assert_on_form(status, &body, "Please select a page for your homepage.");
+    let id = home.to_string();
+    let (status, _, body) = submit(
+        client,
+        page,
+        action,
+        &[
+            ("show_on_front", "page"),
+            ("page_on_front", &id),
+            ("page_for_posts", &id),
+        ],
+    )
+    .await;
+    assert_on_form(status, &body, "These pages should not be the same!");
+    let (status, _, body) = submit(
+        client,
+        page,
+        action,
+        &[("show_on_front", "page"), ("page_on_front", &id)],
+    )
+    .await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+    // A homepage is stored: clearing it is refused too.
+    let (status, _, body) = submit(client, page, action, &[("page_on_front", "")]).await;
+    assert_on_form(status, &body, "Please select a page for your homepage.");
+    assert_eq!(
+        get_option(db, "page_on_front").await.unwrap(),
+        Some(json!(home))
+    );
+}
+
+/// Round 2, defect 5.
+async fn settings_screens_have_their_names(client: &Client) {
+    for (slug, name) in [
+        ("options-general", "General Settings"),
+        ("options-writing", "Writing Settings"),
+        ("options-reading", "Reading Settings"),
+        ("options-discussion", "Discussion Settings"),
+        ("options-media", "Media Settings"),
+        ("options-permalink", "Permalink Settings"),
+        ("options-privacy", "Privacy"),
+    ] {
+        let (status, page) = get(client, &format!("/mc-admin/{slug}/1/edit")).await;
+        assert_eq!(status, Status::Ok, "{slug}: {page}");
+        assert!(!page.contains(" #1"), "{slug}: {page}");
+        assert!(!page.contains(&format!("Edit {name}")), "{slug}: {page}");
+        let heading = page
+            .split_once("<h1")
+            .and_then(|(_, rest)| rest.split_once("</h1>"))
+            .map(|(h1, _)| {
+                h1.split_once('>')
+                    .map_or(h1, |(_, text)| text)
+                    .trim()
+                    .to_owned()
+            })
+            .unwrap_or_default();
+        assert_eq!(heading, name, "{slug}");
+        let title = page
+            .split_once("<title>")
+            .and_then(|(_, rest)| rest.split_once("</title>"))
+            .map(|(title, _)| title.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        assert!(title.starts_with(&format!("{name} ")), "{slug}: {title}");
+    }
+    // A record screen keeps its number.
+    let id = new_post(client, "post", &[("title", "Numbered")]).await;
+    let (_, edit) = get(client, &format!("/mc-admin/post/{id}/edit")).await;
+    assert!(edit.contains(&format!("Edit Post #{id}")), "{edit}");
+}
+
+/// Round 2, defect 6.
+async fn custom_links_match_wordpress_s_pattern(client: &Client) {
+    let rows = |url: &str| {
+        json!([{"id": "", "title": "Bad link", "type": "custom", "object_id": "", "url": url,
+                "parent": 0, "classes": "", "new_tab": false}])
+        .to_string()
+    };
+    for url in ["notaurl", "example.com", "javascript:alert(1)", "https://"] {
+        let (status, _, body) = post(
+            client,
+            "/mc-admin/nav-menus",
+            &[("name", "Bad links"), ("items", &rows(url))],
+        )
+        .await;
+        assert_on_form(status, &body, "Please enter a valid URL.");
+    }
+    let script = get(client, "/mc-includes/js/nav-menus.js?ver=1").await.1;
+    assert!(
+        script.contains(r"var URL_PATTERN = /^((\w+:)?\/\/\w.*|\w+:(?!\/\/$)|\/|\?|#)/;"),
+        "{script}"
+    );
+    let (status, _, body) = post(
+        client,
+        "/mc-admin/nav-menus",
+        &[
+            ("name", "More links"),
+            ("items", &rows("https://example.com/")),
+        ],
+    )
+    .await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+}
+
+/// Round 2 (U11): an empty Custom Structure is refused with WordPress's message, and the stored
+/// structure is kept.
+async fn custom_permalinks_need_a_tag(client: &Client, db: &Database) {
+    let page = "/mc-admin/options-permalink/1/edit";
+    let action = "/mc-admin/options-permalink/1";
+    let (status, _, body) =
+        submit(client, page, action, &[("permalink_selection", "postname")]).await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+    let (status, _, body) = submit(
+        client,
+        page,
+        action,
+        &[
+            ("permalink_selection", "custom"),
+            ("permalink_structure", ""),
+        ],
+    )
+    .await;
+    assert_on_form(
+        status,
+        &body,
+        "A structure tag is required when using custom permalinks.",
+    );
+    assert_eq!(
+        get_option(db, "permalink_structure").await.unwrap(),
+        Some(json!("/%postname%/"))
     );
 }

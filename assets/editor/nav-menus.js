@@ -71,14 +71,17 @@
     'gopher', 'nntp', 'feed', 'telnet', 'mms', 'rtsp', 'sms', 'svn', 'tel', 'fax', 'xmpp',
     'webcal', 'urn'];
 
+  /** WordPress's check of a custom link's URL (`nav-menu.js`, `addCustomLink`). */
+  var URL_PATTERN = /^((\w+:)?\/\/\w.*|\w+:(?!\/\/$)|\/|\?|#)/;
+
   /**
-   * Whether `address` is a link a custom item can hold, as the server checks it: no spaces, a
-   * path, query or fragment, an allowed protocol with something after it, or an address that
-   * `esc_url` completes with `http://`.
+   * Whether `address` is a link a custom item can hold, as the server checks it: no spaces,
+   * WordPress's pattern (a protocol, or a path, query or fragment; a bare word such as
+   * `notaurl` is refused), and an allowed protocol with something after it.
    */
   function validUrl(address) {
     var url = text(address).trim();
-    if (url === '' || /[\s\u0000-\u001f\u007f]/.test(url)) {
+    if (url === '' || /[\s\u0000-\u001f\u007f]/.test(url) || !URL_PATTERN.test(url)) {
       return false;
     }
     if (/^[\/#?]/.test(url)) {

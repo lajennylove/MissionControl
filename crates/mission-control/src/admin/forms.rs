@@ -18,6 +18,18 @@
 //!   email field, before Ignite says a link was sent. Ignite's own answer stays for a valid
 //!   address, whether or not it has an account.
 //!
+//! - A post's Status on the New screen has no Trash: a new post is not created in the trash, as
+//!   WordPress's New screen offers no Trash (the save refuses it on the field, see
+//!   `mission_control_core::types`). On the edit form Trash stays; a save that moves the post to
+//!   the trash goes to the list with WordPress's notice, "1 post moved to the Trash."
+//!   (`edit.php?trashed=1&ids=…`, `$bulk_messages['post']['trashed']`), in place of Ignite's
+//!   "Changes saved.", as WordPress's Move to Trash goes to the list.
+//! - A settings screen's heading and title are its own name ("General Settings", as
+//!   `options-general.php` shows it), not Ignite's "Edit General Settings #1": the screen has one
+//!   record, which is not named. The record screens keep the number.
+//! - A list asked for a page beyond its last is sent to its last page, as `WP_List_Table`'s
+//!   `set_pagination_args` redirects to `paged` = the last page.
+//!
 //! The rewrites are on the HTML Ignite answers, as the media library's and the menu builder's
 //! views are; a form without the field is left as it is.
 
@@ -25,12 +37,12 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use mission_control_core::admin::CATEGORY_SCREEN;
-use mission_control_core::content::{Post, Taxonomy, Term, is_email};
+use mission_control_core::admin::{CATEGORY_SCREEN, SettingsScreen};
+use mission_control_core::content::{Post, PostStatus, Taxonomy, Term, is_email};
 use mission_control_core::types::PostTypeResources;
 use orbit_orm::{Database, Error, Model};
 use rocket::fairing::{Fairing, Info, Kind};
-use rocket::http::{ContentType, Method, RawStr, Status};
+use rocket::http::{ContentType, Header, Method, RawStr, Status};
 use rocket::{Data, Request, Response};
 
 use super::ADMIN_SEGMENT;
@@ -38,6 +50,12 @@ use super::media::escape;
 
 /// The status a new post's dropdown shows, as WordPress's New screen.
 const DRAFT: &str = "draft";
+
+/// The trash status, which a new post's dropdown does not offer.
+const TRASH: &str = "trash";
+
+/// The name of Ignite's flash message cookie, which a save that trashes a post drops.
+const FLASH_COOKIE: &str = "ignite_flash";
 
 /// The message of an empty lost password form.
 pub(crate) const EMAIL_REQUIRED: &str = "Please enter an email address.";
@@ -124,7 +142,18 @@ impl Fairing for FormViews {
     }
 
     async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
+        if request.method() == Method::Post && response.status() == Status::SeeOther {
+            trashed_by_save(request, response).await;
+            return;
+        }
         if response.content_type() != Some(ContentType::HTML) {
+            return;
+        }
+        if request.method() == Method::Get
+            && response.status() == Status::Ok
+            && let Some(slug) = list_slug(request.uri().path().as_str())
+        {
+            list_page(request, response, &slug).await;
             return;
         }
         if let Some((email, message)) = request.local_cache(ForgotRefusal::default).0.get() {
@@ -153,6 +182,14 @@ impl Fairing for FormViews {
         let slug = match &page {
             FormPage::New(slug) | FormPage::Edit(slug, _) => slug.as_str(),
         };
+        if let (FormPage::Edit(_, id), Some(screen)) = (&page, SettingsScreen::from_slug(slug)) {
+            let Ok(html) = response.body_mut().to_string().await else {
+                return;
+            };
+            let html = with_screen_title(&html, screen, *id);
+            response.set_sized_body(html.len(), Cursor::new(html));
+            return;
+        }
         let post_type = rocket
             .state::<Arc<PostTypeResources>>()
             .and_then(|resources| resources.post_type(slug));
@@ -180,9 +217,11 @@ impl Fairing for FormViews {
         let Ok(mut html) = response.body_mut().to_string().await else {
             return;
         };
+        let new = matches!(page, FormPage::New(_));
         if post_type.is_some() {
             html = edit_select(&html, "status", |options| {
-                options.retain(|o| !o.value.is_empty());
+                // WordPress's New screen has no Trash: a post goes there once it exists.
+                options.retain(|o| !o.value.is_empty() && !(new && o.value == TRASH));
                 if !options.iter().any(|o| o.selected) {
                     for option in options.iter_mut() {
                         option.selected = option.value == DRAFT;
@@ -211,6 +250,178 @@ impl Fairing for FormViews {
         });
         response.set_sized_body(html.len(), Cursor::new(html));
     }
+}
+
+/// `html`, a settings screen's form, with its own name as its heading and title: Ignite's
+/// "Edit General Settings #1" is "General Settings", as WordPress's settings screens are named.
+fn with_screen_title(html: &str, screen: SettingsScreen, id: i64) -> String {
+    html.replace(&format!("Edit {} #{id}", screen.title()), screen.title())
+}
+
+/// The slug of the list a path shows (`/mc-admin/<slug>`), if it is one.
+fn list_slug(path: &str) -> Option<String> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    if segments.next()? != ADMIN_SEGMENT {
+        return None;
+    }
+    let slug = segments.next().filter(|slug| !slug.is_empty())?;
+    segments.next().is_none().then(|| slug.to_owned())
+}
+
+/// After a save of a post (`POST <slug>/<id>`) that moved it to the trash: the browser goes to
+/// the list with WordPress's notice (`edit.php?trashed=1&ids=<id>`), and Ignite's "Changes
+/// saved." is dropped. Any other answer is left alone.
+async fn trashed_by_save<'r>(request: &'r Request<'_>, response: &mut Response<'r>) {
+    let mut segments = request.uri().path().segments();
+    let (Some(ADMIN_SEGMENT), Some(slug), Some(record), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return;
+    };
+    let Some(id) = record.parse::<i64>().ok().filter(|id| *id > 0) else {
+        return;
+    };
+    let rocket = request.rocket();
+    let is_post_type = rocket
+        .state::<Arc<PostTypeResources>>()
+        .is_some_and(|resources| resources.post_type(slug).is_some());
+    let Some(db) = rocket.state::<Arc<Database>>() else {
+        return;
+    };
+    if !is_post_type {
+        return;
+    }
+    let trashed = match Post::query().find(db.as_ref(), id).await {
+        Ok(post) => post.is_some_and(|p| p.post_type == slug && p.status == PostStatus::Trash),
+        Err(e) => {
+            log::error!("Could not read post {id} after its save: {e}");
+            false
+        }
+    };
+    if !trashed {
+        return;
+    }
+    let kept: Vec<String> = response
+        .headers()
+        .get("Set-Cookie")
+        .filter(|cookie| !cookie.starts_with(&format!("{FLASH_COOKIE}=")))
+        .map(str::to_owned)
+        .collect();
+    response.remove_header("Set-Cookie");
+    for cookie in kept {
+        response.adjoin_header(Header::new("Set-Cookie", cookie));
+    }
+    response.set_raw_header(
+        "Location",
+        format!("{}/{slug}?trashed=1&ids={id}", super::ADMIN_PATH),
+    );
+}
+
+/// WordPress's notice of posts moved to the trash (`$bulk_messages['post']['trashed']`): "1 post
+/// moved to the Trash.", with "page" on the Pages list.
+fn trashed_message(slug: &str, count: i64) -> String {
+    let noun = if slug == "page" { "page" } else { "post" };
+    if count == 1 {
+        format!("1 {noun} moved to the Trash.")
+    } else {
+        format!("{count} {noun}s moved to the Trash.")
+    }
+}
+
+/// A list page: sent to its last page when it asks for one beyond it (`set_pagination_args`),
+/// and on a post type's list, the trash notice of `?trashed=<n>`.
+async fn list_page<'r>(request: &'r Request<'_>, response: &mut Response<'r>, slug: &str) {
+    let Ok(html) = response.body_mut().to_string().await else {
+        return;
+    };
+    if let Some(last) = beyond_last_page(&html) {
+        let query: Vec<String> = request
+            .uri()
+            .query()
+            .map(|query| {
+                query
+                    .segments()
+                    .filter(|(key, _)| *key != "page")
+                    .map(|(key, value)| {
+                        format!(
+                            "{}={}",
+                            RawStr::new(key).percent_encode(),
+                            RawStr::new(value).percent_encode()
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut query = query;
+        if last > 1 {
+            query.push(format!("page={last}"));
+        }
+        let location = if query.is_empty() {
+            request.uri().path().to_string()
+        } else {
+            format!("{}?{}", request.uri().path(), query.join("&"))
+        };
+        response.set_status(Status::SeeOther);
+        response.set_raw_header("Location", location);
+        response.set_sized_body(0, Cursor::new(String::new()));
+        return;
+    }
+    let count = request
+        .query_value::<i64>("trashed")
+        .and_then(Result::ok)
+        .filter(|n| *n > 0);
+    let is_post_type = request
+        .rocket()
+        .state::<Arc<PostTypeResources>>()
+        .is_some_and(|resources| resources.post_type(slug).is_some());
+    let html = match count {
+        Some(count) if is_post_type => with_notice(&html, &trashed_message(slug, count)),
+        _ => html,
+    };
+    response.set_sized_body(html.len(), Cursor::new(html));
+}
+
+/// The last page of a list page that shows a page beyond it (Ignite's "Page 4 of 3"), if it does.
+fn beyond_last_page(html: &str) -> Option<i64> {
+    let marker = "<span>Page ";
+    let start = html.find(marker)? + marker.len();
+    let rest = &html[start..];
+    let (page, rest) = rest.split_once(" of ")?;
+    let last: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let page: i64 = page.trim().parse().ok()?;
+    let last: i64 = last.parse().ok()?;
+    (page > last).then_some(last)
+}
+
+/// `html` with `message` as a success notice above the content, in the markup of the theme's
+/// flash message: WordPress's admin notice in the WordPress admin theme (its `.wrap`), Ignite's
+/// otherwise (the start of `<main>`).
+fn with_notice(html: &str, message: &str) -> String {
+    let message = escape(message);
+    let wordpress = "<div class=\"wrap\">";
+    if let Some(at) = html.find(wordpress) {
+        let at = at + wordpress.len();
+        return format!(
+            "{}<div class=\"notice notice-success\" role=\"status\"><p>{message}</p></div>{}",
+            &html[..at],
+            &html[at..]
+        );
+    }
+    let Some(main) = html.find("<main") else {
+        return html.to_owned();
+    };
+    let Some(at) = html[main..].find('>').map(|end| main + end + 1) else {
+        return html.to_owned();
+    };
+    format!(
+        "{}<p class=\"mb-5 rounded-md border border-primary/30 bg-lightprimary px-4 py-3 \
+         text-heading\" role=\"status\">{message}</p>{}",
+        &html[..at],
+        &html[at..]
+    )
 }
 
 /// The lost password form's address, `/mc-admin/password/forgot`.
@@ -428,6 +639,47 @@ mod tests {
             form_page(Method::Post, Status::SeeOther, "/mc-admin/post"),
             None
         );
+    }
+
+    #[test]
+    fn settings_screens_are_named_without_the_record() {
+        let html = "<title>\n  Edit Reading Settings #1\n &lsaquo; Site</title>\
+                    <h1 class=\"mb-6\">Edit Reading Settings #1</h1>";
+        assert_eq!(
+            with_screen_title(html, SettingsScreen::Reading, 1),
+            "<title>\n  Reading Settings\n &lsaquo; Site</title>\
+             <h1 class=\"mb-6\">Reading Settings</h1>"
+        );
+    }
+
+    #[test]
+    fn a_page_beyond_the_last_is_found() {
+        assert_eq!(
+            beyond_last_page("<span>Page 4 of 3 · 60 in total</span>"),
+            Some(3)
+        );
+        assert_eq!(
+            beyond_last_page("<span>Page 3 of 3 · 60 in total</span>"),
+            None
+        );
+        assert_eq!(beyond_last_page("<p>No pager</p>"), None);
+        assert_eq!(list_slug("/mc-admin/attachment"), Some("attachment".into()));
+        assert_eq!(list_slug("/mc-admin/attachment/3/edit"), None);
+        assert_eq!(list_slug("/mc-admin"), None);
+    }
+
+    #[test]
+    fn the_trash_notice_is_wordpress_s() {
+        assert_eq!(trashed_message("post", 1), "1 post moved to the Trash.");
+        assert_eq!(trashed_message("page", 2), "2 pages moved to the Trash.");
+        let html = "<div class=\"wrap\"><h1>Posts</h1></div>";
+        assert_eq!(
+            with_notice(html, "1 post moved to the Trash."),
+            "<div class=\"wrap\"><div class=\"notice notice-success\" role=\"status\">\
+             <p>1 post moved to the Trash.</p></div><h1>Posts</h1></div>"
+        );
+        let html = "<main class=\"mx-auto\"><h1>Posts</h1></main>";
+        assert!(with_notice(html, "x").starts_with("<main class=\"mx-auto\"><p class="));
     }
 
     #[test]

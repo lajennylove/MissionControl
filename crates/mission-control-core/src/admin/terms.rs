@@ -15,7 +15,9 @@
 //!   is made unique (`rust-2`), and a taken slug given on edit is refused; a name that exists
 //!   under the same parent (anywhere, for tags) is refused on create. The refusals show on the
 //!   form, as Ignite shows a unique violation: "Name is already taken." and "Slug is already
-//!   taken.". The name passes through `sanitize_text_field` and the description through
+//!   taken."; a rename to a name another term has there is refused the same way. A name longer
+//!   than 200 characters (the `terms.name` column) is refused on the field ([`NAME_TOO_LONG`]).
+//!   The name passes through `sanitize_text_field` and the description through
 //!   `wp_filter_kses`, for every user, as the REST API stores them.
 //! - Delete is `wp_delete_term`: the term leaves the posts that had it, its children move to its
 //!   parent, and a post left with no category gets the default one. The default category (the
@@ -48,8 +50,8 @@ use super::navigation;
 use super::posts::{PostScreen, Refusal};
 use super::settings::refused_save;
 use crate::content::{
-    MAX_FILTERED_BYTES, NewTerm, Taxonomy, Term, TermChanges, TermError, default_term_ids,
-    kses_data, sanitize_text_field, terms_by_term_id,
+    MAX_FILTERED_BYTES, MAX_TERM_LENGTH, NewTerm, Taxonomy, Term, TermChanges, TermError,
+    default_term_ids, kses_data, sanitize_text_field, terms_by_term_id,
 };
 use crate::front::escape_like;
 use crate::rest::{KsesLimiter, id_of};
@@ -97,6 +99,15 @@ pub const DEFAULT_TERM_KEY: &str = "default_term";
 /// edit form's dropdown leaves the category and its descendants out, as `term.php`'s
 /// `wp_dropdown_categories` does with `exclude_tree`).
 pub const OWN_PARENT_CATEGORY: &str = "A category cannot be its own parent.";
+
+/// The refusal of a name longer than [`MAX_TERM_LENGTH`] characters, on the Name field. WordPress
+/// has no message of its own for it: its limit is the size of the `terms.name` column
+/// (`varchar(200)`), which the database enforces.
+pub const NAME_TOO_LONG: &str = "Name must not exceed 200 characters.";
+
+/// The refusal of a name another term has, on the Name field: Ignite's message for a unique
+/// violation, as the create form shows it.
+pub const NAME_TAKEN: &str = "Name is already taken.";
 
 /// The taxonomy a term screen's slug serves, if `slug` is one.
 pub fn term_screen_taxonomy(slug: &str) -> Option<Taxonomy> {
@@ -454,6 +465,44 @@ impl TermsData {
         Ok(Some(Self::row_of(&term, 0, &defaults)))
     }
 
+    /// The Name field's refusal of `input`, for the term `id` (`None` on the New screen):
+    /// [`NAME_TOO_LONG`] for a name, as it is stored, longer than [`MAX_TERM_LENGTH`]
+    /// characters; and on edit, [`NAME_TAKEN`] for a name another term has under the same parent
+    /// (anywhere, for tags), compared without regard to case as `term_exists` compares names
+    /// (the create path refuses it in the terms API).
+    async fn name_refusal(
+        &self,
+        db: &Database,
+        id: Option<i64>,
+        input: &Row,
+    ) -> Result<Option<ValidationError>, Error> {
+        let (name, _) = self.sanitize(text(input, NAME), None).await?;
+        let Some(name) = name.map(|n| n.trim().to_owned()) else {
+            return Ok(None);
+        };
+        let refuse = |message: &str| Some(ValidationError::with_messages([(NAME, message)]));
+        if name.chars().count() > MAX_TERM_LENGTH {
+            return Ok(refuse(NAME_TOO_LONG));
+        }
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let Some(term) = self.term(db, id).await? else {
+            return Ok(None);
+        };
+        let parent = match self.parent(input) {
+            Some(parent) => parent,
+            None => term.parent_id,
+        };
+        let lower = name.to_lowercase();
+        let taken = Term::all(db, &self.taxonomy).await?.iter().any(|other| {
+            other.term_id != id
+                && (!self.taxonomy.hierarchical || other.parent_id == parent)
+                && other.name.to_lowercase() == lower
+        });
+        Ok(if taken { refuse(NAME_TAKEN) } else { None })
+    }
+
     /// The parent choices: "None", then every category in tree order, indented by level.
     async fn parent_choices(&self, db: &Database) -> Result<Vec<(String, String)>, Error> {
         let mut choices = vec![(String::new(), "None".to_owned())];
@@ -535,7 +584,26 @@ impl RuntimeData for TermsData {
                     OWN_PARENT_CATEGORY,
                 )])));
             }
+            if let Some(refused) = self.name_refusal(db, Some(id), &input).await? {
+                return Ok(Err(refused));
+            }
             self.update(db, id, input).await.map(Ok)
+        })
+    }
+
+    /// [`create`](RuntimeData::create), after the name's length is checked on the field
+    /// ([`NAME_TOO_LONG`]).
+    fn try_create_for<'a>(
+        &'a self,
+        db: &'a Database,
+        _user: &'a ActingUser,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move {
+            if let Some(refused) = self.name_refusal(db, None, &input).await? {
+                return Ok(Err(refused));
+            }
+            self.create(db, input).await.map(Ok)
         })
     }
 

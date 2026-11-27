@@ -31,7 +31,7 @@
 //! | `page` only       | `template`       | select: "Default template" and the theme's page templates, when it has any (`_wp_page_template`) |
 //! | `page-attributes` | `menu_order`     | number                                       |
 //! | `thumbnail`       | `featured_media` | number: the media id (`_thumbnail_id`); an id that is not an image's is refused with "Invalid featured media ID." (`set_post_thumbnail`) |
-//! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash; blank keeps the post's (Draft on a new post) |
+//! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, and Trash on edit only; blank keeps the post's (Draft on a new post) |
 //! | always            | `date`           | date and time, in the site's time zone; blank is "Publish immediately" |
 //! | always            | `password`       | text (stored as written, as `post_password`) |
 //! | `post` only       | `sticky`         | checkbox; refused with a password ("A post can not be sticky and have a password.") |
@@ -2885,8 +2885,8 @@ impl PostTypeData {
         Ok(if is_image { None } else { refusal() })
     }
 
-    /// The form's checks before a save of post `id` (`None` on the New screen), by field:
-    /// WordPress's check of the featured image
+    /// The form's checks before a save of post `id` (`None` on the New screen), by field: a new
+    /// post with the Trash status ([`NEW_POST_TRASH`]), WordPress's check of the featured image
     /// ([`featured_media_refusal`](Self::featured_media_refusal)), a post chosen as its own
     /// parent ([`own_parent_message`]; the edit form's Parent leaves the post and its
     /// descendants out, as `wp_dropdown_pages`' `exclude_tree`), and a sticky post
@@ -2900,6 +2900,14 @@ impl PostTypeData {
         input: &Row,
     ) -> Result<Option<ValidationError>, Error> {
         let mut messages: Vec<(&str, String)> = Vec::new();
+        // WordPress's New screen offers no Trash: a post goes to the trash once it exists. The
+        // New screen's Status leaves it out (the app's form fairing); a create that sends it is
+        // refused on the field with Ignite's message for a choice the select does not offer.
+        if id.is_none()
+            && input.get(STATUS).and_then(Value::as_str) == Some(PostStatus::Trash.as_str())
+        {
+            messages.push((STATUS, NEW_POST_TRASH.to_owned()));
+        }
         if self.featured_media_refusal(db, input).await?.is_some() {
             messages.push((FEATURED_MEDIA, INVALID_FEATURED_MEDIA.to_owned()));
         }
@@ -2922,6 +2930,10 @@ impl PostTypeData {
 fn is_image_mime(mime: &str) -> bool {
     mime.to_ascii_lowercase().starts_with("image/")
 }
+
+/// The refusal of a new post saved with the Trash status, on the Status field: Ignite's message
+/// for a choice its select does not offer (the New screen has no Trash).
+pub const NEW_POST_TRASH: &str = "Choose one of the options.";
 
 /// The refusal of a post chosen as its own parent, on the Parent field: "A page cannot be its
 /// own parent.".
