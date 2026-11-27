@@ -189,6 +189,9 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
         super::navigation::MEDIA,
         super::navigation::MEDIA_ICON,
     );
+    // The upload page in the menu's group, as WordPress's Media > Add New Media File.
+    resource.navigation_create_item = true;
+    resource.navigation_create_label = Some(super::navigation::CREATE_LABEL.to_owned());
     resource
 }
 

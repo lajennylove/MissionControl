@@ -709,6 +709,22 @@ async fn sidebar(client: &Client, uri: &str) -> String {
     html[start..start + html[start..].find("</nav>").unwrap()].to_owned()
 }
 
+/// The links of the sidebar group of the entry `title` (Ignite's theme: its create link, then
+/// each entry under it with its create link), and whether the group is open. A closed group's
+/// links are in the page, `hidden`, and its toggle shows them.
+fn group_links<'n>(nav: &'n str, title: &str) -> (bool, &'n str) {
+    let entry = nav
+        .find(&format!("</i>{title}</a>"))
+        .unwrap_or_else(|| panic!("the entry {title}: {nav}"));
+    let start = entry
+        + nav[entry..]
+            .find("<div id=\"ig-nav-items-")
+            .unwrap_or_else(|| panic!("the links of {title}: {nav}"));
+    let tag_end = start + nav[start..].find('>').unwrap();
+    let end = tag_end + nav[tag_end..].find("</div>").unwrap();
+    (!nav[start..tag_end].contains(" hidden"), &nav[tag_end..end])
+}
+
 /// Asserts each of `entries` comes in `nav`, in order.
 fn assert_in_order(nav: &str, entries: &[&str]) {
     let mut at = 0;
@@ -733,6 +749,8 @@ async fn sidebar_children(client: &Client) {
             format!("<a class=\"ig-nav-link py-1.5 pl-11 text-[13px]\" href=\"{uri}\">{label}</a>")
         }
     };
+    // Posts' group: its "Add new", then Categories and Tags, each with its own "Add new", open
+    // on Posts and on its children's pages; Settings' group stays closed.
     for (uri, current) in [
         ("/mc-admin/post", ""),
         ("/mc-admin/category", "/mc-admin/category"),
@@ -744,16 +762,20 @@ async fn sidebar_children(client: &Client) {
             &[
                 "data-ig-nav-toggle>Content<",
                 "</i>Posts</a>",
+                "aria-expanded=\"true\"",
+                &child("/mc-admin/post/new", "Add new", false),
                 &child(
                     "/mc-admin/category",
                     "Categories",
                     current == "/mc-admin/category",
                 ),
+                &child("/mc-admin/category/new", "Add new", false),
                 &child(
                     "/mc-admin/post_tag",
                     "Tags",
                     current == "/mc-admin/post_tag",
                 ),
+                &child("/mc-admin/post_tag/new", "Add new", false),
                 "</i>Media</a>",
                 "</i>Pages</a>",
                 "data-ig-nav-toggle>Site<",
@@ -762,7 +784,16 @@ async fn sidebar_children(client: &Client) {
             ],
         );
         assert_eq!(nav.matches("/mc-admin/category\"").count(), 1, "{nav}");
-        assert!(!nav.contains("/mc-admin/options-writing\""), "{uri}: {nav}");
+        let (open, links) = group_links(&nav, "Posts");
+        assert!(open, "{uri}: {nav}");
+        assert!(links.contains("/mc-admin/category\""), "{uri}: {links}");
+        let (open, links) = group_links(&nav, "Settings");
+        assert!(!open, "{uri}: {nav}");
+        assert!(
+            links.contains("/mc-admin/options-writing\""),
+            "{uri}: {links}"
+        );
+        assert!(!links.contains("Add new"), "{uri}: {links}");
     }
     let settings = [
         ("options-general", "General"),
@@ -792,7 +823,10 @@ async fn sidebar_children(client: &Client) {
         );
         let order: Vec<&str> = order.iter().map(String::as_str).collect();
         assert_in_order(&nav, &order);
-        assert!(!nav.contains("/mc-admin/category\""), "{uri}: {nav}");
+        assert!(group_links(&nav, "Settings").0, "{uri}: {nav}");
+        let (open, links) = group_links(&nav, "Posts");
+        assert!(!open, "{uri}: {nav}");
+        assert!(links.contains("/mc-admin/category\""), "{uri}: {links}");
     }
 }
 
@@ -903,17 +937,30 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
             .unwrap_or_else(|| panic!("`{entry}` after byte {at} of the sidebar: {nav}"));
         at += found + entry.len();
     }
-    // The children show under their entry when it, or one of them, is the current page, as
-    // Filament's: none on the dashboard, and no Post Types, Taxonomies or Field Groups yet.
-    for child in [
-        "/mc-admin/category\"",
-        "/mc-admin/post_tag\"",
-        "/mc-admin/options-writing\"",
-        "Post Types",
-        "Taxonomies",
-        "Field Groups",
+    // Each entry's links (its "Add new", the entries under it) are in its group, which shows
+    // them while it, or one of them, is the current page: every group is closed on the
+    // dashboard, its links hidden. No Post Types, Taxonomies or Field Groups yet.
+    for (entry, links) in [
+        (
+            "Posts",
+            &[
+                "href=\"/mc-admin/post/new\">Add new<",
+                "/mc-admin/category\"",
+                "/mc-admin/post_tag\"",
+            ][..],
+        ),
+        ("Media", &["href=\"/mc-admin/attachment/new\">Add new<"][..]),
+        ("Pages", &["href=\"/mc-admin/page/new\">Add new<"][..]),
+        ("Settings", &["/mc-admin/options-writing\""][..]),
     ] {
-        assert!(!nav.contains(child), "{child}: {nav}");
+        let (open, group) = group_links(nav, entry);
+        assert!(!open, "{entry}: {nav}");
+        for link in links {
+            assert!(group.contains(link), "{link} in {entry}: {group}");
+        }
+    }
+    for absent in ["Post Types", "Taxonomies", "Field Groups"] {
+        assert!(!nav.contains(absent), "{absent}: {nav}");
     }
     sidebar_children(client).await;
     // Choosing the WordPress theme on the profile page shows its Dashicons and loads their
@@ -935,8 +982,9 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "Howdy, <span class=\"display-name\">ada</span>",
         "<ul id=\"adminmenu\">",
         "<span class=\"dashicons dashicons-admin-post\"></span></div><div class=\"wp-menu-name\">Posts</div>",
-        "<li><a href=\"/mc-admin/post/new\">Add New</a></li><li><a href=\"/mc-admin/category\">Categories</a></li><li><a href=\"/mc-admin/post_tag\">Tags</a></li></ul>",
-        "<div class=\"wp-menu-name\">Settings</div></a>\n<ul class=\"wp-submenu\"><li class=\"wp-submenu-head\" aria-hidden=\"true\">Settings</li><li><a href=\"/mc-admin/options-general\">General</a></li><li><a href=\"/mc-admin/options-writing\">Writing</a></li>",
+        "<li class=\"wp-has-submenu wp-not-current-submenu menu-top\"><a class=\"wp-has-submenu wp-not-current-submenu menu-top\" href=\"/mc-admin/post\" aria-haspopup=\"true\">",
+        "<li class=\"wp-first-item\"><a href=\"/mc-admin/post\" class=\"wp-first-item\">All Posts</a></li><li><a href=\"/mc-admin/post/new\">Add new</a></li><li><a href=\"/mc-admin/category\">Categories</a></li><li><a href=\"/mc-admin/category/new\">Add new</a></li><li><a href=\"/mc-admin/post_tag\">Tags</a></li><li><a href=\"/mc-admin/post_tag/new\">Add new</a></li></ul>",
+        "<div class=\"wp-menu-name\">Settings</div></a>\n<ul class=\"wp-submenu wp-submenu-wrap\"><li class=\"wp-submenu-head\" aria-hidden=\"true\">Settings</li><li><a href=\"/mc-admin/options-general\">General</a></li><li><a href=\"/mc-admin/options-writing\">Writing</a></li>",
         "<li><a href=\"/mc-admin/options-permalink\">Permalinks</a></li><li><a href=\"/mc-admin/options-privacy\">Privacy</a></li></ul>",
         "<li class=\"wp-menu-separator\" aria-hidden=\"true\"></li>",
         "<div id=\"wpbody\" role=\"main\">",

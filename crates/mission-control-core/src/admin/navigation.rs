@@ -55,6 +55,11 @@ pub const TOOLS: i32 = 75;
 /// Settings' position. The settings screens take 80 to 86, in WordPress's submenu order.
 pub const SETTINGS: i32 = 80;
 
+/// The label of a resource's create link in its menu group (Ignite's
+/// `navigation_create_label`), the owner's choice for every screen with a New screen. WordPress
+/// labels it with the type's `add_new_item` ("Add Post", "Add Page", "Add Media File").
+pub const CREATE_LABEL: &str = "Add new";
+
 /// The entry the Categories and Tags screens are listed under: Posts, by its slug (WordPress's
 /// `edit.php` submenu).
 pub const POSTS_PARENT: &str = "post";

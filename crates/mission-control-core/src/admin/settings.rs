@@ -714,6 +714,8 @@ pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> 
     // General, with every screen under it by its menu title.
     resource.navigation_label = Some(screen.menu_title().to_owned());
     resource.navigation_parent_item = Some(super::navigation::SETTINGS_PARENT.to_owned());
+    // A screen has one record and no New screen.
+    resource.navigation_create_item = false;
     resource
 }
 

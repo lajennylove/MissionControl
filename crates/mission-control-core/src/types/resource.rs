@@ -792,7 +792,10 @@ pub fn post_type_resource_with_access(
     };
     let layout = editor_layout(&data, group_sections);
     let has_title = data.title;
-    let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data);
+    let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data)
+        // The New screen in the type's menu group, as WordPress's Posts > Add New Post.
+        .navigation_create_item(true)
+        .navigation_create_label(crate::admin::navigation::CREATE_LABEL);
     status_tabs::add_status_tabs(&mut resource);
     resource.fields = fields;
     resource.columns = columns;
