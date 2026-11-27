@@ -98,8 +98,8 @@ use mission_control_core::admin::navigation;
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
     TERM_SCREENS, attachment_post_type, authorize_menus_screen, authorize_post_screen,
-    authorize_settings_screen, may_use_post_screens, register_nav_menus_resource,
-    register_settings_resources, register_term_resources,
+    authorize_settings_screen, authorize_term_screen, may_use_post_screens,
+    register_nav_menus_resource, register_settings_resources, register_term_resources,
 };
 use mission_control_core::config::Config;
 use mission_control_core::media::ImageSizes;
@@ -122,6 +122,7 @@ use rocket::{Build, Data, Request, Response, Rocket};
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
+mod field_messages;
 mod locks;
 mod media;
 mod wordpress_theme;
@@ -382,6 +383,7 @@ pub(crate) async fn mount_panel(
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
+        .attach(field_messages::FieldMessages)
         .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())
@@ -612,7 +614,7 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         return refusal;
     }
     if TERM_SCREENS.contains(&slug) {
-        return term_screen_refusal(request, slug);
+        return term_screen_refusal(request, slug, &rest).await;
     }
     let resources = rocket.state::<Arc<PostTypeResources>>()?;
     let def = if slug == media::ATTACHMENT {
@@ -747,8 +749,13 @@ async fn theme_or_settings_refusal(
 
 /// The fairing's answer for the Categories and Tags screens: their policy decides each action,
 /// unless this app did not register the screen while Ignite has a resource at its slug, which
-/// answers 503 (fail closed).
-fn term_screen_refusal(request: &Request<'_>, slug: &str) -> Option<AdminRefusal> {
+/// answers 503 (fail closed). Delete on the default category is refused here, before anything
+/// changes, with its own message ([`authorize_term_screen`]).
+async fn term_screen_refusal(
+    request: &Request<'_>,
+    slug: &str,
+    rest: &[&str],
+) -> Option<AdminRefusal> {
     let ours = request
         .rocket()
         .state::<AdminScreens>()
@@ -760,7 +767,23 @@ fn term_screen_refusal(request: &Request<'_>, slug: &str) -> Option<AdminRefusal
         );
         return Some(AdminRefusal::NotServed);
     }
-    None
+    let screen = PostScreen::parse(request.method().as_str(), rest);
+    if !matches!(screen, PostScreen::Delete(_)) {
+        return None;
+    }
+    // A visitor is sent to the sign-in page by Ignite.
+    request.guard::<AdminUser>().await.succeeded()?;
+    let Some(db) = request.rocket().state::<Arc<Database>>() else {
+        log::error!("The admin's authorization ran before the app was ready");
+        return Some(AdminRefusal::Failed);
+    };
+    match authorize_term_screen(db, slug, screen).await {
+        Ok(refused) => refused.map(AdminRefusal::Refused),
+        Err(e) => {
+            log::error!("Could not check the admin request {screen:?} on `{slug}`: {e}");
+            Some(AdminRefusal::Failed)
+        }
+    }
 }
 
 #[rocket::async_trait]

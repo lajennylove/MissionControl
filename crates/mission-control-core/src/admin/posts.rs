@@ -109,6 +109,9 @@ pub enum Refusal {
     /// A page the admin does not have, such as New or Delete on a settings screen: WordPress's
     /// answer for an admin page it does not know.
     NoSuchPage,
+    /// Delete on the default category (the `default_category` option), which WordPress never
+    /// deletes (`wp_delete_term` refuses it).
+    DefaultCategory,
 }
 
 impl Refusal {
@@ -131,7 +134,8 @@ impl Refusal {
             | Self::UploadFiles
             | Self::ManageOptions
             | Self::ManagePrivacyOptions
-            | Self::NoSuchPage => None,
+            | Self::NoSuchPage
+            | Self::DefaultCategory => None,
         }
     }
 
@@ -154,6 +158,7 @@ impl Refusal {
                 "Sorry, you are not allowed to edit theme options on this site."
             }
             Self::NoSuchPage => "Sorry, you are not allowed to access this page.",
+            Self::DefaultCategory => "The default category cannot be deleted.",
         }
     }
 }

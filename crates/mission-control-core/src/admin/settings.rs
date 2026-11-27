@@ -11,9 +11,10 @@
 //! [`sanitize_option`], the rules the REST settings route also uses, and is stored in `options`.
 //! Every option is sanitized before any is written. Ruling R135 (interim for owner item O10):
 //! when `sanitize_option` refuses one, nothing is written: [`save_settings`] returns the errors
-//! by field, and the data layer returns an error, so Ignite shows its error page rather than
-//! "Changes saved." (WordPress keeps the stored value and shows the message as a notice; Ignite
-//! cannot show it yet). Ignite's own checks come first and show on the form: a required value,
+//! by field, and the form comes back (422) with the typed values and WordPress's message under
+//! the field, such as "A structure tag is required when using custom permalinks." for a custom
+//! permalink structure with no `%tag%` (see [`super::field_errors`]; WordPress keeps the stored
+//! value and shows the message as a notice). Ignite's own checks come first and show on the form: a required value,
 //! a whole number, an email address, a URL, one of a select's or a lookup's choices. The
 //! title and tagline are stored escaped (`esc_html`) and shown decoded on the form and the
 //! site, as WordPress's `esc_attr` and `esc_html` do not encode an entity twice. The Reading
@@ -63,6 +64,7 @@ use ignite_core::{
 use orbit_orm::{Database, Error, Value as Sql, raw};
 use serde_json::{Value, json};
 
+use super::field_errors::refuse_field;
 use super::posts::{PostScreen, Refusal};
 use crate::content::{
     MetaError, OptionError, PostStatus, get_option, is_timezone, sanitize_option, set_option,
@@ -862,10 +864,20 @@ pub async fn read_settings(db: &Database, screen: SettingsScreen) -> Result<Row,
             );
         }
         SettingsScreen::Writing => {
-            row.insert(
-                "default_category".into(),
-                json!(text_of(&number("default_category", 1).await?)),
-            );
+            // WordPress's dropdown selects the stored category; when the option names no
+            // category (unset, or a category gone), the browser shows the first one, so the
+            // screen always shows (and saves) a category that exists.
+            let stored = text_of(&number("default_category", 1).await?);
+            let shown = if category_name(db, &stored).await?.is_some() {
+                stored
+            } else {
+                categories(db)
+                    .await?
+                    .first()
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default()
+            };
+            row.insert("default_category".into(), json!(shown));
         }
         SettingsScreen::Reading => {
             row.insert(
@@ -1051,6 +1063,21 @@ async fn categories(db: &Database) -> Result<Vec<(String, String)>, Error> {
         .collect())
 }
 
+/// The name of the category whose term id is `id`, or `None` when no category has it.
+async fn category_name(db: &Database, id: &str) -> Result<Option<String>, Error> {
+    let Ok(id) = id.trim().parse::<i64>() else {
+        return Ok(None);
+    };
+    let rows: Vec<(String,)> = raw::fetch_all(
+        db,
+        "SELECT t.name FROM term_taxonomy tt INNER JOIN terms t ON t.id = tt.term_id \
+         WHERE tt.taxonomy = ? AND t.id = ? LIMIT 1",
+        &["category".into(), id.into()],
+    )
+    .await?;
+    Ok(rows.into_iter().next().map(|(name,)| name))
+}
+
 /// `choices` with the stored value `current` added when it is not among them, as WordPress's
 /// dropdowns keep the selected value: the form can then save without changing it.
 fn with_current(
@@ -1084,8 +1111,17 @@ pub async fn settings_choices(
             let zone = (is_timezone(&zone) || utc_offset(&zone).is_some()).then_some(zone);
             with_current(timezone_choices(), zone)
         }
+        // Only the categories: a stored id that is no category is not offered, so the default
+        // saved is always a category (see `read_settings`).
         (SettingsScreen::Writing, "default_category") => {
-            with_current(categories(db).await?, current("default_category").await?)
+            let mut choices = categories(db).await?;
+            if let Some(current) = current("default_category").await?
+                && !choices.iter().any(|(id, _)| *id == current)
+                && let Some(name) = category_name(db, &current).await?
+            {
+                choices.push((current, name));
+            }
+            choices
         }
         (SettingsScreen::Reading, "page_on_front" | "page_for_posts") => with_current(
             pages_with(db, &[PostStatus::Publish]).await?,
@@ -1291,8 +1327,8 @@ fn writes_of(screen: SettingsScreen, input: &Row) -> Vec<(&'static str, &'static
 /// Saves `input`, the validated form of `screen`, to `options`, as WordPress's `options.php`
 /// does: each option the form sent goes through [`sanitize_option`] first. Ruling R135: when it
 /// refuses any of them, nothing is written and the refusals are returned under their fields
-/// (WordPress keeps the stored value and shows the error; Ignite cannot show it yet, owner item
-/// O10). The Reading screen's post counts are kept between 1 and [`MAX_POSTS_PER_PAGE`]
+/// (WordPress keeps the stored value and shows the error; the screen's data layer shows it on
+/// the form). The Reading screen's post counts are kept between 1 and [`MAX_POSTS_PER_PAGE`]
 /// (Ruling R136). The Media sizes are also given to the registry in `services`.
 ///
 /// # Errors
@@ -1448,16 +1484,16 @@ impl RuntimeData for SettingsData {
     }
 
     /// Saves the screen ([`save_settings`]). Ruling R135: when `sanitize_option` refuses a value,
-    /// nothing is saved, the reason is logged, and an error is returned, so Ignite shows its
-    /// error page instead of "Changes saved." (owner item O10: Ignite cannot show the message
-    /// on the form yet).
+    /// nothing is saved, and the form comes back (422) with the typed values and WordPress's
+    /// message under the refused field (see [`super::field_errors`]); when several are refused,
+    /// the first field's message shows, and every reason is logged.
     fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
         Box::pin(async move {
             if id != SETTINGS_RECORD {
                 return Err(Error::NotFound { table: "options" });
             }
             let errors = save_settings(db, self.screen, &input, &self.services).await?;
-            if !errors.is_empty() {
+            if let Some((field, message)) = errors.iter().next() {
                 let reasons: Vec<String> = errors
                     .iter()
                     .map(|(field, message)| format!("{field}: {message}"))
@@ -1467,7 +1503,14 @@ impl RuntimeData for SettingsData {
                     self.screen.slug(),
                     reasons.join("; ")
                 );
-                return Err(refused_save(&reasons.join("; ")));
+                let label = settings_fields(self.screen)
+                    .into_iter()
+                    .find(|f| f.name == *field)
+                    .map(|f| f.label);
+                return Err(match label {
+                    Some(label) => refuse_field(self.screen.slug(), field, &label, message),
+                    None => refused_save(&reasons.join("; ")),
+                });
             }
             read_settings(db, self.screen).await
         })

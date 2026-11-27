@@ -39,6 +39,7 @@ use orbit_orm::{Database, Error, Value as Sql, raw};
 use serde_json::{Value, json};
 
 use super::navigation;
+use super::posts::{PostScreen, Refusal};
 use super::settings::refused_save;
 use crate::content::{
     MAX_FILTERED_BYTES, NewTerm, Taxonomy, Term, TermChanges, TermError, default_term_ids,
@@ -88,6 +89,31 @@ pub fn term_screen_taxonomy(slug: &str) -> Option<Taxonomy> {
         POST_TAG_SCREEN => Some(Taxonomy::POST_TAG),
         _ => None,
     }
+}
+
+/// Why the request `screen` on the term screen `slug` is refused before Ignite's routes run, or
+/// `None`: Delete on the default category (the `default_category` option) is refused with
+/// [`Refusal::DefaultCategory`], before anything changes, as `wp_delete_term` never deletes it.
+/// The other requests are left to the screen's [`TermsPolicy`].
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn authorize_term_screen(
+    db: &Database,
+    slug: &str,
+    screen: PostScreen,
+) -> Result<Option<Refusal>, Error> {
+    let PostScreen::Delete(term_id) = screen else {
+        return Ok(None);
+    };
+    if slug != CATEGORY_SCREEN {
+        return Ok(None);
+    }
+    let defaults = default_term_ids(db, &Taxonomy::CATEGORY.name).await?;
+    Ok(defaults
+        .contains(&term_id)
+        .then_some(Refusal::DefaultCategory))
 }
 
 /// The screen of `taxonomy` as an Ignite runtime resource, its description filtered under

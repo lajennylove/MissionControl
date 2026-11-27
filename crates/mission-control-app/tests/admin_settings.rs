@@ -458,9 +458,64 @@ async fn settings_screens(client: &Client, db: &Database, author: i64) {
         Some(json!("Renamed &amp; Co"))
     );
 
+    // An address Ignite takes but WordPress's `is_email` refuses (no dot in the domain): the
+    // form comes back (422) with WordPress's message under the field and the typed values, and
+    // nothing is saved (Ruling R135).
+    let response = post(
+        client,
+        "/mc-admin/options-general/1",
+        &[
+            ("_token", &csrf),
+            ("blogname", "Not saved either"),
+            ("siteurl", HOME),
+            ("home", HOME),
+            ("admin_email", "x@y"),
+            ("timezone_string", "UTC-3"),
+            ("date_format", "Y-m-d"),
+            ("time_format", "H:i"),
+            ("start_of_week", "0"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    let body = response.into_string().await.unwrap();
+    assert!(
+        body.contains(
+            "The email address entered did not appear to be a valid email address. Please enter \
+             a valid email address."
+        ),
+        "{body}"
+    );
+    assert!(!body.contains("is already taken."), "{body}");
+    assert!(body.contains("value=\"Not saved either\""), "{body}");
+    assert!(body.contains("value=\"x@y\""), "{body}");
+    assert_eq!(
+        option(db, "blogname").await,
+        Some(json!("Renamed &amp; Co"))
+    );
+    assert_eq!(
+        option(db, "admin_email").await,
+        Some(json!("admin@example.com"))
+    );
+
     let news = Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("News"))
         .await
         .expect("creates a category");
+    // The Writing screen always shows a category that exists: with the option naming none, it
+    // shows the first category, as WordPress's dropdown does, and offers no other value.
+    set_option(db, "default_category", &json!(987_654))
+        .await
+        .unwrap();
+    let (status, writing) = get(client, "/mc-admin/options-writing/1/edit").await;
+    assert_eq!(status, Status::Ok);
+    assert!(
+        writing.contains(&format!(
+            "<option value=\"{}\" selected>News</option>",
+            news.term_id
+        )),
+        "{writing}"
+    );
+    assert!(!writing.contains("987654"), "{writing}");
     save_screen(
         client,
         "options-writing",
@@ -644,24 +699,38 @@ async fn permalinks(client: &Client, db: &Database, author: i64) {
     assert!(archive.contains("Hello Permalinks"), "{archive}");
     assert_eq!(get(client, "/category/news/").await.0, Status::NotFound);
 
-    // Ruling R135: a custom structure without a tag is refused. Nothing of the form is saved
-    // (not the category base either), and Ignite answers its error page, not "Changes saved.".
+    // Ruling R135: a custom structure without a tag is refused, as WordPress's `sanitize_option`
+    // refuses it. Nothing of the form is saved (not the category base either), and the form
+    // comes back (422) with WordPress's message under the structure and the typed values.
     let csrf = token(client).await;
-    let response = post(
-        client,
-        "/mc-admin/options-permalink/1",
-        &[
-            ("_token", csrf.as_str()),
-            ("permalink_selection", "custom"),
-            ("permalink_structure", "/archives/"),
-            ("category_base", "sections"),
-            ("tag_base", ""),
-        ],
-    )
-    .await;
-    assert_eq!(response.status(), Status::InternalServerError);
-    let body = response.into_string().await.unwrap_or_default();
-    assert!(!body.contains("Changes saved."), "{body}");
+    for structure in ["/archives/", "/blog/static"] {
+        let response = post(
+            client,
+            "/mc-admin/options-permalink/1",
+            &[
+                ("_token", csrf.as_str()),
+                ("permalink_selection", "custom"),
+                ("permalink_structure", structure),
+                ("category_base", "sections"),
+                ("tag_base", ""),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            Status::UnprocessableEntity,
+            "{structure}"
+        );
+        let body = response.into_string().await.unwrap_or_default();
+        assert!(!body.contains("Changes saved."), "{body}");
+        assert!(
+            body.contains("A structure tag is required when using custom permalinks."),
+            "{body}"
+        );
+        assert!(!body.contains("is already taken."), "{body}");
+        assert!(body.contains(&format!("value=\"{structure}\"")), "{body}");
+        assert!(body.contains("value=\"sections\""), "{body}");
+    }
     assert_eq!(
         option(db, "permalink_structure").await,
         Some(json!("/%postname%/"))
@@ -805,6 +874,8 @@ async fn menus(client: &Client, db: &Database, author: i64) {
     assert!(!home.contains(">Guide</a>"), "{home}");
     assert!(!home.contains("About Us"), "{home}");
 
+    wordpress_menu_items(client, db, author, &csrf).await;
+
     // Delete removes the menu and its items.
     let response = post(
         client,
@@ -819,6 +890,129 @@ async fn menus(client: &Client, db: &Database, author: i64) {
             .0,
         Status::NotFound
     );
+}
+
+/// The `nav_menu` term of the menu named `slug`.
+async fn menu_by_slug(db: &Database, slug: &str) -> Term {
+    let term = Term::find_by_slug(db, &Taxonomy::NAV_MENU, slug)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("the menu {slug}"));
+    get_nav_menu(db, term.term_id)
+        .await
+        .unwrap()
+        .expect("a menu")
+}
+
+/// Item rows in WordPress's format save: `post_type` with the post type in `object`, or read
+/// from the object id; a custom link with its URL; the parent as the parent item's id. A row
+/// that links to nothing comes back on the form (422) with the reason under the items.
+async fn wordpress_menu_items(client: &Client, db: &Database, author: i64, csrf: &str) {
+    let contact = Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Publish,
+            title: "Contact".to_owned(),
+            ..NewPost::new(author, "page")
+        },
+    )
+    .await
+    .expect("publishes a page");
+    let rows = json!([
+        {"id": "", "title": "", "type": "post_type", "object": "page", "object_id": contact.id,
+         "url": "", "parent": 0, "classes": "", "new_tab": false},
+        {"id": "", "title": "Example", "type": "custom", "object": "custom", "object_id": 0,
+         "url": "https://example.com/", "parent": "", "classes": "", "new_tab": false},
+    ])
+    .to_string();
+    let response = post(
+        client,
+        "/mc-admin/nav-menus",
+        &[("_token", csrf), ("name", "Footer"), ("items", &rows)],
+    )
+    .await;
+    let status = response.status();
+    let body = response.into_string().await.unwrap_or_default();
+    assert_eq!(status, Status::SeeOther, "{body}");
+    let menu = menu_by_slug(db, "footer").await;
+    let stored = menu_items(db, &menu).await.unwrap();
+    assert_eq!(stored.len(), 2);
+    let (contact_item, custom_item) = (stored[0].id, stored[1].id);
+
+    // Edit: the custom link and a new item (`post_type` with no `object`) under the page's item,
+    // named by its id.
+    let rows = json!([
+        {"id": contact_item, "title": "", "type": "post_type", "object": "page",
+         "object_id": contact.id, "parent": 0},
+        {"id": custom_item, "title": "Example", "type": "custom", "url": "https://example.com/",
+         "parent": contact_item},
+        {"title": "Contact again", "type": "post_type", "object_id": contact.id,
+         "parent": contact_item},
+    ])
+    .to_string();
+    let response = post(
+        client,
+        &format!("/mc-admin/nav-menus/{}", menu.term_id),
+        &[("_token", csrf), ("name", "Footer"), ("items", &rows)],
+    )
+    .await;
+    let status = response.status();
+    let body = response.into_string().await.unwrap_or_default();
+    assert_eq!(status, Status::SeeOther, "{body}");
+    let saved = menu_items(db, &menu).await.unwrap();
+    assert_eq!(saved.len(), 3);
+    assert_eq!(saved[0].id, contact_item);
+    assert_eq!(saved[1].id, custom_item, "the item keeps its id");
+    assert_eq!(
+        saved[1].parent,
+        Some(contact_item),
+        "the child keeps its parent"
+    );
+    assert_eq!(saved[2].parent, Some(contact_item));
+    assert_eq!(
+        saved[2].object, saved[0].object,
+        "the post type is read from the id"
+    );
+    // The form shows each parent as its item's id, so the rows save back unchanged.
+    let (_, form_html) = get(
+        client,
+        &format!("/mc-admin/nav-menus/{}/edit", menu.term_id),
+    )
+    .await;
+    assert!(
+        form_html.contains(&format!("&quot;parent&quot;:{contact_item}"))
+            || form_html.contains(&format!("\"parent\":{contact_item}")),
+        "{form_html}"
+    );
+
+    // A row that links to nothing (no such post) refuses the save, on the form.
+    let rows = json!([
+        {"id": contact_item, "title": "", "type": "post_type", "object_id": contact.id},
+        {"title": "Gone", "type": "post_type", "object_id": 987_654},
+    ])
+    .to_string();
+    let response = post(
+        client,
+        &format!("/mc-admin/nav-menus/{}", menu.term_id),
+        &[("_token", csrf), ("name", "Footer"), ("items", &rows)],
+    )
+    .await;
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+    let body = response.into_string().await.unwrap_or_default();
+    assert!(body.contains("Item row 2 links to nothing."), "{body}");
+    assert!(!body.contains("is already taken."), "{body}");
+    assert_eq!(
+        menu_items(db, &menu).await.unwrap().len(),
+        3,
+        "nothing is saved"
+    );
+    let response = post(
+        client,
+        &format!("/mc-admin/nav-menus/{}/delete", menu.term_id),
+        &[("_token", csrf)],
+    )
+    .await;
+    assert_eq!(response.status(), Status::SeeOther);
 }
 
 #[test]

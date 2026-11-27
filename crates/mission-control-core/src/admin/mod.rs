@@ -5,6 +5,7 @@
 //! sidebar's WordPress order ([`navigation`]). The `mission-control` crate mounts Ignite's panel at
 //! `/mc-admin` and applies them before Ignite's routes run.
 
+pub mod field_errors;
 pub mod locks;
 pub mod media;
 pub mod menus;
@@ -13,6 +14,7 @@ pub mod posts;
 pub mod settings;
 pub mod terms;
 
+pub use field_errors::with_field_messages;
 pub use media::{
     ATTACHMENT, AttachmentData, AttachmentPage, AttachmentQuery, Attachments, UploadRefusal,
     attachment_for_js, attachment_post_type, attachment_resource, may_upload,
@@ -32,6 +34,6 @@ pub use settings::{
     save_settings, settings_choices, settings_fields, settings_resource, timezone_choices,
 };
 pub use terms::{
-    CATEGORY_SCREEN, POST_TAG_SCREEN, TERM_SCREENS, TermsData, TermsPolicy,
+    CATEGORY_SCREEN, POST_TAG_SCREEN, TERM_SCREENS, TermsData, TermsPolicy, authorize_term_screen,
     register_term_resources, term_screen_taxonomy, terms_resource,
 };

@@ -16,14 +16,18 @@
 //!   saved unchanged, as WordPress keeps it ("Invalid"); the site leaves it out.
 //! - Saving the items is `wp_nav_menu_update_menu_items`: rows are saved in order, a row with
 //!   the id of one of the menu's items updates it, and the menu's items no row names are deleted.
-//!   A repeater row cannot name another row's item before it is saved, so the parent is the
-//!   parent's **row number** (1 for the first row; 0 or blank for the top level). Drag-and-drop
-//!   ordering is a follow-up.
+//!   A row's type is the screen's (`page`, `category`, `custom`, ...) or WordPress's
+//!   (`post_type` or `taxonomy`, with the post type or taxonomy in `object`, or read from the
+//!   object id when `object` is missing). The parent is the parent item's id, as WordPress's
+//!   `menu-item-parent-id`; a new item, which has no id yet, can name a new parent by its **row
+//!   number** (1 for the first row; 0 or blank for the top level). Drag-and-drop ordering is a
+//!   follow-up.
 //! - Ruling R135 (interim for owner item O10): everything is checked before anything is written.
 //!   A row that links to nothing (a post that is missing, trashed, an auto-draft or of another
-//!   type; a term that is missing), or more than [`MAX_MENU_ITEMS`] rows, refuses the whole save:
-//!   nothing is written, the reason is logged, and Ignite shows its error page (it cannot show the
-//!   message on the form yet). WordPress's screen only offers existing objects.
+//!   type; a term that is missing; a type the screen does not offer), or more than
+//!   [`MAX_MENU_ITEMS`] rows, refuses the whole save: nothing is written, and the form comes
+//!   back (422) with the typed rows and the reason under the items (see
+//!   [`super::field_errors`]). WordPress's screen only offers existing objects.
 //! - The writes: the items and the locations are saved in one transaction
 //!   ([`save_nav_menu`]). Creating the menu's term (New) or renaming it comes first, in its own
 //!   transaction, because the term API has no transaction-scoped create or update: if the items'
@@ -44,8 +48,8 @@ use ignite_core::{
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
 
+use super::field_errors::refuse_field;
 use super::posts::{PostScreen, Refusal};
-use super::settings::refused_save;
 use crate::content::{MetaError, Post, PostStatus, Taxonomy, Term, TermError, terms_by_term_id};
 use crate::front::escape_like;
 use crate::theme::{
@@ -66,6 +70,9 @@ const LOCATION_PREFIX: &str = "loc_";
 
 /// The repeater field of the items.
 const ITEMS: &str = "items";
+
+/// The label of the repeater field of the items, under which a refused save's message shows.
+const ITEMS_LABEL: &str = "Menu items (one row per item, in order)";
 
 /// The name field.
 const NAME: &str = "name";
@@ -168,7 +175,7 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
     );
     fields.push(field(
         ITEMS,
-        "Menu items (one row per item, in order)",
+        ITEMS_LABEL,
         FieldKindDef::Repeater(vec![
             field(
                 "id",
@@ -187,7 +194,7 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
             field("url", "URL (custom link)", FieldKindDef::Text, false),
             field(
                 "parent",
-                "Parent row number (0 for none)",
+                "Parent item ID, or row number for a new item (0 for none)",
                 FieldKindDef::Number,
                 false,
             ),
@@ -473,7 +480,8 @@ impl NavMenusData {
     /// trashed, its term deleted, its type no longer offered): WordPress keeps such items (it
     /// shows them as "Invalid") and saves the menu. Ruling R135: any other row (new, or with
     /// its type or object id changed) that links to nothing or names a type the screen does not
-    /// offer, or more rows than [`MAX_MENU_ITEMS`], refuses the whole save, with the reason logged.
+    /// offer, or more rows than [`MAX_MENU_ITEMS`], refuses the whole save, with the reason
+    /// logged and shown under the items.
     async fn item_inputs(
         &self,
         db: &Database,
@@ -481,11 +489,12 @@ impl NavMenusData {
         stored: &[StoredMenuItem],
     ) -> Result<Vec<MenuItemInput>, Error> {
         if rows.len() > MAX_MENU_ITEMS {
-            let reason = format!("a menu holds at most {MAX_MENU_ITEMS} items");
+            let reason = format!("A menu holds at most {MAX_MENU_ITEMS} items.");
             log::warn!("The menu was not saved: {reason}");
-            return Err(refused_save(&reason));
+            return Err(refuse_field(NAV_MENUS, ITEMS, ITEMS_LABEL, &reason));
         }
-        let read: Vec<RowItem> = rows.iter().map(RowItem::read).collect();
+        let mut read: Vec<RowItem> = rows.iter().map(RowItem::read).collect();
+        resolve_wordpress_types(db, &mut read).await?;
         let by_id: HashMap<i64, &StoredMenuItem> = stored.iter().map(|s| (s.id, s)).collect();
         // The stored link of a row that names an item with its own type and object id.
         let unchanged: Vec<Option<MenuItemObject>> = read
@@ -512,27 +521,36 @@ impl NavMenusData {
         let valid = linked(db, &objects).await?;
         let refused: Vec<String> = (0..read.len())
             .filter(|index| unchanged[*index].is_none() && !valid.contains(index))
-            .map(|index| format!("item row {} links to nothing", index + 1))
+            .map(|index| (index + 1).to_string())
             .collect();
         if !refused.is_empty() {
-            let reason = refused.join("; ");
+            let rows = refused.join(", ");
+            let offered: Vec<&str> = self.types.iter().map(MenuObjectType::value).collect();
+            let reason = format!(
+                "{} {rows} {} to nothing. Give each item a type ({}), and the ID of a post or \
+                 term of that type that is not in the Trash, or the URL of a custom link.",
+                if refused.len() == 1 {
+                    "Item row"
+                } else {
+                    "Item rows"
+                },
+                if refused.len() == 1 { "links" } else { "link" },
+                offered.join(", "),
+            );
             log::warn!("The menu was not saved: {reason}");
-            return Err(refused_save(&reason));
+            return Err(refuse_field(NAV_MENUS, ITEMS, ITEMS_LABEL, &reason));
         }
+        let parents = parent_rows(&read, stored);
         Ok(read
             .iter()
             .zip(objects)
-            .map(|(item, object)| MenuItemInput {
+            .zip(parents)
+            .map(|((item, object), parent)| MenuItemInput {
                 id: item.id,
                 object: object.expect("checked above"),
                 title: item.title.clone(),
-                // The parent's row number, 1-based; `save_nav_menu` clears one that is the item
-                // itself, out of range, or on a loop.
-                parent: item
-                    .parent
-                    .and_then(|n| usize::try_from(n).ok())
-                    .filter(|n| *n > 0)
-                    .map(|n| n - 1),
+                // `save_nav_menu` clears a parent that is the item itself, or on a loop.
+                parent,
                 target: if item.new_tab { "_blank" } else { "" }.to_owned(),
                 classes: vec![item.classes.clone()],
             })
@@ -556,6 +574,68 @@ impl NavMenusData {
             }),
         }
     }
+}
+
+/// The row index of each row's parent, as WordPress's `menu-item-parent-id` names it: the `id`
+/// of the parent item. A parent that is the `id` of another row is that row; one that is an item
+/// of the menu no row keeps (deleted with this save) is none, so the item goes to the top level,
+/// as WordPress moves the children of a deleted item; otherwise a number from 1 to the number of
+/// rows is the parent's row number, so a new item can be the child of another new item, which
+/// has no id yet. 0, blank or anything else is the top level.
+fn parent_rows(rows: &[RowItem], stored: &[StoredMenuItem]) -> Vec<Option<usize>> {
+    rows.iter()
+        .map(|row| {
+            let parent = row.parent.filter(|p| *p > 0)?;
+            if let Some(at) = rows.iter().position(|r| r.id == Some(parent)) {
+                return Some(at);
+            }
+            if stored.iter().any(|s| s.id == parent) {
+                return None;
+            }
+            usize::try_from(parent)
+                .ok()
+                .filter(|n| *n <= rows.len())
+                .map(|n| n - 1)
+        })
+        .collect()
+}
+
+/// Reads the rows that use WordPress's names for an item's kind, as `wp_update_nav_menu_item`
+/// takes them: `type` `post_type` or `taxonomy` with the post type or taxonomy in `object`
+/// (`{"type": "post_type", "object": "page", "object_id": 16}`), and `custom` with `object`
+/// `custom`. Each row then names its post type or taxonomy in `kind`, as the screen's own rows
+/// do. When `object` is missing, it is the type of the post, or the taxonomy of the term, that
+/// `object_id` names; a row whose object is not found keeps `post_type` or `taxonomy`, which
+/// links to nothing.
+async fn resolve_wordpress_types(db: &Database, rows: &mut [RowItem]) -> Result<(), Error> {
+    for row in rows.iter_mut() {
+        let wordpress_kind = match row.kind.as_str() {
+            kind @ ("post_type" | "taxonomy") => kind,
+            _ => continue,
+        };
+        if !row.object.is_empty() {
+            row.kind = row.object.clone();
+            continue;
+        }
+        let Some(id) = row.object_id.filter(|id| *id > 0) else {
+            continue;
+        };
+        let found: Option<String> = if wordpress_kind == "post_type" {
+            Post::query().find(db, id).await?.map(|p| p.post_type)
+        } else {
+            let rows: Vec<(String,)> = raw::fetch_all(
+                db,
+                "SELECT taxonomy FROM term_taxonomy WHERE term_id = ? ORDER BY id LIMIT 1",
+                &[id.into()],
+            )
+            .await?;
+            rows.into_iter().next().map(|(taxonomy,)| taxonomy)
+        };
+        if let Some(kind) = found {
+            row.kind = kind;
+        }
+    }
+    Ok(())
 }
 
 /// The indexes of `items` whose object exists: a post of the row's post type (not trashed or
@@ -631,6 +711,9 @@ struct MenuPlan {
 struct RowItem {
     id: Option<i64>,
     kind: String,
+    /// WordPress's `object` (`menu-item-object`): the post type or taxonomy of a row whose
+    /// `kind` is `post_type` or `taxonomy`; see [`resolve_wordpress_types`].
+    object: String,
     object_id: Option<i64>,
     url: String,
     title: String,
@@ -653,7 +736,8 @@ impl RowItem {
         };
         Self {
             id: number("id").filter(|id| *id > 0),
-            kind: text("type"),
+            kind: text("type").trim().to_owned(),
+            object: text("object").trim().to_owned(),
             object_id: number("object_id"),
             url: text("url"),
             title: text("title"),
@@ -664,14 +748,10 @@ impl RowItem {
     }
 }
 
-/// The repeater rows of `items`: each item's id, label, type, object id or URL, parent row
-/// number (0 at the top level), classes and new-tab flag.
+/// The repeater rows of `items`: each item's id, label, type, object id or URL, parent item id
+/// (0 at the top level, or when the parent is not an item of the menu), classes and new-tab flag.
 fn item_rows(items: &[StoredMenuItem]) -> Value {
-    let row_of: HashMap<i64, usize> = items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| (item.id, index + 1))
-        .collect();
+    let ids: HashSet<i64> = items.iter().map(|item| item.id).collect();
     Value::Array(
         items
             .iter()
@@ -693,7 +773,7 @@ fn item_rows(items: &[StoredMenuItem]) -> Value {
                     "type": kind,
                     "object_id": object_id,
                     "url": url,
-                    "parent": item.parent.and_then(|p| row_of.get(&p)).copied().unwrap_or(0),
+                    "parent": item.parent.filter(|p| ids.contains(p)).unwrap_or(0),
                     "classes": item.classes.join(" "),
                     "new_tab": item.target == "_blank",
                 })

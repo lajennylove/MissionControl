@@ -809,9 +809,11 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
         (item.post_type.as_str(), item.author_id),
         (NAV_MENU_ITEM, first_user)
     );
-    // The form reads the items back as rows, the parent as its row number.
+    // The form reads the items back as rows, the parent as its item's id (WordPress's
+    // `menu-item-parent-id`).
     let row: Value = created["items"].clone();
-    assert_eq!(row[2]["parent"], 1);
+    assert_eq!(row[2]["parent"], stored[0].id);
+    assert_eq!(row[0]["parent"], 0);
     assert_eq!(row[0]["type"], "page");
     assert_eq!(row[1]["url"], "https://rocketboost.rs/docs/");
 
@@ -838,7 +840,16 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
         )
         .await
         .unwrap();
-        assert!(data.update(db, menu_id, input).await.is_err());
+        // Refused on the items field: the form shows the reason under it.
+        let refused = data.update(db, menu_id, input).await.unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                orbit_orm::Error::UniqueViolation { index: Some(index) }
+                    if index == "nav-menus_items_unique"
+            ),
+            "{refused:?}"
+        );
         let menu = get_nav_menu(db, menu_id).await.unwrap().unwrap();
         assert_eq!(menu.name, "Main menu");
         assert_eq!(menu_items(db, &menu).await.unwrap().len(), 3);
