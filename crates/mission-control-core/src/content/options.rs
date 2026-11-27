@@ -335,6 +335,36 @@ pub(crate) fn esc_url_raw(url: &str) -> String {
     url
 }
 
+/// Whether `url` is a link a custom menu item can hold: not empty, no spaces or control
+/// characters (the menu editor's URL field is an `<input type="url">`), and a URL `esc_url_raw`
+/// keeps: a path, query or fragment (`/about`, `?p=2`, `#top`), an allowed protocol
+/// (`https://example.com`, `mailto:...`), or an address `esc_url` completes with `http://`
+/// (`example.com`). `https://` with nothing after it is no link.
+pub fn is_valid_link_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    if url.starts_with(['/', '#', '?']) {
+        return true;
+    }
+    let escaped = esc_url_raw(url);
+    if escaped.is_empty() || escaped != url && escaped != format!("http://{url}") {
+        return false;
+    }
+    match escaped.split_once("://") {
+        Some((_, rest)) => rest
+            .split(['/', '?', '#'])
+            .next()
+            .is_some_and(|host| !host.is_empty() && !host.starts_with(['.', '-'])),
+        // `mailto:`, `tel:` and the other protocols without an authority need something after
+        // the colon.
+        None => escaped
+            .split_once(':')
+            .is_some_and(|(_, rest)| !rest.is_empty()),
+    }
+}
+
 /// Whether `url` holds `http://` or `https://` and an address after it, as `sanitize_option`
 /// checks `siteurl` and `home`.
 fn is_http_url(url: &str) -> bool {
@@ -348,7 +378,7 @@ fn is_http_url(url: &str) -> bool {
 
 /// WordPress's `is_email`: a local part of the allowed characters, an `@`, and a domain of at
 /// least two dot-separated labels of letters, digits and inner hyphens.
-pub(crate) fn is_email(email: &str) -> bool {
+pub fn is_email(email: &str) -> bool {
     if email.len() < 6 {
         return false;
     }
@@ -405,6 +435,34 @@ pub(crate) fn utc_offset(zone: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_menu_link_is_a_url_esc_url_keeps() {
+        for valid in [
+            "https://example.com",
+            "http://example.com/a?b=c#d",
+            "example.com",
+            "/about/",
+            "#top",
+            "?p=2",
+            "mailto:owner@example.com",
+            "tel:+15551234567",
+        ] {
+            assert!(is_valid_link_url(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "   ",
+            "not a url",
+            "https://",
+            "http://",
+            "javascript:alert(1)",
+            "https://exa mple.com",
+            "mailto:",
+        ] {
+            assert!(!is_valid_link_url(invalid), "{invalid}");
+        }
+    }
 
     #[test]
     fn titles_are_escaped_once() {

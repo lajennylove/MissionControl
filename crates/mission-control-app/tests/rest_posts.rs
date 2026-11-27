@@ -1527,6 +1527,30 @@ async fn featured_media_and_categories_are_written() {
         "rest_invalid_featured_media",
     )
     .await;
+    // A file that is not an image is refused too: `set_post_thumbnail` sets images only.
+    let pdf = site
+        .create(
+            "editor",
+            "attachment",
+            NewPost {
+                status: PostStatus::Inherit,
+                title: "Report".into(),
+                mime_type: "application/pdf".into(),
+                ..NewPost::new(0, "attachment")
+            },
+        )
+        .await;
+    assert_error(
+        site.post(
+            "/mc-json/mc/v2/posts",
+            Some("editor"),
+            json!({"title": "PDF media", "featured_media": pdf.id}),
+        )
+        .await,
+        Status::BadRequest,
+        "rest_invalid_featured_media",
+    )
+    .await;
 }
 
 #[rocket::async_test]

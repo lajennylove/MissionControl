@@ -60,7 +60,9 @@ use serde_json::{Value, json};
 
 use super::posts::{PostScreen, Refusal};
 use super::settings::refused_save;
-use crate::content::{MetaError, Post, PostStatus, Taxonomy, Term, TermError, terms_by_term_id};
+use crate::content::{
+    MetaError, Post, PostStatus, Taxonomy, Term, TermError, is_valid_link_url, terms_by_term_id,
+};
 use crate::front::escape_like;
 use crate::theme::{
     MAX_MENU_ITEMS, MenuError, MenuItemInput, MenuItemObject, NAV_MENU_ITEM, StoredMenuItem, Theme,
@@ -573,6 +575,40 @@ impl NavMenusData {
                     .or_else(|| self.object_of(&item.kind, item.object_id, &item.url))
             })
             .collect();
+        // A custom link's URL must be a link (the editor's URL field, `<input type="url">`):
+        // checked for a new link, or one whose URL changed; a stored URL left as it is stays.
+        let bad_urls: Vec<String> =
+            read.iter()
+                .zip(&objects)
+                .enumerate()
+                .filter(|(_, (item, object))| {
+                    let Some(MenuItemObject::Custom { url }) = object else {
+                        return false;
+                    };
+                    let stored_url = item.id.and_then(|id| by_id.get(&id)).and_then(|stored| {
+                        match &stored.object {
+                            MenuItemObject::Custom { url } => Some(url),
+                            _ => None,
+                        }
+                    });
+                    let kept = stored_url == Some(url);
+                    !kept && !is_valid_link_url(url)
+                })
+                .map(|(index, _)| (index + 1).to_string())
+                .collect();
+        if !bad_urls.is_empty() {
+            let reason = format!(
+                "{} {}: {INVALID_MENU_URL}",
+                if bad_urls.len() == 1 {
+                    "Item row"
+                } else {
+                    "Item rows"
+                },
+                bad_urls.join(", ")
+            );
+            log::warn!("The menu was not saved: {reason}");
+            return Err(Refused::Items(reason));
+        }
         let valid = linked(db, &objects).await?;
         let refused: Vec<String> = (0..read.len())
             .filter(|index| unchanged[*index].is_none() && !valid.contains(index))
@@ -773,6 +809,10 @@ struct MenuPlan {
     /// Whether the menu adds new top-level pages, when the form sent the checkbox.
     auto_add: Option<bool>,
 }
+
+/// The message of a custom link whose URL is not a link, shown by the menu builder under the
+/// item's URL and, when a save is refused, under the items.
+pub const INVALID_MENU_URL: &str = "Please enter a valid URL.";
 
 /// One repeater row, read.
 struct RowItem {

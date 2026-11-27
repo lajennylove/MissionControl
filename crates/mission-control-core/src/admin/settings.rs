@@ -29,6 +29,12 @@
 //!   computes it from the zone on every read; here a daylight saving change is followed when the
 //!   screen is saved again). The date and time formats are WordPress's choices or a custom
 //!   format (`date_format_custom`).
+//! - Writing: the Default Post Category is required and must be a category; a blank one is
+//!   refused on the field ("Default Post Category is required."), so the default the Categories
+//!   screen protects is never unset by the form.
+//! - Reading: a static homepage needs a page, and the posts page cannot be the same page
+//!   (WordPress's "these pages should not be the same!"); "Blog pages show at most" below 1 is
+//!   refused on the field (WordPress's `sanitize_option` would store 1 silently).
 //! - Reading: "Discourage search engines" stores `blog_public` 0, as WordPress inverts it; the
 //!   front end's pages then carry WordPress's `noindex, nofollow` robots meta tag (see
 //!   `crate::front`). The feed options (`posts_per_rss`, `rss_use_excerpt`) are stored with no
@@ -1358,7 +1364,7 @@ pub async fn save_settings(
             Error::Database(sqlx::Error::Protocol(format!("sanitizing failed: {e}")))
         })?,
     };
-    let mut errors = SettingsErrors::new();
+    let mut errors = screen_errors(db, screen, input).await?;
     for (field, _, result) in &sanitized {
         if let Err(OptionError { message, .. }) = result {
             errors
@@ -1380,6 +1386,68 @@ pub async fn save_settings(
         && let Some(sizes) = &services.image_sizes
     {
         apply_media_sizes(db, sizes).await?;
+    }
+    Ok(errors)
+}
+
+/// The message of a blank Default Post Category: Ignite's required message for the field.
+pub const DEFAULT_CATEGORY_REQUIRED: &str = "Default Post Category is required.";
+
+/// The message of a static homepage saved with no page chosen.
+pub const FRONT_PAGE_REQUIRED: &str = "Please select a page for your homepage.";
+
+/// WordPress's warning when the homepage and the posts page are the same page
+/// (`options-reading.php`'s `#front-page-warning`), shown on the Posts page field.
+pub const SAME_PAGES: &str = "These pages should not be the same!";
+
+/// The message of a post count below 1 on the Reading screen.
+pub const POSTS_PER_PAGE_INVALID: &str = "Please enter a valid number of posts per page.";
+
+/// The checks of `screen`'s save that need more than one field, or the database, by field: the
+/// Writing screen's Default Post Category must name a category (it is required, so a blank or
+/// missing category is refused rather than leaving the option as it was); the Reading screen's
+/// static homepage needs a page, its posts page cannot be the same page (WordPress warns
+/// "these pages should not be the same!"), and "Blog pages show at most" must be at least 1.
+async fn screen_errors(
+    db: &Database,
+    screen: SettingsScreen,
+    input: &Row,
+) -> Result<SettingsErrors, Error> {
+    let mut errors = SettingsErrors::new();
+    match screen {
+        SettingsScreen::Writing => {
+            if let Some(value) = input.get("default_category") {
+                let id = text_of(value);
+                if id.trim().is_empty() || category_name(db, &id).await?.is_none() {
+                    errors.insert(
+                        "default_category".to_owned(),
+                        DEFAULT_CATEGORY_REQUIRED.to_owned(),
+                    );
+                }
+            }
+        }
+        SettingsScreen::Reading => {
+            let page = |name: &str| input.get(name).and_then(int_of).filter(|id| *id > 0);
+            let front = page("page_on_front");
+            let posts = page("page_for_posts");
+            let static_front = input_text(input, "show_on_front").as_deref() == Some("page");
+            if static_front && front.is_none() {
+                errors.insert("page_on_front".to_owned(), FRONT_PAGE_REQUIRED.to_owned());
+            }
+            if static_front && front.is_some() && front == posts {
+                errors.insert("page_for_posts".to_owned(), SAME_PAGES.to_owned());
+            }
+            if input
+                .get("posts_per_page")
+                .is_some_and(|v| int_of(v).unwrap_or(0) < 1)
+            {
+                errors.insert(
+                    "posts_per_page".to_owned(),
+                    POSTS_PER_PAGE_INVALID.to_owned(),
+                );
+            }
+        }
+        _ => {}
     }
     Ok(errors)
 }

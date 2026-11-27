@@ -125,6 +125,7 @@ use rocket::{Build, Data, Request, Response, Rocket};
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
+mod forms;
 mod locks;
 mod media;
 mod menus;
@@ -392,6 +393,11 @@ pub(crate) async fn mount_panel(
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
         .attach(menus::MenuBuilderViews)
+        .attach(forms::FormViews)
+        .register(
+            format!("{ADMIN_PATH}/profile"),
+            rocket::catchers![picture_too_large],
+        )
         .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, menus::routes())
         .mount("/", menus::include_routes())
@@ -538,6 +544,23 @@ fn error_page(title: &str, heading: Option<&str>, message: &str) -> RawHtml<Stri
 </body>
 </html>"#
     ))
+}
+
+/// Ignite's refusal of a profile picture it does not keep, under the picture field.
+pub const PICTURE_REFUSED: &str = "Choose a PNG, JPEG or WebP picture of up to 1 MB.";
+
+/// A profile request whose body is larger than Rocket lets through
+/// ([`crate::PROFILE_PICTURE_BODY_LIMIT`]): Ignite's message for a picture it does not keep,
+/// with the way back to the profile, in place of Rocket's bare "413: Payload Too Large". A
+/// picture up to the limit reaches Ignite, which answers the same message on the profile.
+#[rocket::catch(413)]
+fn picture_too_large() -> (Status, RawHtml<String>) {
+    let page = error_page("Error", None, PICTURE_REFUSED);
+    let back = format!("<p><a href=\"{ADMIN_PATH}/profile\">Back to your profile</a></p></body>");
+    (
+        Status::PayloadTooLarge,
+        RawHtml(page.0.replacen("</body>", &back, 1)),
+    )
 }
 
 /// Why the fairing ended an admin request.

@@ -109,6 +109,32 @@ use rocket::{Build, Rocket};
 /// How often the scheduler looks for due events, as Laravel's scheduler and WP-Cron's minimum.
 const SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The smallest `file` and `data-form` body limits the app runs with, so the profile picture
+/// form (Ignite's `POST /mc-admin/profile/avatar`, a multipart form) reaches Ignite with a
+/// picture larger than the 1 MB it keeps, and Ignite answers on the profile with its message
+/// ("Choose a PNG, JPEG or WebP picture of up to 1 MB."), where Rocket's default 1 MiB `file`
+/// limit answered a bare 413. A larger limit set in Rocket's configuration (`ROCKET_LIMITS`,
+/// `Rocket.toml`) is kept; a body above the limit gets the admin's 413 page with the message.
+pub const PROFILE_PICTURE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+
+/// Rocket's configuration, with the `file` and `data-form` limits raised to at least
+/// [`PROFILE_PICTURE_BODY_LIMIT`].
+fn figment() -> rocket::figment::Figment {
+    use rocket::data::{Limits, ToByteUnit};
+    let figment = rocket::Config::figment();
+    let limits: Limits = figment.extract_inner("limits").unwrap_or_default();
+    let at_least = |name: &str, default: u64| {
+        let current = limits.get(name).map_or(default, |limit| limit.as_u64());
+        current.max(PROFILE_PICTURE_BODY_LIMIT).bytes()
+    };
+    let file = at_least("file", Limits::FILE.as_u64());
+    let data_form = at_least("data-form", Limits::DATA_FORM.as_u64());
+    figment.merge((
+        "limits",
+        limits.limit("file", file).limit("data-form", data_form),
+    ))
+}
+
 /// The rank of the public site's catch-all route. Higher than [`ASSET_RANK`], so a theme's
 /// built file is served before the site looks the path up.
 const FRONT_RANK: isize = 20;
@@ -210,7 +236,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         registry: Arc::clone(&registry),
         rest_routes: Arc::clone(&rest_routes),
     };
-    rocket::build()
+    rocket::custom(figment())
         .manage(Arc::clone(&hooks))
         .manage(shortcodes)
         .manage(rest_routes)

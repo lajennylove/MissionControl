@@ -19,8 +19,14 @@
 //!   `wp_filter_kses`, for every user, as the REST API stores them.
 //! - Delete is `wp_delete_term`: the term leaves the posts that had it, its children move to its
 //!   parent, and a post left with no category gets the default one. The default category (the
-//!   `default_category` option, WordPress's "Uncategorized") is never deleted: the policy
-//!   refuses it (403) and Ignite hides its Delete button.
+//!   `default_category` option, WordPress's "Uncategorized") is never deleted: its row is marked
+//!   [`DEFAULT_TERM_KEY`], so Ignite hides its Delete button and refuses its delete (403) for
+//!   every user (`hide_default_delete_when`, which binds a super-admin too, unlike the
+//!   policy), and the app's fairing answers a direct request with WordPress's "Sorry, you are not
+//!   allowed to delete this item." ([`authorize_term_screen`]).
+//! - A category is not its own parent: the edit form's Parent Category leaves the category and
+//!   its descendants out (the app's form fairing, as `wp_dropdown_categories`' `exclude_tree`),
+//!   and a save that names it is refused on the field ([`OWN_PARENT_CATEGORY`]).
 //! - Who may use them ([`TermsPolicy`]): the list needs the taxonomy's `manage_terms`
 //!   (`manage_categories` for categories, `manage_post_tags` for tags, which `map_meta_cap` maps
 //!   to `manage_categories`); New needs `edit_terms`; editing a term `edit_term` and deleting it
@@ -32,8 +38,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use ignite_core::{
-    ActingUser, ColumnDef, Direction, FieldDef, FieldKindDef, ListQuery, Page, Policy, Row,
-    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource,
+    ActingUser, ColumnDef, Direction, FieldDef, FieldKindDef, ListFilter, ListQuery, Page, Policy,
+    Row, RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, ValidationError,
 };
 use orbit_orm::{Database, Error, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -81,6 +87,16 @@ const COL_NAME: &str = "col_name";
 const COL_DESCRIPTION: &str = "col_description";
 const COL_SLUG: &str = "col_slug";
 const COL_COUNT: &str = "col_count";
+
+/// The row key that marks the taxonomy's default term (the `default_category` option), whose
+/// Delete the resource hides and the panel refuses (`hide_default_delete_when`), for every user,
+/// a super-admin too, as `wp_delete_term` never deletes it.
+pub const DEFAULT_TERM_KEY: &str = "default_term";
+
+/// The refusal of a category chosen as its own parent, shown on the Parent Category field (the
+/// edit form's dropdown leaves the category and its descendants out, as `term.php`'s
+/// `wp_dropdown_categories` does with `exclude_tree`).
+pub const OWN_PARENT_CATEGORY: &str = "A category cannot be its own parent.";
 
 /// The taxonomy a term screen's slug serves, if `slug` is one.
 pub fn term_screen_taxonomy(slug: &str) -> Option<Taxonomy> {
@@ -171,6 +187,10 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
         column(COL_SLUG, "Slug", true, true),
         column(COL_COUNT, "Count", true, false),
     ];
+    // The default term has no Delete, and the panel refuses its delete (403) before the data
+    // layer runs, whoever asks: the policy alone does not stop a super-admin.
+    resource.hide_default_delete_when =
+        Some(ListFilter::new().where_eq(DEFAULT_TERM_KEY, Value::Bool(true)));
     navigation::place(&mut resource, sort, navigation::POST_ICON);
     // Categories and Tags are in Posts' submenu (WordPress's `edit.php`), in the Content group
     // with it.
@@ -319,10 +339,15 @@ impl TermsData {
         out
     }
 
-    /// The list's row of `term`, its name prefixed with one "— " per level of `depth`.
-    fn row_of(term: &Term, depth: usize) -> Row {
+    /// The list's row of `term`, its name prefixed with one "— " per level of `depth`, marked
+    /// [`DEFAULT_TERM_KEY`] when its id is one of `defaults`.
+    fn row_of(term: &Term, depth: usize, defaults: &[i64]) -> Row {
         let mut row = Row::new();
         row.insert("id".into(), json!(term.term_id));
+        row.insert(
+            DEFAULT_TERM_KEY.into(),
+            json!(defaults.contains(&term.term_id)),
+        );
         row.insert(NAME.into(), json!(term.name));
         row.insert(SLUG.into(), json!(term.slug));
         row.insert(DESCRIPTION.into(), json!(term.description));
@@ -350,6 +375,7 @@ impl TermsData {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.chars().take(MAX_SEARCH).collect::<String>());
+        let defaults = default_term_ids(db, &self.taxonomy.name).await?;
         if self.taxonomy.hierarchical && search.is_none() && query.sort.is_none() {
             let tree = Self::tree(Term::all(db, &self.taxonomy).await?);
             let total = i64::try_from(tree.len()).unwrap_or(i64::MAX);
@@ -357,7 +383,7 @@ impl TermsData {
                 .iter()
                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                 .take(usize::try_from(per_page).unwrap_or(0))
-                .map(|(term, depth)| Self::row_of(term, *depth))
+                .map(|(term, depth)| Self::row_of(term, *depth, &defaults))
                 .collect();
             return Ok(Page { rows, total });
         }
@@ -415,16 +441,17 @@ impl TermsData {
         let rows = ids
             .iter()
             .filter_map(|id| by_id.get(id))
-            .map(|term| Self::row_of(term, 0))
+            .map(|term| Self::row_of(term, 0, &defaults))
             .collect();
         Ok(Page { rows, total })
     }
 
     async fn row(&self, db: &Database, term_id: i64) -> Result<Option<Row>, Error> {
-        Ok(self
-            .term(db, term_id)
-            .await?
-            .map(|term| Self::row_of(&term, 0)))
+        let Some(term) = self.term(db, term_id).await? else {
+            return Ok(None);
+        };
+        let defaults = default_term_ids(db, &self.taxonomy.name).await?;
+        Ok(Some(Self::row_of(&term, 0, &defaults)))
     }
 
     /// The parent choices: "None", then every category in tree order, indented by level.
@@ -464,7 +491,7 @@ impl RuntimeData for TermsData {
             let term = Term::create(db, &self.taxonomy, new)
                 .await
                 .map_err(|e| self.term_error(e))?;
-            Ok(Self::row_of(&term, 0))
+            Ok(Self::row_of(&term, 0, &[]))
         })
     }
 
@@ -487,11 +514,33 @@ impl RuntimeData for TermsData {
                 .update(db, &self.taxonomy, changes)
                 .await
                 .map_err(|e| self.term_error(e))?;
-            Ok(Self::row_of(&term, 0))
+            Ok(Self::row_of(&term, 0, &[]))
         })
     }
 
-    /// `wp_delete_term`. The default category is refused by the policy first.
+    /// [`update`](RuntimeData::update), after the parent is checked: a category chosen as its
+    /// own parent is refused on the Parent Category field ([`OWN_PARENT_CATEGORY`]), and nothing
+    /// is saved. `wp_update_term` would drop such a parent silently; the form says why instead.
+    fn try_update_for<'a>(
+        &'a self,
+        db: &'a Database,
+        _user: &'a ActingUser,
+        id: i64,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move {
+            if self.parent(&input).flatten() == Some(id) {
+                return Ok(Err(ValidationError::with_messages([(
+                    PARENT,
+                    OWN_PARENT_CATEGORY,
+                )])));
+            }
+            self.update(db, id, input).await.map(Ok)
+        })
+    }
+
+    /// `wp_delete_term`. The panel refuses the default category first (its row is marked
+    /// [`DEFAULT_TERM_KEY`]); the terms API refuses it again.
     fn delete<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, u64> {
         Box::pin(async move {
             let Some(term) = self.term(db, id).await? else {

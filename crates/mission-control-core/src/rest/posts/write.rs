@@ -311,7 +311,10 @@ async fn check_references(
             .find(ctl.db, media)
             .await
             .map_err(|e| database_error(&e))?;
-        if !found.is_some_and(|p| p.post_type == "attachment") {
+        // `set_post_thumbnail` sets only an image; its failure is this refusal.
+        if !found.is_some_and(|p| {
+            p.post_type == "attachment" && p.mime_type.to_ascii_lowercase().starts_with("image/")
+        }) {
             return Err(RestError::new(
                 "rest_invalid_featured_media",
                 "Invalid featured media ID.",

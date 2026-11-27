@@ -289,28 +289,31 @@ async fn flow(scratch: &ScratchDatabase) {
         b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
     let report = upload(&client, &csrf, Some(post_id), "Report.pdf", pdf).await;
 
-    // "Uploaded to this post": everything attached to the post, newest first; "Media
-    // Library": every item, of every type, as WordPress's featured image modal lists them.
-    let (ids, total) = query(&client, &format!("&uploaded_to={post_id}")).await;
-    assert_eq!(ids, [report, second, first]);
+    // "Uploaded to this post": the post's images, newest first; "Media Library": every image,
+    // as WordPress's featured image frame lists images only (`type=image`, which the picker
+    // sends). Without `type`, the query lists every type, as `query-attachments` does.
+    let (ids, total) = query(&client, &format!("&type=image&uploaded_to={post_id}")).await;
+    assert_eq!(ids, [second, first]);
+    assert_eq!(total, "2");
+    let (ids, _) = query(&client, &format!("&uploaded_to={post_id}")).await;
+    assert_eq!(ids, [report, second, first], "every type, without `type`");
+    let (ids, total) = query(&client, "&type=image").await;
+    assert_eq!(ids, [loose, second, first]);
     assert_eq!(total, "3");
-    let (ids, total) = query(&client, "").await;
-    assert_eq!(ids, [report, loose, second, first]);
-    assert_eq!(total, "4");
     // Nothing is uploaded to the page; `uploaded_to` that is not a post's id lists all.
-    let (ids, total) = query(&client, &format!("&uploaded_to={page_id}")).await;
+    let (ids, total) = query(&client, &format!("&type=image&uploaded_to={page_id}")).await;
     assert!(ids.is_empty());
     assert_eq!(total, "0");
     for odd in ["0", "-4", "x"] {
-        let (ids, _) = query(&client, &format!("&uploaded_to={odd}")).await;
-        assert_eq!(ids.len(), 4, "{odd}");
+        let (ids, _) = query(&client, &format!("&type=image&uploaded_to={odd}")).await;
+        assert_eq!(ids.len(), 3, "{odd}");
     }
     // The Media Library tab's search and its pages ("Load more" asks for the next one).
-    let (ids, total) = query(&client, "&search=lighthouse").await;
+    let (ids, total) = query(&client, "&type=image&search=lighthouse").await;
     assert_eq!((ids, total.as_str()), (vec![second], "1"));
-    let (ids, total) = query(&client, "&per_page=3&page=1").await;
-    assert_eq!((ids, total.as_str()), (vec![report, loose, second], "4"));
-    let (ids, _) = query(&client, "&per_page=3&page=2").await;
+    let (ids, total) = query(&client, "&type=image&per_page=2&page=1").await;
+    assert_eq!((ids, total.as_str()), (vec![loose, second], "3"));
+    let (ids, _) = query(&client, "&type=image&per_page=2&page=2").await;
     assert_eq!(ids, [first]);
 
     // `get-attachment`: one item, as the box shows it; 404 for anything that is not one.
@@ -387,7 +390,7 @@ async fn flow(scratch: &ScratchDatabase) {
         "Featured image",
         "Load more",
         "action=get-attachment",
-        "mc-media-icon",
+        "type=image",
         "uploaded_to=",
     ] {
         assert!(script.contains(text), "{text}");
@@ -425,9 +428,14 @@ async fn flow(scratch: &ScratchDatabase) {
     // The form shows the stored image (which the box reads with `get-attachment`).
     let (_, form) = get(&client, &format!("/mc-admin/post/{post_id}/edit")).await;
     assert!(form.contains(&format!("value=\"{second}\"")), "{form}");
-    // The server refuses an id that is not a media item with WordPress's message on the
-    // field, not Ignite's media check.
-    for refused in [post_id.to_string(), "999999999".to_owned(), "-3".to_owned()] {
+    // The server refuses an id that is not an image's with WordPress's message on the field
+    // (`set_post_thumbnail` sets images only), not Ignite's media check: a PDF is refused too.
+    for refused in [
+        post_id.to_string(),
+        "999999999".to_owned(),
+        "-3".to_owned(),
+        report.to_string(),
+    ] {
         let response = save(refused.clone()).await;
         let status = response.status();
         let body = response.into_string().await.unwrap_or_default();
@@ -441,13 +449,6 @@ async fn flow(scratch: &ScratchDatabase) {
     assert_eq!(
         get_post_meta(&db, post_id, "_thumbnail_id").await.unwrap(),
         Some(json!(second))
-    );
-    // A PDF is a media item too: WordPress's featured image modal lists every type.
-    let response = save(report.to_string()).await;
-    assert_eq!(response.status(), Status::SeeOther);
-    assert_eq!(
-        get_post_meta(&db, post_id, "_thumbnail_id").await.unwrap(),
-        Some(json!(report))
     );
     // "Remove featured image" empties the field: the save deletes the meta.
     let response = save(String::new()).await;

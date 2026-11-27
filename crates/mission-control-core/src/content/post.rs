@@ -12,7 +12,8 @@ use super::meta::{
     MetaError, delete_post_meta_in, get_option, get_post_meta_in, put_post_meta_in, set_option,
 };
 use super::slug::{
-    DESIRED_SLUG_META, TRASHED_SUFFIX, record_old_slug, settle_slug, trashed_slug, wanted_slug,
+    DESIRED_SLUG_META, TRASHED_SUFFIX, is_hierarchical, record_old_slug, settle_slug, trashed_slug,
+    unique_slug_on, wanted_slug,
 };
 use super::taxonomy::{post_term_ids_in, recount_in, recount_post_terms};
 
@@ -287,9 +288,11 @@ impl Post {
     /// Takes this post out of the trash, as WordPress 5.6 and later do in `wp_untrash_post`: the
     /// status becomes `draft`, whatever it was before, except that an attachment goes back to
     /// `inherit`. Deletes the two trash meta keys. The slug the post had before the trash
-    /// (`_wp_desired_post_slug`) comes back as it was, as `wp_insert_post` restores it, even if
-    /// another post took it meanwhile: a draft may share a slug, and the next save that
-    /// publishes the post makes it unique (see [`Post::save`]). Like [`Post::trash`], only the
+    /// (`_wp_desired_post_slug`) comes back, as `wp_insert_post` restores it, made unique with
+    /// `wp_unique_post_slug`'s rules when another post took it meanwhile (`-2`, `-3`, ...), so
+    /// two posts never share a slug after a restore. (WordPress itself leaves a restored draft's
+    /// slug as it is until the post is published; the owner's rule is that a restore never
+    /// gives two posts the same slug.) Like [`Post::trash`], only the
     /// status, slug and `modified_at` are written, conditional on the stored row. A post that is
     /// not in the trash is left as it is. On success this post becomes the stored row.
     ///
@@ -332,7 +335,15 @@ impl Post {
                             .to_owned(),
                         Err(MetaError::Database(e)) => return Err(e),
                     };
-                    next.slug = desired;
+                    next.slug = unique_slug_on(
+                        tx,
+                        &stored.post_type,
+                        is_hierarchical(&stored.post_type),
+                        stored.parent_id,
+                        &desired,
+                        Some(id),
+                    )
+                    .await?;
                     Self::query()
                         .where_eq(Self::PRIMARY_KEY, id)
                         .update(&mut *tx, &[("slug", next.slug.clone().into())])

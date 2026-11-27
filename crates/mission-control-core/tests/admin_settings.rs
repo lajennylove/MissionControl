@@ -300,6 +300,7 @@ async fn each_settings_screen_round_trips_its_options() {
     let home = page(db, author, "Home", PostStatus::Publish).await;
     let blog = page(db, author, "Blog", PostStatus::Publish).await;
     let draft = page(db, author, "Draft", PostStatus::Draft).await;
+    // Fewer than 1 post per page is refused on the field, and nothing is saved.
     let errors = submit(
         db,
         SettingsScreen::Reading,
@@ -308,6 +309,25 @@ async fn each_settings_screen_round_trips_its_options() {
             ("page_on_front", &home.id.to_string()),
             ("page_for_posts", &blog.id.to_string()),
             ("posts_per_page", "0"),
+            ("posts_per_rss", "10"),
+            ("rss_use_excerpt", "1"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(
+        errors.get("posts_per_page").map(String::as_str),
+        Some("Please enter a valid number of posts per page.")
+    );
+    assert_eq!(option(db, "show_on_front").await, None);
+    let errors = submit(
+        db,
+        SettingsScreen::Reading,
+        &[
+            ("show_on_front", "page"),
+            ("page_on_front", &home.id.to_string()),
+            ("page_for_posts", &blog.id.to_string()),
+            ("posts_per_page", "1"),
             ("posts_per_rss", "5000"),
             ("rss_use_excerpt", "1"),
             ("blog_public", "on"),
@@ -909,14 +929,35 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
     assert_eq!(locations.get("primary"), None);
     assert_eq!(locations.get("footer"), Some(&menu_id));
 
+    // A custom link whose URL is not a link (a `javascript:` link, which `esc_url_raw` would
+    // empty) refuses the save, with the message under the items.
+    let script = json!([
+        {"title": "Script", "type": "custom", "url": "javascript:alert(1)"},
+    ]);
+    let input = validated(
+        db,
+        resource(),
+        &[("name", "Main"), ("items", &items(script))],
+    )
+    .await
+    .unwrap();
+    let user = ignite_core::ActingUser::new(1, "admin", "admin@example.com");
+    let refused = data
+        .try_update_for(db, &user, menu_id, input)
+        .await
+        .expect("no database error")
+        .expect_err("refuses the items");
+    assert!(
+        refused.errors()["items"].contains("Please enter a valid URL."),
+        "{refused:?}"
+    );
     // Parents: one naming its own row, two naming each other (a loop) and one past the last row
-    // all go to the top level; a `javascript:` link is stored empty, as `esc_url_raw` empties it.
+    // all go to the top level.
     let rows = json!([
         {"id": ids[1], "title": "Self", "type": "custom", "url": "/a/", "parent": 1},
         {"title": "Loop A", "type": "custom", "url": "/b/", "parent": 3},
         {"title": "Loop B", "type": "custom", "url": "/c/", "parent": 2},
         {"title": "Far", "type": "custom", "url": "/d/", "parent": 99},
-        {"title": "Script", "type": "custom", "url": "javascript:alert(1)"},
     ]);
     let input = validated(
         db,
@@ -931,7 +972,7 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
     .unwrap();
     data.update(db, menu_id, input).await.expect("saves");
     let stored = menu_items(db, &menu).await.unwrap();
-    assert_eq!(stored.len(), 5);
+    assert_eq!(stored.len(), 4);
     assert_eq!(stored[0].parent, None, "self");
     assert_eq!(stored[3].parent, None, "out of range");
     // A loop is broken: at least one of the two is at the top level, and no item is its own
@@ -939,16 +980,6 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
     assert!(
         stored[1].parent.is_none() || stored[2].parent.is_none(),
         "loop"
-    );
-    assert_eq!(
-        stored[4].object,
-        mission_control_core::theme::MenuItemObject::Custom { url: String::new() }
-    );
-    assert_eq!(
-        get_post_meta(db, stored[4].id, "_menu_item_url")
-            .await
-            .unwrap(),
-        Some(json!(""))
     );
 
     // WordPress's "Invalid" items: an item whose page was trashed later, and an item of a type
@@ -995,7 +1026,7 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
     assert_eq!(saved["name"], "Main again");
     assert_eq!(saved["loc_primary"], true);
     let stored = menu_items(db, &menu).await.unwrap();
-    assert_eq!(stored.len(), 7);
+    assert_eq!(stored.len(), 6);
     let kept = |id: i64| stored.iter().find(|s| s.id == id).cloned().expect("kept");
     assert_eq!(kept(gone_item.id).object, NewMenuItem::post(&gone).object);
     assert_eq!(kept(book_item.id).object, NewMenuItem::post(&book).object);
@@ -1018,7 +1049,7 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
         .await
         .unwrap();
         assert!(no_book_data.update(db, menu_id, input).await.is_err());
-        assert_eq!(menu_items(db, &menu).await.unwrap().len(), 7);
+        assert_eq!(menu_items(db, &menu).await.unwrap().len(), 6);
     }
     let input = validated(db, resource(), &[("name", "Main"), ("loc_footer", "on")])
         .await
@@ -1080,7 +1111,7 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0]["col_name"], "Main");
     assert_eq!(page.rows[0]["col_locations"], "Footer");
-    assert_eq!(page.rows[0]["col_items"], "7");
+    assert_eq!(page.rows[0]["col_items"], "6");
 
     // Delete: the items, the term and the location go.
     assert_eq!(data.delete(db, menu_id).await.unwrap(), 1);

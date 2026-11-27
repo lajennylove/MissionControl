@@ -3,8 +3,8 @@
 //! `wp_delete_post`): the row action "Trash" on a post out of the trash, asked for nothing; the
 //! Trash tab, whose rows have "Restore" and "Delete Permanently" (asked first, with WordPress's
 //! text) and no Edit; the slug freed while the post is trashed (`__trashed`) and given back on
-//! Restore, which makes the post a draft; WordPress's messages; and `delete_post` for each of
-//! them.
+//! Restore (made unique when another post took it), which makes the post a draft; WordPress's
+//! messages; and `delete_post` for each of them.
 //!
 //! The panel runs on MySQL and MariaDB only (Ruling R119), so the flow runs when
 //! `MC_TEST_DATABASE_URL` is a `mysql://` or `mariadb://` URL, on a database of its own
@@ -370,15 +370,17 @@ async fn the_trash_of_a_post(client: &Client, db: &Database) {
     .await;
     assert_eq!(find(db, other).await.unwrap().slug, "trash-me");
 
-    // Restore: a draft (`wp_untrash_post` since WordPress 5.6) with its slug back, even though a
-    // published post has it now: `wp_unique_post_slug` leaves a draft's slug as it is.
+    // Restore: a draft (`wp_untrash_post` since WordPress 5.6) with its slug back, made unique
+    // because a published post has it now (`wp_unique_post_slug`'s `-2`): two posts never share
+    // a slug after a restore.
     let (status, to) = row_action(client, "post", id, "untrash", "/mc-admin/post?tab=trash").await;
     assert_eq!(status, Status::SeeOther);
     let (_, list) = get(client, &to).await;
     assert!(list.contains("1 post restored from the Trash."), "{list}");
     let restored = find(db, id).await.unwrap();
     assert_eq!(restored.status, PostStatus::Draft);
-    assert_eq!(restored.slug, "trash-me");
+    assert_eq!(restored.slug, "trash-me-2");
+    assert_eq!(find(db, other).await.unwrap().slug, "trash-me");
     for key in [
         "_wp_desired_post_slug",
         "_wp_trash_meta_status",
@@ -394,7 +396,7 @@ async fn the_trash_of_a_post(client: &Client, db: &Database) {
         "{row}"
     );
     assert!(action_form(row, "trash").is_some(), "{row}");
-    // Published again, its slug is made unique, as `wp_unique_post_slug` does then.
+    // Published again with the taken slug, it stays unique, as `wp_unique_post_slug` makes it.
     let csrf = token(client).await;
     let response = post(
         client,

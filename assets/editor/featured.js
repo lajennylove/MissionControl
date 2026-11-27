@@ -8,11 +8,12 @@
  * - The box: "Set featured image" when there is none; otherwise the image (with its alternative
  *   text), "Click the image to edit or update" and "Remove featured image".
  * - "Set featured image" (or the image) opens the modal "Featured image" with two tabs, in this
- *   order: "Uploaded to this post" (the media attached to the post, shown first) and "Media
- *   Library" (every media item, of every type, with a search; a file that is not an image shows
- *   its type's icon). Both load 40 items at a time with "Load more".
+ *   order: "Uploaded to this post" (the images attached to the post, shown first) and "Media
+ *   Library" (every image, with a search), as WordPress's featured image frame lists images
+ *   only (`library: { type: 'image' }`). Both load 40 items at a time with "Load more". A
+ *   stored item that is not an image (set before this rule) shows its type's icon.
  * - Selecting an item and pressing the modal's "Set featured image" writes its id in the
- *   field, which the form saves as before (the server refuses an id that is not a media item
+ *   field, which the form saves as before (the server refuses an id that is not an image's
  *   with WordPress's "Invalid featured media ID."); "Remove featured image" empties it.
  *
  * Nothing changes until the user does, so the panel's unsaved changes alert stays quiet on an
@@ -210,7 +211,7 @@
       this.status.textContent = 'No media items found.';
       return;
     }
-    var query = 'action=query-attachments&page=' + (this.page + 1) +
+    var query = 'action=query-attachments&type=image&page=' + (this.page + 1) +
       '&per_page=' + PER_PAGE;
     if (this.uploadedTo) {
       query += '&uploaded_to=' + encodeURIComponent(this.uploadedTo);
@@ -415,7 +416,7 @@
     var item = this.selected;
     details.textContent = '';
     if (!item) {
-      details.appendChild(el('p', {}, 'Select a media item.'));
+      details.appendChild(el('p', {}, 'Select an image.'));
       return;
     }
     details.appendChild(el('h3', {}, 'Attachment details'));

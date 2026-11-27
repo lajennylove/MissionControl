@@ -395,12 +395,12 @@ async fn trash_frees_the_slug_and_untrash_takes_it_back() {
         None
     );
 
-    // When another post took the slug meanwhile, untrash gives it back as it was, as WordPress
-    // does: a draft may share a slug. Publishing makes it unique.
+    // When another post took the slug meanwhile, untrash makes it unique (`-2`), so two posts
+    // never share a slug after a restore; publishing keeps it.
     first.trash(db).await.unwrap();
     post(db, author, "post", "hello", PostStatus::Publish, None).await;
     first.untrash(db).await.unwrap();
-    assert_eq!(first.slug, "hello");
+    assert_eq!(first.slug, "hello-2");
     first.status = PostStatus::Publish;
     first.save(db).await.unwrap();
     assert_eq!(first.slug, "hello-2");

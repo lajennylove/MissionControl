@@ -63,6 +63,66 @@
 
   var nextKey = 1;
 
+  /** The message of a custom link whose URL is not a link, as the server refuses it. */
+  var INVALID_URL = 'Please enter a valid URL.';
+
+  /** The protocols `esc_url` keeps (`wp_allowed_protocols`). */
+  var PROTOCOLS = ['http', 'https', 'ftp', 'ftps', 'mailto', 'news', 'irc', 'irc6', 'ircs',
+    'gopher', 'nntp', 'feed', 'telnet', 'mms', 'rtsp', 'sms', 'svn', 'tel', 'fax', 'xmpp',
+    'webcal', 'urn'];
+
+  /**
+   * Whether `address` is a link a custom item can hold, as the server checks it: no spaces, a
+   * path, query or fragment, an allowed protocol with something after it, or an address that
+   * `esc_url` completes with `http://`.
+   */
+  function validUrl(address) {
+    var url = text(address).trim();
+    if (url === '' || /[\s\u0000-\u001f\u007f]/.test(url)) {
+      return false;
+    }
+    if (/^[\/#?]/.test(url)) {
+      return true;
+    }
+    if (!/^[A-Za-z0-9\-~+_.?#=!&;,\/:%@$|*'()\[\]\u0080-\uffff]+$/.test(url)) {
+      return false;
+    }
+    var scheme = /^([A-Za-z][A-Za-z0-9+.\-]*):/.exec(url);
+    if (!scheme) {
+      url = 'http://' + url;
+    } else if (PROTOCOLS.indexOf(scheme[1].toLowerCase()) === -1) {
+      return false;
+    }
+    var at = url.indexOf('://');
+    if (at === -1) {
+      return url.slice(url.indexOf(':') + 1) !== '';
+    }
+    var host = url.slice(at + 3).split(/[\/?#]/)[0];
+    return host !== '' && !/^[.\-]/.test(host);
+  }
+
+  /** Shows or clears the URL message under a custom item's URL `input`. */
+  function urlMessage(input, valid) {
+    var wrap = input.parentNode;
+    var message = wrap.querySelector('.mc-menu-url-error');
+    if (valid) {
+      input.removeAttribute('aria-invalid');
+      input.removeAttribute('aria-describedby');
+      if (message) {
+        wrap.removeChild(message);
+      }
+      return;
+    }
+    if (!message) {
+      message = element('span', 'mc-menu-url-error ig-error', INVALID_URL);
+      message.id = input.id + '-error';
+      message.setAttribute('role', 'alert');
+      wrap.appendChild(message);
+    }
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', message.id);
+  }
+
   function text(value) {
     if (value === null || value === undefined) {
       return '';
@@ -395,6 +455,22 @@
     });
     wrap.appendChild(label);
     wrap.appendChild(input);
+    if (key === 'url') {
+      // WordPress's item URL is a text field (`edit-menu-item-url`): the check is the
+      // builder's, with its message under the field, not the browser's.
+      input.setAttribute('inputmode', 'url');
+      input.addEventListener('blur', function () {
+        urlMessage(input, validUrl(input.value));
+      });
+      input.addEventListener('input', function () {
+        if (input.getAttribute('aria-invalid') && validUrl(input.value)) {
+          urlMessage(input, true);
+        }
+      });
+      if (!validUrl(item.url)) {
+        urlMessage(input, false);
+      }
+    }
     return wrap;
   }
 
@@ -475,7 +551,7 @@
       title.textContent = labelOf(item);
     };
     if (item.type === CUSTOM) {
-      panel.appendChild(setting(item, 'URL', 'url', 'url', relabel));
+      panel.appendChild(setting(item, 'URL', 'url', 'text', relabel));
     }
     var navigationLabel = setting(item, 'Navigation Label', 'title', 'text', relabel);
     // An empty label shows the original title, as the site does.
@@ -747,10 +823,16 @@
 
     function addLink() {
       var address = url.value.trim();
-      // nav-menu.js's `addCustomLink`: a URL is needed.
+      // nav-menu.js's `addCustomLink`: a URL is needed, and it must be a link.
       if (address === '' || address === 'https://' || address === 'http://') {
         url.setAttribute('aria-invalid', 'true');
         status.textContent = 'Enter the URL of the link.';
+        url.focus();
+        return;
+      }
+      if (!validUrl(address)) {
+        url.setAttribute('aria-invalid', 'true');
+        status.textContent = INVALID_URL;
         url.focus();
         return;
       }
@@ -795,6 +877,29 @@
   columns.appendChild(builder);
   columns.appendChild(main);
   main.appendChild(form);
+  // A custom link whose URL is not a link stops the save: its settings open with the message
+  // under its URL, which takes the focus, as the server would refuse the save.
+  form.addEventListener('submit', function (event) {
+    var bad = items.filter(function (item) {
+      return item.type === CUSTOM && !validUrl(item.url);
+    });
+    if (!bad.length) {
+      return;
+    }
+    event.preventDefault();
+    bad.forEach(function (item) {
+      if (!open[item.key]) {
+        open[item.key] = snapshot(item);
+      }
+    });
+    render();
+    var input = list.querySelector('[data-key="' + bad[0].key + '"] .mc-menu-setting-url input');
+    if (input) {
+      urlMessage(input, false);
+      input.focus();
+    }
+    announce.textContent = INVALID_URL;
+  });
   var deleteForm = document.querySelector('form.mc-menu-delete');
   if (deleteForm) {
     main.appendChild(deleteForm);

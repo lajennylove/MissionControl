@@ -59,8 +59,8 @@ pub(crate) use meta::{MetaTable, delete_meta, meta_rows, set_meta, set_meta_valu
 pub(crate) use meta::{
     get_option_in, gmt_offset, offset_hours_text, put_option_in, put_post_meta_in,
 };
-pub use options::{OptionError, sanitize_option};
-pub(crate) use options::{esc_url_raw, is_email, is_timezone, utc_offset};
+pub use options::{OptionError, is_email, is_valid_link_url, sanitize_option};
+pub(crate) use options::{esc_url_raw, is_timezone, utc_offset};
 pub use permalink::{
     PermalinkContext, PermalinkError, PermalinkStructure, Segment, Tag, page_ancestors, permalink,
 };

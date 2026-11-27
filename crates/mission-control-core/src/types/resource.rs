@@ -27,14 +27,14 @@
 //! | `editor`          | `content`        | rich text                                    |
 //! | `excerpt`         | `excerpt`        | textarea                                     |
 //! | `author`          | `author`         | user: who may edit the type's posts (`post_author_meta_box`), read from Ignite's roles |
-//! | `page-attributes` | `parent`         | post object (a hierarchical type only)       |
+//! | `page-attributes` | `parent`         | post object (a hierarchical type only); the post itself is refused ("A page cannot be its own parent.") |
 //! | `page` only       | `template`       | select: "Default template" and the theme's page templates, when it has any (`_wp_page_template`) |
 //! | `page-attributes` | `menu_order`     | number                                       |
-//! | `thumbnail`       | `featured_media` | number: the media id (`_thumbnail_id`); an id that is not a media item is refused with "Invalid featured media ID." |
+//! | `thumbnail`       | `featured_media` | number: the media id (`_thumbnail_id`); an id that is not an image's is refused with "Invalid featured media ID." (`set_post_thumbnail`) |
 //! | always            | `status`         | select: Draft, Pending, Private, Published, Scheduled, Trash; blank keeps the post's (Draft on a new post) |
 //! | always            | `date`           | date and time, in the site's time zone; blank is "Publish immediately" |
 //! | always            | `password`       | text (stored as written, as `post_password`) |
-//! | `post` only       | `sticky`         | checkbox                                     |
+//! | `post` only       | `sticky`         | checkbox; refused with a password ("A post can not be sticky and have a password.") |
 //!
 //! Each taxonomy the type uses (its `taxonomies`, and those whose `object_type` names it,
 //! `category` and `post_tag` for `post`) whose `show_ui` is on is a relationship field
@@ -2876,13 +2876,62 @@ impl PostTypeData {
                 None => return Ok(refusal()),
             },
         };
-        let is_attachment = Post::query()
+        // `set_post_thumbnail` sets only an image (`wp_get_attachment_image` is empty for any
+        // other file), and the REST API answers its failure with this message.
+        let is_image = Post::query()
             .find(db, id)
             .await?
-            .is_some_and(|post| post.post_type == "attachment");
-        Ok(if is_attachment { None } else { refusal() })
+            .is_some_and(|post| post.post_type == "attachment" && is_image_mime(&post.mime_type));
+        Ok(if is_image { None } else { refusal() })
+    }
+
+    /// The form's checks before a save of post `id` (`None` on the New screen), by field:
+    /// WordPress's check of the featured image
+    /// ([`featured_media_refusal`](Self::featured_media_refusal)), a post chosen as its own
+    /// parent ([`own_parent_message`]; the edit form's Parent leaves the post and its
+    /// descendants out, as `wp_dropdown_pages`' `exclude_tree`), and a sticky post
+    /// with a password ([`STICKY_WITH_PASSWORD`], the REST API's refusal: WordPress's editor hides
+    /// "Stick to the top of the blog" for a password-protected post, and `edit_post` unsticks
+    /// it).
+    async fn form_refusal(
+        &self,
+        db: &Database,
+        id: Option<i64>,
+        input: &Row,
+    ) -> Result<Option<ValidationError>, Error> {
+        let mut messages: Vec<(&str, String)> = Vec::new();
+        if self.featured_media_refusal(db, input).await?.is_some() {
+            messages.push((FEATURED_MEDIA, INVALID_FEATURED_MEDIA.to_owned()));
+        }
+        if self.has_parent()
+            && let Some(id) = id
+            && input.get(PARENT).and_then(id_of) == Some(id)
+        {
+            messages.push((PARENT, own_parent_message(self.noun())));
+        }
+        let password = matches!(input.get(PASSWORD), Some(Value::String(p)) if !p.is_empty());
+        if self.sticky && password && input.get(STICKY) == Some(&Value::Bool(true)) {
+            messages.push((STICKY, STICKY_WITH_PASSWORD.to_owned()));
+        }
+        Ok((!messages.is_empty()).then(|| ValidationError::with_messages(messages)))
     }
 }
+
+/// Whether `mime` is an image's MIME type, as `wp_attachment_is_image` decides for the featured
+/// image.
+fn is_image_mime(mime: &str) -> bool {
+    mime.to_ascii_lowercase().starts_with("image/")
+}
+
+/// The refusal of a post chosen as its own parent, on the Parent field: "A page cannot be its
+/// own parent.".
+pub fn own_parent_message(noun: &str) -> String {
+    format!("A {noun} cannot be its own parent.")
+}
+
+/// The refusal of a sticky post with a password, on the sticky field: the REST API's message
+/// (`WP_REST_Posts_Controller::prepare_item_for_database`).
+pub const STICKY_WITH_PASSWORD: &str = "A post can not be sticky and have a password.";
 
 impl RuntimeData for PostTypeData {
     fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
@@ -2984,7 +3033,8 @@ impl RuntimeData for PostTypeData {
         })
     }
 
-    /// [`create_for`](RuntimeData::create_for), after WordPress's check of the featured image.
+    /// [`create_for`](RuntimeData::create_for), after the form's checks
+    /// ([`form_refusal`](Self::form_refusal)).
     fn try_create_for<'a>(
         &'a self,
         db: &'a Database,
@@ -2992,14 +3042,15 @@ impl RuntimeData for PostTypeData {
         input: Row,
     ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
         Box::pin(async move {
-            if let Some(refused) = self.featured_media_refusal(db, &input).await? {
+            if let Some(refused) = self.form_refusal(db, None, &input).await? {
                 return Ok(Err(refused));
             }
             self.create_for(db, user, input).await.map(Ok)
         })
     }
 
-    /// [`update_for`](RuntimeData::update_for), after WordPress's check of the featured image.
+    /// [`update_for`](RuntimeData::update_for), after the form's checks
+    /// ([`form_refusal`](Self::form_refusal)).
     fn try_update_for<'a>(
         &'a self,
         db: &'a Database,
@@ -3008,7 +3059,7 @@ impl RuntimeData for PostTypeData {
         input: Row,
     ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
         Box::pin(async move {
-            if let Some(refused) = self.featured_media_refusal(db, &input).await? {
+            if let Some(refused) = self.form_refusal(db, Some(id), &input).await? {
                 return Ok(Err(refused));
             }
             self.update_for(db, user, id, input).await.map(Ok)
