@@ -9,8 +9,10 @@
 <style>
 html.wp-toolbar { padding-top: 32px; box-sizing: border-box; }
 body.wp-admin { background: #f0f0f1; color: #3c434a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; font-size: 13px; line-height: 1.4em; margin: 0; min-height: 100%; }
-body.wp-admin a { color: #2271b1; }
-body.wp-admin a:hover, body.wp-admin a:active { color: #135e96; }
+/* WordPress's link colours, except on a button: a link styled as a button ("New Post", WordPress's .page-title-action) keeps the button's own text colour, white on the blue. */
+body.wp-admin a:not(.ig-btn) { color: #2271b1; }
+body.wp-admin a:not(.ig-btn):hover, body.wp-admin a:not(.ig-btn):active { color: #135e96; }
+body.wp-admin a.ig-btn-primary, body.wp-admin a.ig-btn-primary:hover, body.wp-admin a.ig-btn-danger { color: #fff; }
 .screen-reader-text { border: 0; clip-path: inset(50%); height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; word-wrap: normal; }
 #wpwrap { min-height: 100%; position: relative; width: auto; }
 /* The page's header around the admin bar is Ignite's: only the bar shows. */
@@ -26,10 +28,20 @@ body.wp-admin a:hover, body.wp-admin a:active { color: #135e96; }
 #wpadminbar li:hover > .ab-item, #wpadminbar li:focus-within > .ab-item { background: #2c3338; color: #72aee6; }
 #wpadminbar .ab-icon { color: #a7aaad; font-size: 20px; height: 20px; width: 20px; }
 #wpadminbar li:hover > .ab-item .ab-icon { color: #72aee6; }
-#wpadminbar .mc-wp-brand { display: block; height: 20px; width: auto; }
-#wpadminbar .avatar { border: 1px solid #8c8f94; height: 16px; width: 16px; }
+/* The brand's logo is dark: a light panel behind it reads on the dark bar. */
+#wpadminbar .mc-wp-brand-panel { background: #fff; border-radius: 3px; display: block; padding: 1px 4px; }
+#wpadminbar .mc-wp-brand { display: block; height: 22px; width: auto; }
+/* The user's avatar: the picture, or the initials on WordPress's grey circle. */
+#wpadminbar .avatar { border: 1px solid #8c8f94; border-radius: 50%; box-sizing: border-box; flex: none; height: 18px; object-fit: cover; width: 18px; }
+#wpadminbar .avatar-initials { align-items: center; background: #c3c4c7; color: #1d2327; display: inline-flex; font-size: 9px; font-weight: 600; justify-content: center; line-height: 1; text-transform: uppercase; }
+#wpadminbar .avatar-64 { height: 64px; width: 64px; }
+#wpadminbar .avatar-64.avatar-initials { font-size: 24px; }
+#wpadminbar #wp-admin-bar-user-info .ab-item { flex-direction: column; align-items: flex-start; gap: 6px; height: auto; padding: 4px 1em 8px; }
+#wpadminbar #wp-admin-bar-user-info .display-name { color: #f0f0f1; }
 #wpadminbar .ab-sub-wrapper { background: #2c3338; box-shadow: 0 3px 5px rgba(0, 0, 0, 0.2); display: none; min-width: 100%; position: absolute; right: 0; top: 32px; }
-#wpadminbar .menupop:hover > .ab-sub-wrapper, #wpadminbar .menupop:focus-within > .ab-sub-wrapper { display: block; }
+/* The menu opens on hover, and on a click or the keyboard's focus: the bar's script sets .hover, as WordPress's admin-bar.js does. */
+#wpadminbar .menupop:hover > .ab-sub-wrapper, #wpadminbar .menupop.hover > .ab-sub-wrapper { display: block; }
+#wpadminbar .menupop.hover > .ab-item { background: #2c3338; color: #72aee6; }
 #wpadminbar .ab-submenu { padding: 6px 0; }
 #wpadminbar .ab-submenu .ab-item { color: #c3c4c7; height: 26px; padding: 0 1em; width: 100%; }
 #wpadminbar .ab-submenu li:hover > .ab-item, #wpadminbar .ab-submenu li:focus-within > .ab-item { background: none; color: #72aee6; }

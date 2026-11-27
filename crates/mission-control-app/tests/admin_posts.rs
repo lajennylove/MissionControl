@@ -1007,6 +1007,44 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     }
     assert!(!wordpress.contains("ig-nav-link"), "{wordpress}");
     assert!(!wordpress.contains("aria-label=\"Main\""), "{wordpress}");
+    // The admin bar, as WordPress's: the initials on the grey circle for a user without a
+    // picture, the Howdy menu as a button that opens on a click, with "Edit Profile" and
+    // "Log Out" in it, and no light or dark switch.
+    for expected in [
+        "<button type=\"button\" class=\"ab-item\" aria-haspopup=\"true\" aria-expanded=\"false\" aria-controls=\"wp-admin-bar-user-actions\">Howdy, <span class=\"display-name\">ada</span><span class=\"avatar avatar-26 avatar-initials\" aria-hidden=\"true\">A</span></button>",
+        "<li id=\"wp-admin-bar-edit-profile\"><a class=\"ab-item\" href=\"/mc-admin/profile\">Edit Profile</a></li>",
+        "<button type=\"submit\" class=\"ab-item\">Log Out</button>",
+        "#wpadminbar .menupop.hover > .ab-sub-wrapper",
+        "<span class=\"mc-wp-brand-panel\"><img src=\"/mc-includes/images/mission-control-logo.webp\"",
+    ] {
+        assert!(wordpress.contains(expected), "`{expected}` in {wordpress}");
+    }
+    assert!(!wordpress.contains("data-theme-toggle"), "{wordpress}");
+    // "New Post" is white on WordPress's blue: the link colour skips the buttons.
+    let (_, list) = get(client, "/mc-admin/post").await;
+    assert!(
+        list.contains(
+            "<a class=\"ig-btn ig-btn-primary\" href=\"/mc-admin/post/new\">New Post</a>"
+        ),
+        "{list}"
+    );
+    assert!(
+        list.contains("body.wp-admin a:not(.ig-btn) { color: #2271b1; }"),
+        "{list}"
+    );
+    assert!(list.contains("body.wp-admin a.ig-btn-primary"), "{list}");
+    // The profile page does not promise a light or dark switch this theme does not have.
+    let (status, profile) = get(client, "/mc-admin/profile").await;
+    assert_eq!(status, Status::Ok, "{profile}");
+    assert!(
+        !profile.contains("The light or dark mode is the switch in the top bar"),
+        "{profile}"
+    );
+    assert!(
+        profile.contains("WordPress has no light or dark mode, so this theme stays light."),
+        "{profile}"
+    );
+    assert!(profile.contains("<body class=\"wp-admin\">"), "{profile}");
     // The groups are separated, without their headings.
     let menu_start = wordpress.find("<ul id=\"adminmenu\">").unwrap();
     let menu = &wordpress[menu_start..];

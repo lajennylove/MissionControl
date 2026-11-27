@@ -1,17 +1,18 @@
-{{-- The WordPress admin theme's top bar: wp-admin's admin bar. The brand's logo stands where WordPress's logo is, then the link to the site; on the right, "Howdy" and the user's menu, with the profile and the same sign-out form as Ignite's bar. WordPress has no dark mode, so the bar has no light or dark toggle. --}}@if (signed_in)
+{{-- The WordPress admin theme's top bar: wp-admin's admin bar. The brand's logo stands where WordPress's logo is, on a light panel so the dark logo reads on the dark bar, then the link to the site; on the right, "Howdy", the user's avatar (the picture, or the initials on a grey circle without one) and the user's menu (`wp-admin-bar-my-account`): the user's info, "Edit Profile" and "Log Out", the same sign-out form as Ignite's bar. The menu opens on a click and on the keyboard's focus as well as on hover, as WordPress's admin-bar.js opens it. WordPress has no dark mode, so the bar has no light or dark switch. --}}@if (signed_in)
 <div id="wpadminbar" role="navigation" aria-label="Toolbar">
   <ul class="ab-top-menu">
     <li id="wp-admin-bar-menu-toggle"><label for="mc-wp-menu" class="ab-item" aria-label="Menu"><span class="ab-icon dashicons dashicons-menu" aria-hidden="true"></span></label></li>
-    <li id="wp-admin-bar-wp-logo"><a class="ab-item" href="{{ $home_url }}">@if (brand.has_logo)<img src="{{ $brand.logo }}" alt="{{ $brand.name }}" class="mc-wp-brand">@else{{ $brand.name }}@endif</a></li>
+    <li id="wp-admin-bar-wp-logo"><a class="ab-item" href="{{ $home_url }}">@if (brand.has_logo)<span class="mc-wp-brand-panel"><img src="{{ $brand.logo }}" alt="{{ $brand.name }}" class="mc-wp-brand"></span>@else{{ $brand.name }}@endif</a></li>
     <li id="wp-admin-bar-site-name"><a class="ab-item" href="/"><span class="ab-icon dashicons dashicons-admin-home" aria-hidden="true"></span><span class="ab-label">Visit Site</span></a></li>
   </ul>
   <ul class="ab-top-secondary">
-    <li id="wp-admin-bar-my-account" class="menupop">
-      <a class="ab-item" href="{{ $profile_url }}" aria-haspopup="true">Howdy, <span class="display-name">{{ $user_name }}</span>@if (has_avatar)<img src="{{ $avatar_url }}" alt="" class="avatar">@endif</a>
+    <li id="wp-admin-bar-my-account" class="menupop with-avatar">
+      <button type="button" class="ab-item" aria-haspopup="true" aria-expanded="false" aria-controls="wp-admin-bar-user-actions">Howdy, <span class="display-name">{{ $user_name }}</span>@if (has_avatar)<img src="{{ $avatar_url }}" alt="" class="avatar avatar-26">@else<span class="avatar avatar-26 avatar-initials" aria-hidden="true">{{ $user_initials }}</span>@endif</button>
       <div class="ab-sub-wrapper">
-        <ul class="ab-submenu">
-          <li><a class="ab-item" href="{{ $profile_url }}">Edit Profile</a></li>
-          <li>
+        <ul id="wp-admin-bar-user-actions" class="ab-submenu">
+          <li id="wp-admin-bar-user-info"><a class="ab-item" href="{{ $profile_url }}" tabindex="-1">@if (has_avatar)<img src="{{ $avatar_url }}" alt="" class="avatar avatar-64">@else<span class="avatar avatar-64 avatar-initials" aria-hidden="true">{{ $user_initials }}</span>@endif<span class="display-name">{{ $user_name }}</span></a></li>
+          <li id="wp-admin-bar-edit-profile"><a class="ab-item" href="{{ $profile_url }}">Edit Profile</a></li>
+          <li id="wp-admin-bar-logout">
             <form method="post" action="{{ $logout_everywhere_url }}">
               <input type="hidden" name="_token" value="{{ $csrf_token }}">
               <button type="submit" class="ab-item">Log Out</button>
@@ -22,4 +23,20 @@
     </li>
   </ul>
 </div>
+<script>
+(function () {
+  var item = document.getElementById('wp-admin-bar-my-account');
+  if (!item) return;
+  var toggle = item.querySelector('[aria-haspopup]');
+  function show(open) {
+    item.classList.toggle('hover', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  toggle.addEventListener('click', function () { show(!item.classList.contains('hover')); });
+  document.addEventListener('click', function (event) { if (!item.contains(event.target)) show(false); });
+  item.addEventListener('focusin', function (event) { if (event.target.matches(':focus-visible')) show(true); });
+  item.addEventListener('focusout', function (event) { if (!item.contains(event.relatedTarget)) show(false); });
+  item.addEventListener('keydown', function (event) { if (event.key === 'Escape') show(false); });
+})();
+</script>
 @endif

@@ -5,7 +5,8 @@
 //!   admin bar above the dark admin menu (each navigation group after a separator, without a
 //!   heading, as WordPress separates its menu), the grey content area, WordPress's admin notices
 //!   for the flash message, and WordPress's colours as Ignite's colour tokens, so the screens'
-//!   buttons and links are WordPress's blue. WordPress has no dark mode, so the theme stays light.
+//!   buttons and links are WordPress's blue. WordPress has no dark mode, so the theme stays light,
+//!   its admin bar has no light or dark switch and its profile page promises none.
 //! - Its own sign-in, lost password and reset pages, as wp-login.php looks, on a layout of their
 //!   own. They post the same fields to the same actions as the panel's pages. A signed-out page
 //!   renders in the site's default admin theme (see `ignite_panel::theme`), so they show while
@@ -56,8 +57,9 @@ const TOP_BAR: &str = "themes.wordpress.partials.topbar";
 const FLASH: &str = "themes.wordpress.partials.flash";
 
 /// The theme's views by name, built into the binary. `dashboard` (WordPress's dashboard boxes
-/// and its Quick Draft form), `login`, `forgot` and `reset` replace the panel's pages of those
-/// names.
+/// and its Quick Draft form), `login`, `forgot`, `reset` and `profile` (the panel's profile page,
+/// whose admin theme note promises no light or dark switch: this theme has none) replace the
+/// panel's pages of those names.
 const VIEWS: &[(&str, &str)] = &[
     (
         LAYOUT,
@@ -94,6 +96,10 @@ const VIEWS: &[(&str, &str)] = &[
     (
         "reset",
         include_str!("../../views/admin/wordpress/reset.propel"),
+    ),
+    (
+        "profile",
+        include_str!("../../views/admin/wordpress/profile.propel"),
     ),
 ];
 
@@ -288,6 +294,107 @@ mod tests {
         let colors = WordPressTheme.colors();
         assert!(colors.contains(&ColorToken::new("primary", "#2271b1", "#2271b1")));
         assert!(colors.contains(&ColorToken::new("page", "#f0f0f1", "#f0f0f1")));
+    }
+
+    #[test]
+    fn a_button_link_keeps_its_white_text() {
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        // WordPress's link colour skips the buttons, so "New Post" is white on the blue, as
+        // WordPress's .page-title-action.
+        assert!(
+            layout.contains("body.wp-admin a:not(.ig-btn) { color: #2271b1; }"),
+            "{layout}"
+        );
+        assert!(
+            layout.contains("body.wp-admin a.ig-btn-primary, body.wp-admin a.ig-btn-primary:hover, body.wp-admin a.ig-btn-danger { color: #fff; }"),
+            "{layout}"
+        );
+        assert!(!layout.contains("body.wp-admin a { color"), "{layout}");
+    }
+
+    #[test]
+    fn the_admin_bar_shows_the_avatar_or_the_initials() {
+        let bar = WordPressTheme.view(TOP_BAR).expect("the admin bar");
+        assert!(
+            bar.contains("@if (has_avatar)<img src=\"{{ $avatar_url }}\" alt=\"\" class=\"avatar avatar-26\">@else<span class=\"avatar avatar-26 avatar-initials\" aria-hidden=\"true\">{{ $user_initials }}</span>@endif"),
+            "{bar}"
+        );
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        assert!(
+            layout.contains(
+                "#wpadminbar .avatar-initials { align-items: center; background: #c3c4c7;"
+            ),
+            "{layout}"
+        );
+    }
+
+    #[test]
+    fn the_howdy_menu_opens_without_hover() {
+        let bar = WordPressTheme.view(TOP_BAR).expect("the admin bar");
+        // A button opens the menu on a click; its script sets WordPress's .hover class.
+        assert!(
+            bar.contains("<button type=\"button\" class=\"ab-item\" aria-haspopup=\"true\" aria-expanded=\"false\" aria-controls=\"wp-admin-bar-user-actions\">Howdy, "),
+            "{bar}"
+        );
+        assert!(
+            bar.contains("item.classList.toggle('hover', open);"),
+            "{bar}"
+        );
+        // The keyboard's focus opens it too, and it stays open while the focus is in it.
+        assert!(
+            bar.contains("if (event.target.matches(':focus-visible')) show(true);"),
+            "{bar}"
+        );
+        assert!(
+            bar.contains("if (!item.contains(event.relatedTarget)) show(false);"),
+            "{bar}"
+        );
+        for expected in [">Edit Profile</a>", ">Log Out</button>"] {
+            assert!(bar.contains(expected), "{expected}");
+        }
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        assert!(
+            layout.contains("#wpadminbar .menupop:hover > .ab-sub-wrapper, #wpadminbar .menupop.hover > .ab-sub-wrapper { display: block; }"),
+            "{layout}"
+        );
+    }
+
+    #[test]
+    fn the_admin_bar_has_no_light_or_dark_switch_and_the_profile_promises_none() {
+        let bar = WordPressTheme.view(TOP_BAR).expect("the admin bar");
+        assert!(!bar.contains("data-theme-toggle"), "{bar}");
+        let profile = WordPressTheme.view("profile").expect("the profile page");
+        assert!(
+            !profile.contains("is the switch in the top bar"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("WordPress has no light or dark mode, so this theme stays light."),
+            "{profile}"
+        );
+        // The page keeps the panel's forms.
+        for expected in [
+            "action=\"{{ $profile_action }}\"",
+            "action=\"{{ $password_action }}\"",
+            "action=\"{{ $avatar_action }}\"",
+            "action=\"{{ $admin_theme_action }}\"",
+        ] {
+            assert!(profile.contains(expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn the_logo_sits_on_a_light_panel_in_the_dark_bar() {
+        let bar = WordPressTheme.view(TOP_BAR).expect("the admin bar");
+        assert!(
+            bar.contains("<span class=\"mc-wp-brand-panel\"><img"),
+            "{bar}"
+        );
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        assert!(
+            layout.contains("#wpadminbar .mc-wp-brand-panel { background: #fff;"),
+            "{layout}"
+        );
     }
 
     #[test]

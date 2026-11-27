@@ -1,0 +1,119 @@
+{{-- The WordPress admin theme's profile page: the panel's profile page (Ignite's `profile` view, ignite-panel 0.6.6), with the same forms and links, and the admin theme's note told for this theme. WordPress has no dark mode, so this theme's admin bar has no light or dark switch and the note does not promise one. Keep it in step with Ignite's view when the panel's profile page changes. --}}@extends('ignite::layouts.app')
+
+@section('ignite_brand_name'){{ $brand.name }}@endsection
+
+@section('ignite_favicon')@include('ignite::partials.favicon')@endsection
+
+@section('ignite_stylesheets')@include('ignite::partials.stylesheets')@endsection
+
+@section('ignite_head')@if (theme_style)<style>{!! $theme_style !!}</style>@endif@endsection
+
+@section('ignite_html')data-theme="{{ $theme }}"@endsection
+
+@section('ignite_aside')
+  @include('ignite::partials.nav')
+@endsection
+
+@section('ignite_column')ig-with-sidebar@endsection
+
+@section('ignite_bar')
+  <header class="sticky top-0 z-20 flex items-center border-b border-border bg-page px-5 py-3">
+    @include('ignite::partials.topbar')
+  </header>
+@endsection
+
+@section('ignite_flash')
+  @include('ignite::partials.flash')
+@endsection
+
+@section('title')
+  {{ $title }}
+@endsection
+
+@section('content')
+  <h1 class="mb-6">{{ $title }}</h1>
+
+  <div class="grid min-w-0 max-w-6xl grid-cols-[minmax(0,1fr)] gap-6">
+    <div class="grid min-w-0 gap-6 grid-cols-[minmax(0,1fr)] lg:grid-cols-2">
+      <section class="ig-card">
+        <h2 class="mb-5">Your details</h2>
+        <form class="grid gap-5" method="post" action="{{ $profile_action }}">
+          <input type="hidden" name="_token" value="{{ $csrf_token }}">
+
+          @foreach (field in profile_fields)
+            @include('ignite::partials.field')
+          @endforeach
+
+          <div>
+            <button type="submit" class="ig-btn ig-btn-primary">Save details</button>
+          </div>
+        </form>
+      </section>
+      <section class="ig-card">
+        <h2 class="mb-5">Password</h2>
+        <form class="grid max-w-md gap-5" method="post" action="{{ $password_action }}">
+          <input type="hidden" name="_token" value="{{ $csrf_token }}">
+
+          @foreach (field in password_fields)
+            <div>
+              <label class="ig-label" for="{{ $field.name }}">{{ $field.label }}</label>
+              <input class="ig-input" id="{{ $field.name }}" name="{{ $field.name }}" type="password" autocomplete="new-password">
+              @if (field.has_error)
+                <p class="mt-1.5 mb-0 text-sm text-error-emphasis">{{ $field.error }}</p>
+              @endif
+            </div>
+          @endforeach
+
+          <div>
+            <button type="submit" class="ig-btn ig-btn-primary">Change password</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <section class="ig-card flex flex-col gap-6 sm:flex-row sm:items-center">
+      @if (has_avatar)
+        <img src="{{ $avatar_url }}" alt="" class="h-20 w-20 shrink-0 rounded-full object-cover">
+      @else
+        <span class="flex h-20 w-20 shrink-0 items-center justify-center rounded-full bg-lightprimary text-2xl font-semibold text-primary">{{ $user_initials }}</span>
+      @endif
+
+      <div class="grid flex-1 gap-3">
+        <h2 class="m-0">Picture</h2>
+        <p class="m-0 text-sm">PNG, JPEG or WebP, up to 1 MB. Without a picture, your initials show.</p>
+        <form class="flex flex-wrap items-center gap-3" method="post" action="{{ $avatar_action }}" enctype="multipart/form-data">
+          <input type="hidden" name="_token" value="{{ $csrf_token }}">
+          <input class="text-sm" type="file" name="avatar" accept="image/png,image/jpeg,image/webp" required>
+          <button type="submit" class="ig-btn ig-btn-outline">Upload</button>
+        </form>
+        @if (has_avatar)
+          <form method="post" action="{{ $remove_avatar_action }}">
+            <input type="hidden" name="_token" value="{{ $csrf_token }}">
+            <button type="submit" class="ig-btn ig-btn-ghost">Remove picture</button>
+          </form>
+        @endif
+      </div>
+    </section>@if (has_admin_themes)
+
+    <section class="ig-card">
+      <h2 class="mb-5">Admin theme</h2>
+      <form class="grid max-w-md gap-5" method="post" action="{{ $admin_theme_action }}">
+        <input type="hidden" name="_token" value="{{ $csrf_token }}">
+
+        <div>
+          <label class="ig-label" for="admin_theme">The look of the panel for you</label>
+          <select class="ig-input" id="admin_theme" name="admin_theme">
+            @foreach (option in admin_themes)
+              <option value="{{ $option.value }}" @if (option.selected)selected@endif>{{ $option.label }}</option>
+            @endforeach
+          </select>
+        </div>
+        <p class="m-0 text-sm">WordPress has no light or dark mode, so this theme stays light. The other themes keep the light or dark switch in their top bar.</p>
+
+        <div>
+          <button type="submit" class="ig-btn ig-btn-outline">Save theme</button>
+        </div>
+      </form>
+    </section>@endif
+  </div>
+@endsection
