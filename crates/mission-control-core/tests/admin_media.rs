@@ -164,6 +164,7 @@ async fn the_screen_lists_edits_and_deletes_attachments() {
     assert_eq!(
         columns,
         [
+            "col_thumb",
             "col_title",
             "col_file",
             "col_mime",
