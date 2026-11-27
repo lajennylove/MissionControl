@@ -205,6 +205,7 @@ pub async fn save_revision(
             });
         }
         recount_post_terms(tx, id).await?;
+        crate::theme::auto_add_page_in(tx, &saved, Some(before.status)).await?;
         write_settled_slug(tx, &mut saved).await?;
         record_old_slug(tx, &before, &saved).await?;
         Ok(insert(tx, revision).await?)

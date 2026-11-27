@@ -756,7 +756,10 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
     types.push((MenuObjectType::PostType("book".into()), "Book".into()));
     let resource = || nav_menus_resource(&theme, types.clone());
     let names: Vec<String> = resource().fields.iter().map(|f| f.name.clone()).collect();
-    assert_eq!(names, ["name", "loc_primary", "loc_footer", "items"]);
+    assert_eq!(
+        names,
+        ["name", "auto_add", "loc_primary", "loc_footer", "items"]
+    );
     let data = resource().data;
 
     // New: a name, a location and three items, the third under the first.

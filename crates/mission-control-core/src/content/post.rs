@@ -138,8 +138,13 @@ impl Post {
     /// Fails with [`Error::ForeignKeyViolation`] when the author does not exist, or with the
     /// database's error.
     pub async fn create(db: &Database, new: NewPost) -> Result<Self, Error> {
-        db.transaction(async |tx| Self::create_in(tx, new).await)
-            .await
+        db.transaction(async |tx| {
+            let post = Self::create_in(tx, new).await?;
+            // `_wp_auto_add_pages_to_menu`, on the new post's status.
+            crate::theme::auto_add_page_in(tx, &post, None).await?;
+            Ok(post)
+        })
+        .await
     }
 
     /// [`Post::create`] on the connection of a transaction the caller holds, so other writes
@@ -214,6 +219,7 @@ impl Post {
                         return Ok(false);
                     }
                     recount_post_terms(tx, id).await?;
+                    crate::theme::auto_add_page_in(tx, &saved, Some(stored.status)).await?;
                     write_settled_slug(tx, &mut saved).await?;
                     record_old_slug(tx, &stored, &saved).await?;
                     Ok::<_, Error>(true)
@@ -501,6 +507,7 @@ async fn set_status(tx: &mut Transaction, stored: &Post, next: &Post) -> Result<
         return Ok(false);
     }
     recount_post_terms(tx, stored.id).await?;
+    crate::theme::auto_add_page_in(tx, next, Some(stored.status)).await?;
     Ok(true)
 }
 

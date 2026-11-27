@@ -28,12 +28,13 @@ pub use manifest::{
     MANIFEST_FILE, MAX_AREA_ID, MAX_MANIFEST_BYTES, MAX_TEMPLATE_NAME, Manifest, MenuLocation,
     PageTemplate, Sidebar, Support,
 };
+pub(crate) use menus::auto_add_page_in;
 pub use menus::{
     MAX_MENU_DEPTH, MAX_MENU_ITEMS, MenuError, MenuItemInput, MenuItemObject, MenuLocationChanges,
-    NAV_MENU_ITEM, NAV_MENU_LOCATIONS, NavMenu, NavMenuItem, NewMenuItem, StoredMenuItem,
-    add_menu_item, create_nav_menu, delete_nav_menu, get_nav_menu, menu_items, menu_locations,
-    nav_menu, rename_nav_menu, save_menu_items, save_nav_menu, set_menu_location, theme_menus,
-    theme_mods_option,
+    NAV_MENU_ITEM, NAV_MENU_LOCATIONS, NAV_MENU_OPTIONS, NavMenu, NavMenuItem, NewMenuItem,
+    StoredMenuItem, add_menu_item, auto_add_menus, create_nav_menu, delete_nav_menu, get_nav_menu,
+    menu_items, menu_locations, nav_menu, rename_nav_menu, save_menu_items, save_nav_menu,
+    save_nav_menu_with, set_menu_location, theme_menus, theme_mods_option,
 };
 pub use request::PageRequest;
 pub use widgets::{

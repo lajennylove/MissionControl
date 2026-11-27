@@ -2,16 +2,24 @@
 //! as the Ignite runtime resource [`NAV_MENUS`], over the `nav_menu` terms and their items
 //! through the menus API ([`crate::theme`]'s `save_menu_items` and the others). Nothing here
 //! needs Rocket: the `mission-control` crate registers the resource and checks
-//! [`authorize_menus_screen`] before Ignite's routes run.
+//! [`authorize_menus_screen`] before Ignite's routes run, and puts WordPress's menu builder on
+//! the form (its "Add menu items" column, whose boxes [`menu_source_items`] lists, and the Menu
+//! Structure), which writes the item rows described here.
 //!
 //! - The list: each menu's name, the theme locations that show it, and its item count; the
 //!   search matches the name.
-//! - New (Ignite's create form) and edit: the menu's name (unique among menus, as
-//!   `wp_update_nav_menu_object` checks it; a taken name shows "Menu Name is already taken."),
-//!   one checkbox per menu location the active theme registers, and the items as a repeater:
-//!   each row a label, a type (a custom link, a post of a post type, a term of a taxonomy; text,
-//!   so a stored item of a type the screen no longer offers still saves), the object id or the
-//!   URL, the parent, CSS classes and "Open link in a new tab".
+//! - New (Ignite's create form) and edit, in `nav-menus.php`'s order: the Menu Name over the
+//!   Menu Structure (the items), then the Menu Settings: "Automatically add new top-level pages
+//!   to this menu" (`nav_menu_options`' `auto_add`, saved as `wp_nav_menu_update_menu_items`
+//!   saves it, and applied by `_wp_auto_add_pages_to_menu`, see [`crate::theme`]) and one
+//!   checkbox per menu location the active theme registers. The name is required ("Please
+//!   enter a valid menu name.", as `nav-menus.php` says) and unique among menus, as
+//!   `wp_update_nav_menu_object` checks it (a taken name shows "Menu Name is already taken.").
+//! - The items are a repeater: each row a label, a type (a custom link, a post of a post type, a
+//!   term of a taxonomy; text, so a stored item of a type the screen no longer offers still
+//!   saves), the object id or the URL, the parent, CSS classes, "Open link in a new tab", and
+//!   the Title Attribute, Link Relationship (XFN) and Description of `Walker_Nav_Menu_Edit`
+//!   (a row without these keys keeps the item's).
 //! - An item whose post or term is gone (trashed, deleted) is kept as it is when its row is
 //!   saved unchanged, as WordPress keeps it ("Invalid"); the site leaves it out.
 //! - Saving the items is `wp_nav_menu_update_menu_items`: rows are saved in order, a row with
@@ -20,8 +28,8 @@
 //!   (`post_type` or `taxonomy`, with the post type or taxonomy in `object`, or read from the
 //!   object id when `object` is missing). The parent is the parent item's id, as WordPress's
 //!   `menu-item-parent-id`; a new item, which has no id yet, can name a new parent by its **row
-//!   number** (1 for the first row; 0 or blank for the top level). Drag-and-drop ordering is a
-//!   follow-up.
+//!   number** (1 for the first row; 0 or blank for the top level), in `parent` or, unambiguously,
+//!   in `parent_row` (which the menu builder sends).
 //! - Ruling R135: everything is checked before anything is written.
 //!   A row that links to nothing (a post that is missing, trashed, an auto-draft or of another
 //!   type; a term that is missing; a type the screen does not offer), or more than
@@ -45,6 +53,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use ignite_core::{
     ActingUser, ColumnDef, Direction, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page,
     Row, RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, ValidationError,
+    Width,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
@@ -55,8 +64,8 @@ use crate::content::{MetaError, Post, PostStatus, Taxonomy, Term, TermError, ter
 use crate::front::escape_like;
 use crate::theme::{
     MAX_MENU_ITEMS, MenuError, MenuItemInput, MenuItemObject, NAV_MENU_ITEM, StoredMenuItem, Theme,
-    create_nav_menu, delete_nav_menu, get_nav_menu, menu_items, menu_locations, rename_nav_menu,
-    save_nav_menu,
+    auto_add_menus, create_nav_menu, delete_nav_menu, get_nav_menu, menu_items, menu_locations,
+    rename_nav_menu, save_nav_menu_with,
 };
 use crate::users::{UserCaps, can};
 
@@ -77,6 +86,13 @@ const ITEMS_LABEL: &str = "Menu items (one row per item, in order)";
 
 /// The name field.
 const NAME: &str = "name";
+
+/// The "Automatically add new top-level pages to this menu" checkbox (WordPress's
+/// `auto-add-pages`).
+pub const AUTO_ADD_FIELD: &str = "auto_add";
+
+/// What the save answers under the name when it is blank, as `nav-menus.php` does.
+pub const MENU_NAME_REQUIRED: &str = "Please enter a valid menu name.";
 
 /// Why `user` may not use the Menus screen, or `None`: it needs `edit_theme_options`, as
 /// `nav-menus.php` does.
@@ -154,7 +170,17 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
             ),
         }
     }
-    let mut fields = vec![field(NAME, "Menu Name", FieldKindDef::Text, true)];
+    // Not `required` for Ignite: the save answers a blank name with WordPress's own message
+    // ([`MENU_NAME_REQUIRED`]).
+    let mut fields = vec![
+        field(NAME, "Menu Name", FieldKindDef::Text, false),
+        field(
+            AUTO_ADD_FIELD,
+            "Automatically add new top-level pages to this menu",
+            FieldKindDef::Checkbox,
+            false,
+        ),
+    ];
     for (name, _, description) in &locations {
         fields.push(field(
             name,
@@ -199,6 +225,13 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
                 FieldKindDef::Number,
                 false,
             ),
+            // The menu builder names a parent that is a new item (no id yet) by its row.
+            field(
+                "parent_row",
+                "Parent row number, for a parent that is a new item (optional)",
+                FieldKindDef::Number,
+                false,
+            ),
             field(
                 "classes",
                 "CSS Classes (optional)",
@@ -211,6 +244,9 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
                 FieldKindDef::Checkbox,
                 false,
             ),
+            field("attr_title", "Title Attribute", FieldKindDef::Text, false),
+            field("xfn", "Link Relationship (XFN)", FieldKindDef::Text, false),
+            field("description", "Description", FieldKindDef::Textarea, false),
         ]),
         false,
     ));
@@ -231,18 +267,23 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
         },
     );
     resource.fields = fields;
-    // Two equal columns, as the settings screens: the menu's name and display locations
-    // (WordPress's Menu Settings) on the left, its items (Menu Structure) on the right.
+    // WordPress's edit column (`nav-menus.php`): the Menu Name over the Menu Structure, then
+    // the Menu Settings (auto add pages, display locations). The menu builder's script puts the
+    // "Add menu items" column beside it, so the page takes the whole width.
     let settings: Vec<String> = resource
         .fields
         .iter()
-        .filter(|f| f.name == NAME || f.name.starts_with(LOCATION_PREFIX))
+        .filter(|f| f.name == AUTO_ADD_FIELD || f.name.starts_with(LOCATION_PREFIX))
         .map(|f| f.name.clone())
         .collect();
-    resource.form_layout = FormLayout::new().columns(2).schema([
-        Group::make([Section::make("Menu Settings").schema(settings)]).column_span(1),
-        Group::make([Section::make("Menu Structure").schema([ITEMS])]).column_span(1),
-    ]);
+    resource.form_layout = FormLayout::new()
+        .columns(1)
+        .max_content_width(Width::Full)
+        .schema([Group::make([
+            Section::make("Menu Structure").schema([NAME, ITEMS]),
+            Section::make("Menu Settings").schema(settings),
+        ])
+        .column_span(1)]);
     resource.columns = vec![
         column(COL_NAME, "Name", true, true),
         column(COL_LOCATIONS, "Theme Locations", false, false),
@@ -418,6 +459,10 @@ impl NavMenusData {
             );
         }
         row.insert(ITEMS.into(), item_rows(&items));
+        row.insert(
+            AUTO_ADD_FIELD.into(),
+            json!(auto_add_menus(db).await?.contains(&menu.term_id)),
+        );
         Ok(Some(row))
     }
 
@@ -454,19 +499,28 @@ impl NavMenusData {
                 Some(self.item_inputs(db, &rows, &stored).await?)
             }
         };
-        Ok(MenuPlan { locations, items })
+        let auto_add = match input.get(AUTO_ADD_FIELD) {
+            Some(Value::Bool(add)) => Some(*add),
+            _ => None,
+        };
+        Ok(MenuPlan {
+            locations,
+            items,
+            auto_add,
+        })
     }
 
     /// Saves `plan` on `menu`: its items and its locations, in one transaction
     /// ([`save_nav_menu`]).
     async fn apply(&self, db: &Database, menu: &Term, plan: &MenuPlan) -> Result<(), Error> {
         let author = item_author(db, menu).await?;
-        save_nav_menu(
+        save_nav_menu_with(
             db,
             menu,
             author,
             plan.items.as_deref(),
             Some((&self.theme, &plan.locations)),
+            plan.auto_add,
         )
         .await
         .map_err(menu_error)?;
@@ -554,6 +608,9 @@ impl NavMenusData {
                 parent,
                 target: if item.new_tab { "_blank" } else { "" }.to_owned(),
                 classes: vec![item.classes.clone()],
+                attr_title: item.attr_title.clone(),
+                description: item.description.clone(),
+                xfn: item.xfn.clone(),
             })
             .collect())
     }
@@ -577,8 +634,9 @@ impl NavMenusData {
     }
 }
 
-/// The row index of each row's parent, as WordPress's `menu-item-parent-id` names it: the `id`
-/// of the parent item. A parent that is the `id` of another row is that row; one that is an item
+/// The row index of each row's parent. A `parent_row` (the parent's row number, from 1), which
+/// the menu builder sends for a parent that is a new item, comes first. Otherwise the parent is
+/// as WordPress's `menu-item-parent-id` names it: the `id` of the parent item. A parent that is the `id` of another row is that row; one that is an item
 /// of the menu no row keeps (deleted with this save) is none, so the item goes to the top level,
 /// as WordPress moves the children of a deleted item; otherwise a number from 1 to the number of
 /// rows is the parent's row number, so a new item can be the child of another new item, which
@@ -586,6 +644,12 @@ impl NavMenusData {
 fn parent_rows(rows: &[RowItem], stored: &[StoredMenuItem]) -> Vec<Option<usize>> {
     rows.iter()
         .map(|row| {
+            if let Some(at) = row.parent_row.filter(|n| *n > 0) {
+                return usize::try_from(at)
+                    .ok()
+                    .filter(|n| *n <= rows.len())
+                    .map(|n| n - 1);
+            }
             let parent = row.parent.filter(|p| *p > 0)?;
             if let Some(at) = rows.iter().position(|r| r.id == Some(parent)) {
                 return Some(at);
@@ -706,6 +770,8 @@ struct MenuPlan {
     locations: Vec<(String, bool)>,
     /// The items, when the form sent them.
     items: Option<Vec<MenuItemInput>>,
+    /// Whether the menu adds new top-level pages, when the form sent the checkbox.
+    auto_add: Option<bool>,
 }
 
 /// One repeater row, read.
@@ -719,8 +785,15 @@ struct RowItem {
     url: String,
     title: String,
     parent: Option<i64>,
+    /// The parent's row number (from 1), which the menu builder sends for a new parent.
+    parent_row: Option<i64>,
     classes: String,
     new_tab: bool,
+    /// The title attribute, description and XFN, when the row has them (an older row without
+    /// them keeps the item's).
+    attr_title: Option<String>,
+    description: Option<String>,
+    xfn: Option<String>,
 }
 
 impl RowItem {
@@ -743,8 +816,12 @@ impl RowItem {
             url: text("url"),
             title: text("title"),
             parent: number("parent"),
+            parent_row: number("parent_row"),
             classes: text("classes"),
             new_tab: matches!(row.get("new_tab"), Some(Value::Bool(true))),
+            attr_title: row.get("attr_title").map(|_| text("attr_title")),
+            description: row.get("description").map(|_| text("description")),
+            xfn: row.get("xfn").map(|_| text("xfn")),
         }
     }
 }
@@ -777,6 +854,9 @@ fn item_rows(items: &[StoredMenuItem]) -> Value {
                     "parent": item.parent.filter(|p| ids.contains(p)).unwrap_or(0),
                     "classes": item.classes.join(" "),
                     "new_tab": item.target == "_blank",
+                    "attr_title": item.attr_title,
+                    "xfn": item.xfn,
+                    "description": item.description,
                 })
             })
             .collect(),
@@ -822,6 +902,21 @@ fn checked(plan: Result<MenuPlan, Refused>) -> Result<Result<MenuPlan, Validatio
     }
 }
 
+/// `plan`, refused with [`MENU_NAME_REQUIRED`] under the name when `name` is blank, as
+/// `nav-menus.php` answers "Please enter a valid menu name." (the items' own refusal, if any,
+/// shows too). Ruling R135: nothing is written, the edit of a menu included, where WordPress
+/// would keep the old name and save the rest.
+fn named(name: &str, plan: Result<MenuPlan, ValidationError>) -> Result<MenuPlan, ValidationError> {
+    if !name.trim().is_empty() {
+        return plan;
+    }
+    let mut messages = vec![(NAME.to_owned(), MENU_NAME_REQUIRED.to_owned())];
+    if let Err(refusal) = plan {
+        messages.extend(refusal.into_errors());
+    }
+    Err(ValidationError::with_messages(messages))
+}
+
 /// A save's row, or its refusal as a server error, for the data layer's calls without the panel.
 fn refused_as_error(saved: Result<Row, ValidationError>) -> Result<Row, Error> {
     saved.map_err(|refusal| refused_save(&refusal.to_string()))
@@ -841,7 +936,7 @@ impl NavMenusData {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let plan = match checked(self.plan(db, None, &input).await)? {
+        let plan = match named(&name, checked(self.plan(db, None, &input).await)?) {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -864,7 +959,13 @@ impl NavMenusData {
         let Some(mut menu) = get_nav_menu(db, id).await? else {
             return Err(Error::NotFound { table: "terms" });
         };
-        let plan = match checked(self.plan(db, Some(&menu), &input).await)? {
+        // A row without the name keeps it; a blank one (Ignite sends it as `null`) is refused.
+        let name = match input.get(NAME) {
+            None => menu.name.clone(),
+            Some(Value::String(name)) => name.trim().to_owned(),
+            Some(_) => String::new(),
+        };
+        let plan = match named(&name, checked(self.plan(db, Some(&menu), &input).await)?) {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -935,4 +1036,184 @@ impl RuntimeData for NavMenusData {
             Ok(u64::from(deleted))
         })
     }
+}
+
+/// How many items a box of the menu builder's "Add menu items" column lists at a time, as
+/// `wp_nav_menu_item_post_type_meta_box` and `wp_nav_menu_item_taxonomy_meta_box` page them
+/// (`$per_page = 50`).
+pub const MENU_SOURCE_PER_PAGE: i64 = 50;
+
+/// One post or term a box of the "Add menu items" column lists.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MenuSourceItem {
+    /// The post id, or the term's `term_id` (the item's `object_id`).
+    pub id: i64,
+    /// The post's title or the term's name; a post without a title is `#<id> (no title)`, as
+    /// WordPress lists it.
+    pub title: String,
+    /// The post's status (`publish`, `trash`, ...); empty for a term.
+    pub status: String,
+}
+
+/// A page of a box's items, and whether there are more ("Load more").
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MenuSourcePage {
+    /// The items, in the box's order.
+    pub items: Vec<MenuSourceItem>,
+    /// Whether another page follows.
+    pub more: bool,
+}
+
+/// What to list in a box of the "Add menu items" column.
+#[derive(Debug, Clone, Default)]
+pub struct MenuSourceQuery<'a> {
+    /// Words the title (or the term's name) must contain, as `_wp_ajax_menu_quick_search`
+    /// searches the title only.
+    pub search: Option<&'a str>,
+    /// The page, from 1.
+    pub page: i64,
+    /// Only these ids, whatever their status (the builder reads the titles of a menu's items,
+    /// and marks those whose post is gone or trashed "Invalid"). Empty lists the box.
+    pub include: &'a [i64],
+}
+
+/// The items of `kind` for the menu builder's boxes, as `wp_nav_menu_item_post_type_meta_box`
+/// and `wp_nav_menu_item_taxonomy_meta_box` list them: the published posts of a post type
+/// (pages by title, as "View All" orders them; other types newest first, as "Most Recent"), or
+/// every term of a taxonomy by name (`hide_empty` false), [`MENU_SOURCE_PER_PAGE`] at a time.
+/// A custom link lists nothing.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn menu_source_items(
+    db: &Database,
+    kind: &MenuObjectType,
+    query: &MenuSourceQuery<'_>,
+) -> Result<MenuSourcePage, Error> {
+    let per_page = MENU_SOURCE_PER_PAGE;
+    let offset = query.page.max(1).saturating_sub(1).saturating_mul(per_page);
+    let search = query
+        .search
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let s: String = s.chars().take(200).collect();
+            format!("%{}%", escape_like(&s.to_lowercase()))
+        });
+    let include: Vec<i64> = query
+        .include
+        .iter()
+        .copied()
+        .filter(|id| *id > 0)
+        .take(MAX_MENU_ITEMS)
+        .collect();
+    let (sql, mut binds): (String, Vec<Sql>) = match kind {
+        MenuObjectType::Custom => {
+            return Ok(MenuSourcePage {
+                items: Vec::new(),
+                more: false,
+            });
+        }
+        MenuObjectType::PostType(post_type) => {
+            let mut filter = String::from("post_type = ?");
+            let mut binds: Vec<Sql> = vec![post_type.as_str().into()];
+            if include.is_empty() {
+                filter.push_str(" AND status = ?");
+                binds.push(PostStatus::Publish.as_str().into());
+            }
+            if let Some(search) = &search {
+                filter.push_str(" AND LOWER(title) LIKE ? ESCAPE '!'");
+                binds.push(search.clone().into());
+            }
+            if !include.is_empty() {
+                filter.push_str(&format!(
+                    " AND id IN ({})",
+                    vec!["?"; include.len()].join(", ")
+                ));
+                binds.extend(include.iter().map(|id| Sql::from(*id)));
+            }
+            let order = if post_type == "page" {
+                "title ASC, id ASC"
+            } else {
+                "published_at DESC, id DESC"
+            };
+            (
+                format!(
+                    "SELECT id, title, status FROM posts WHERE {filter} ORDER BY {order} \
+                     LIMIT ? OFFSET ?"
+                ),
+                binds,
+            )
+        }
+        MenuObjectType::Taxonomy(taxonomy) => {
+            let mut filter = String::from("tt.taxonomy = ?");
+            let mut binds: Vec<Sql> = vec![taxonomy.as_str().into()];
+            if let Some(search) = &search {
+                filter.push_str(" AND LOWER(t.name) LIKE ? ESCAPE '!'");
+                binds.push(search.clone().into());
+            }
+            if !include.is_empty() {
+                filter.push_str(&format!(
+                    " AND t.id IN ({})",
+                    vec!["?"; include.len()].join(", ")
+                ));
+                binds.extend(include.iter().map(|id| Sql::from(*id)));
+            }
+            (
+                format!(
+                    "SELECT t.id, t.name, '' FROM term_taxonomy tt \
+                     INNER JOIN terms t ON t.id = tt.term_id WHERE {filter} \
+                     ORDER BY t.name ASC, t.id ASC LIMIT ? OFFSET ?"
+                ),
+                binds,
+            )
+        }
+    };
+    let limit = if include.is_empty() {
+        per_page + 1
+    } else {
+        i64::try_from(include.len()).unwrap_or(i64::MAX)
+    };
+    binds.push(limit.into());
+    binds.push(if include.is_empty() { offset } else { 0 }.into());
+    let mut rows: Vec<(i64, String, String)> = raw::fetch_all(db, &sql, &binds).await?;
+    let more = include.is_empty() && rows.len() > usize::try_from(per_page).unwrap_or(usize::MAX);
+    if more {
+        rows.truncate(usize::try_from(per_page).unwrap_or(usize::MAX));
+    }
+    Ok(MenuSourcePage {
+        items: rows
+            .into_iter()
+            .map(|(id, title, status)| MenuSourceItem {
+                id,
+                title: if title.trim().is_empty() {
+                    format!("#{id} (no title)")
+                } else {
+                    title
+                },
+                status,
+            })
+            .collect(),
+        more,
+    })
+}
+
+/// The most menus the "Select a menu to edit" dropdown lists.
+pub const MAX_MENU_CHOICES: i64 = 1000;
+
+/// Every menu (term id and name), by name, as `nav-menus.php`'s "Select a menu to edit"
+/// dropdown lists them (`wp_get_nav_menus`), at most [`MAX_MENU_CHOICES`].
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn nav_menu_choices(db: &Database) -> Result<Vec<(i64, String)>, Error> {
+    raw::fetch_all(
+        db,
+        "SELECT t.id, t.name FROM term_taxonomy tt INNER JOIN terms t ON t.id = tt.term_id \
+         WHERE tt.taxonomy = ? ORDER BY t.name ASC, t.id ASC LIMIT ?",
+        &[(&*Taxonomy::NAV_MENU.name).into(), MAX_MENU_CHOICES.into()],
+    )
+    .await
 }

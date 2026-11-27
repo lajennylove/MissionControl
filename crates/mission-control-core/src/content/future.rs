@@ -81,6 +81,9 @@ pub async fn check_and_publish_future_post(db: &Database, id: i64) -> Result<boo
                 == 1;
             if published {
                 recount_post_terms(tx, id).await?;
+                if let Some(post) = Post::query().find(&mut *tx, id).await? {
+                    crate::theme::auto_add_page_in(tx, &post, Some(PostStatus::Future)).await?;
+                }
             }
             Ok::<_, orbit_orm::Error>(published)
         })

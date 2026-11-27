@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
-use orbit_orm::{Database, Error, Model, Value as Sql, raw};
+use orbit_orm::{Database, Error, Model, Transaction, Value as Sql, raw};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -577,6 +577,12 @@ pub struct StoredMenuItem {
     pub target: String,
     /// The CSS classes.
     pub classes: Vec<String>,
+    /// The link's title attribute (the item's `post_excerpt`).
+    pub attr_title: String,
+    /// The item's description (the item's `post_content`).
+    pub description: String,
+    /// The link relationship (XFN), `_menu_item_xfn`.
+    pub xfn: String,
 }
 
 /// The items of `menu`, in `menu_order`, at most [`MAX_MENU_ITEMS`]: every `nav_menu_item` of
@@ -614,6 +620,7 @@ pub async fn menu_items(db: &Database, menu: &Term) -> Result<Vec<StoredMenuItem
             let object = text("_menu_item_object");
             let url = text("_menu_item_url");
             let target = text("_menu_item_target");
+            let xfn = text("_menu_item_xfn");
             let object_id = meta.get("_menu_item_object_id").and_then(id_of);
             let object = match (item_type.as_str(), object_id) {
                 ("post_type", Some(id)) => MenuItemObject::Post {
@@ -643,6 +650,9 @@ pub async fn menu_items(db: &Database, menu: &Term) -> Result<Vec<StoredMenuItem
                     Some(other) => clean_classes(&[text_of(other)]),
                     None => Vec::new(),
                 },
+                attr_title: post.excerpt.clone(),
+                description: post.content.clone(),
+                xfn,
             }
         })
         .collect())
@@ -664,6 +674,12 @@ pub struct MenuItemInput {
     pub target: String,
     /// CSS classes; each entry may hold several, separated by spaces.
     pub classes: Vec<String>,
+    /// The link's title attribute; `None` keeps an updated item's (empty for a new one).
+    pub attr_title: Option<String>,
+    /// The description; `None` keeps an updated item's (empty for a new one).
+    pub description: Option<String>,
+    /// The link relationship (XFN); `None` keeps an updated item's (empty for a new one).
+    pub xfn: Option<String>,
 }
 
 /// Saves the items of `menu` as WordPress's menu screen does (`wp_nav_menu_update_menu_items`
@@ -671,7 +687,8 @@ pub struct MenuItemInput {
 ///
 /// - the items are given positions 1, 2, … in the order of `items`;
 /// - an item whose `id` is an item of the menu is updated in place (its link title attribute,
-///   description and XFN are kept); any other is added, by `author_id`, published;
+///   description and XFN are kept when the input leaves them `None`); any other is added, by
+///   `author_id`, published;
 /// - a parent is the item at that index; one that is the item itself, or that would make a loop,
 ///   puts the item at the top level;
 /// - the menu's items that are not in `items` are deleted.
@@ -689,6 +706,124 @@ pub async fn save_menu_items(
     items: &[MenuItemInput],
 ) -> Result<Vec<i64>, MenuError> {
     save_nav_menu(db, menu, author_id, Some(items), None).await
+}
+
+/// The option of the menus' settings, as WordPress's `nav_menu_options`: `{"auto_add": [menu
+/// term ids]}`, the menus that add new top-level pages.
+pub const NAV_MENU_OPTIONS: &str = "nav_menu_options";
+
+/// The key of [`NAV_MENU_OPTIONS`] that lists the menus that add new top-level pages.
+const AUTO_ADD: &str = "auto_add";
+
+/// The menu term ids of an `auto_add` list.
+fn auto_add_ids(value: Option<&Value>) -> Vec<i64> {
+    match value {
+        Some(Value::Array(ids)) => ids.iter().filter_map(id_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The menus that automatically add new top-level pages (`nav_menu_options`' `auto_add`), by
+/// term id.
+///
+/// # Errors
+///
+/// Fails with the database's error; an option that is not valid JSON reads as none.
+pub async fn auto_add_menus(db: &Database) -> Result<Vec<i64>, Error> {
+    let options = readable_option(db, NAV_MENU_OPTIONS).await?;
+    Ok(auto_add_ids(options.as_ref().and_then(|o| o.get(AUTO_ADD))))
+}
+
+/// Adds `page` to the menus that automatically add new top-level pages, as WordPress's
+/// `_wp_auto_add_pages_to_menu` does on `transition_post_status`: only when a `page` with no
+/// parent becomes `publish` (from `old`, any other status, or `None` for a new post), and only
+/// to a menu that has no item for the page yet. The item is a `post_type` item of the page,
+/// appended after the menu's last item, with no label of its own (it shows the page's title),
+/// by the page's author. Called in the transaction that writes the status.
+///
+/// # Errors
+///
+/// Fails with the database's error; an option that is not valid JSON adds nothing.
+pub(crate) async fn auto_add_page_in(
+    tx: &mut Transaction,
+    page: &Post,
+    old: Option<PostStatus>,
+) -> Result<(), Error> {
+    if page.post_type != "page"
+        || page.status != PostStatus::Publish
+        || old == Some(PostStatus::Publish)
+        || page.parent_id.is_some_and(|parent| parent != 0)
+    {
+        return Ok(());
+    }
+    let menus = match get_option_in(tx, NAV_MENU_OPTIONS).await {
+        Ok(options) => auto_add_ids(options.as_ref().and_then(|o| o.get(AUTO_ADD))),
+        Err(MetaError::Database(e)) => return Err(e),
+        Err(MetaError::InvalidJson(_)) => return Ok(()),
+    };
+    for term_id in menus {
+        let menu: Vec<(i64,)> = raw::fetch_all(
+            &mut *tx,
+            "SELECT id FROM term_taxonomy WHERE term_id = ? AND taxonomy = ?",
+            &[term_id.into(), (&*Taxonomy::NAV_MENU.name).into()],
+        )
+        .await?;
+        let Some((menu_tt,)) = menu.into_iter().next() else {
+            continue;
+        };
+        // The menu's items of type `post_type` and object `page`, and the page each links to.
+        let linked: Vec<(i64, String, String)> = raw::fetch_all(
+            &mut *tx,
+            "SELECT m.post_id, m.meta_key, m.meta_value FROM post_meta m              INNER JOIN term_relationships r ON r.object_id = m.post_id              INNER JOIN posts p ON p.id = m.post_id              WHERE r.term_taxonomy_id = ? AND p.post_type = ? AND m.meta_key IN              ('_menu_item_type', '_menu_item_object', '_menu_item_object_id')",
+            &[menu_tt.into(), NAV_MENU_ITEM.into()],
+        )
+        .await?;
+        let mut items: HashMap<i64, HashMap<String, Value>> = HashMap::new();
+        for (item, key, value) in linked {
+            if let Ok(value) = serde_json::from_str(&value) {
+                items.entry(item).or_default().insert(key, value);
+            }
+        }
+        let present = items.values().any(|meta| {
+            meta.get("_menu_item_type").map(text_of).as_deref() == Some("post_type")
+                && meta.get("_menu_item_object").map(text_of).as_deref() == Some("page")
+                && meta.get("_menu_item_object_id").and_then(id_of) == Some(page.id)
+        });
+        if present {
+            continue;
+        }
+        let last: Option<i32> = raw::fetch_scalar(
+            &mut *tx,
+            "SELECT MAX(p.menu_order) FROM term_relationships r              INNER JOIN posts p ON p.id = r.object_id              WHERE r.term_taxonomy_id = ? AND p.post_type = ?",
+            &[menu_tt.into(), NAV_MENU_ITEM.into()],
+        )
+        .await?;
+        let item = Post::create_in(
+            tx,
+            NewPost {
+                status: PostStatus::Publish,
+                menu_order: last.unwrap_or(0).saturating_add(1),
+                published_at: Some(now()),
+                ..NewPost::new(page.author_id, NAV_MENU_ITEM)
+            },
+        )
+        .await?;
+        let meta = [
+            ("_menu_item_type", json!("post_type")),
+            ("_menu_item_menu_item_parent", json!("0")),
+            ("_menu_item_object_id", json!(page.id.to_string())),
+            ("_menu_item_object", json!("page")),
+            ("_menu_item_target", json!("")),
+            ("_menu_item_classes", json!(Vec::<String>::new())),
+            ("_menu_item_xfn", json!("")),
+            ("_menu_item_url", json!("")),
+        ];
+        for (key, value) in &meta {
+            put_post_meta_in(tx, item.id, key, value).await?;
+        }
+        set_terms_in(tx, item.id, &Taxonomy::NAV_MENU, &[menu_tt], true).await?;
+    }
+    Ok(())
 }
 
 /// The theme locations to show (`true`) or stop showing (`false`) a menu in, for
@@ -710,6 +845,24 @@ pub async fn save_nav_menu(
     author_id: i64,
     items: Option<&[MenuItemInput]>,
     locations: Option<MenuLocationChanges<'_>>,
+) -> Result<Vec<i64>, MenuError> {
+    save_nav_menu_with(db, menu, author_id, items, locations, None).await
+}
+
+/// [`save_nav_menu`], and, when `auto_add` is given, whether the menu automatically adds new
+/// top-level pages (WordPress's "Automatically add new top-level pages to this menu", saved by
+/// `wp_nav_menu_update_menu_items` in the option [`NAV_MENU_OPTIONS`]), in the same transaction.
+///
+/// # Errors
+///
+/// As [`save_nav_menu`].
+pub async fn save_nav_menu_with(
+    db: &Database,
+    menu: &Term,
+    author_id: i64,
+    items: Option<&[MenuItemInput]>,
+    locations: Option<MenuLocationChanges<'_>>,
+    auto_add: Option<bool>,
 ) -> Result<Vec<i64>, MenuError> {
     if menu.taxonomy != Taxonomy::NAV_MENU.name {
         return Err(MenuError::NotAMenu);
@@ -760,6 +913,20 @@ pub async fn save_nav_menu(
             mods.insert(NAV_MENU_LOCATIONS.to_owned(), Value::Object(assigned));
             put_option_in(tx, &name, &Value::Object(mods)).await?;
         }
+        if let Some(add) = auto_add {
+            let mut options = match get_option_in(tx, NAV_MENU_OPTIONS).await {
+                Ok(Some(Value::Object(options))) => options,
+                Ok(_) | Err(MetaError::InvalidJson(_)) => Map::new(),
+                Err(MetaError::Database(e)) => return Err(MenuError::Database(e)),
+            };
+            let mut ids = auto_add_ids(options.get(AUTO_ADD));
+            ids.retain(|id| *id != term_id);
+            if add {
+                ids.push(term_id);
+            }
+            options.insert(AUTO_ADD.to_owned(), json!(ids));
+            put_option_in(tx, NAV_MENU_OPTIONS, &Value::Object(options)).await?;
+        }
         let Some(items) = items else {
             return Ok(Vec::new());
         };
@@ -780,15 +947,23 @@ pub async fn save_nav_menu(
                 .filter(|id| existing.contains(id) && !ids.contains(id))
             {
                 Some(id) => {
+                    let mut set = String::from("title = ?, menu_order = ?, modified_at = ?");
+                    let mut binds: Vec<Sql> =
+                        vec![item.title.clone().into(), position.into(), stamp.into()];
+                    for (column, value) in [
+                        ("excerpt", &item.attr_title),
+                        ("content", &item.description),
+                    ] {
+                        if let Some(value) = value {
+                            set.push_str(&format!(", {column} = ?"));
+                            binds.push(value.clone().into());
+                        }
+                    }
+                    binds.push(id.into());
                     raw::execute(
                         &mut *tx,
-                        "UPDATE posts SET title = ?, menu_order = ?, modified_at = ? WHERE id = ?",
-                        &[
-                            item.title.clone().into(),
-                            position.into(),
-                            stamp.into(),
-                            id.into(),
-                        ],
+                        &format!("UPDATE posts SET {set} WHERE id = ?"),
+                        &binds,
                     )
                     .await?;
                     id
@@ -799,6 +974,8 @@ pub async fn save_nav_menu(
                         NewPost {
                             status: PostStatus::Publish,
                             title: item.title.clone(),
+                            excerpt: item.attr_title.clone().unwrap_or_default(),
+                            content: item.description.clone().unwrap_or_default(),
                             menu_order: position,
                             published_at: Some(stamp),
                             ..NewPost::new(author_id, NAV_MENU_ITEM)
@@ -839,6 +1016,10 @@ pub async fn save_nav_menu(
             ];
             for (key, value) in &meta {
                 put_post_meta_in(tx, id, key, value).await?;
+            }
+            if let Some(xfn) = &item.xfn {
+                let xfn = clean_classes(std::slice::from_ref(xfn)).join(" ");
+                put_post_meta_in(tx, id, "_menu_item_xfn", &json!(xfn)).await?;
             }
         }
         for gone in existing.iter().filter(|id| !ids.contains(id)) {

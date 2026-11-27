@@ -14,8 +14,10 @@ use mission_control_core::content::{
 use mission_control_core::front::{Query, Resolved, resolve};
 use mission_control_core::migrations::migrator;
 use mission_control_core::theme::{
-    MenuError, NAV_MENU_ITEM, NavMenu, NavMenuItem, NewMenuItem, PageRequest, Theme, add_menu_item,
-    create_nav_menu, load_theme, menu_locations, nav_menu, set_menu_location, theme_menus,
+    MenuError, MenuItemInput, MenuItemObject, NAV_MENU_ITEM, NAV_MENU_OPTIONS, NavMenu,
+    NavMenuItem, NewMenuItem, PageRequest, Theme, add_menu_item, auto_add_menus, create_nav_menu,
+    load_theme, menu_items, menu_locations, nav_menu, save_nav_menu_with, set_menu_location,
+    theme_menus,
 };
 use mission_control_testing::{create_users_table, database, unique_email};
 use orbit_orm::{Database, raw};
@@ -678,4 +680,117 @@ async fn a_chain_deeper_than_the_cap_is_shown_flat_past_it() {
     // The first item holds the capped tree; the rest follow at the top level, in order.
     assert_eq!(rendered.items.len(), 1 + 4);
     assert_eq!(rendered.items[1].title, format!("L{}", depth - 4));
+}
+
+/// "Automatically add new top-level pages to this menu" (`nav_menu_options`' `auto_add`, as
+/// `wp_nav_menu_update_menu_items` saves it): a page with no parent that becomes `publish` is
+/// added at the end of the menu, once, as `_wp_auto_add_pages_to_menu` does; a draft, a child
+/// page, a post and a page already in the menu are not.
+#[tokio::test]
+async fn new_top_level_pages_are_added_to_the_menus_that_ask_for_them() {
+    let test = database().await;
+    let db = test.db();
+    let author = setup(db).await;
+    let menu = create_nav_menu(db, "Main").await.unwrap();
+    let other = create_nav_menu(db, "Other").await.unwrap();
+    let about = page(db, author, "About", "about", PostStatus::Publish).await;
+    let rows = [MenuItemInput {
+        id: None,
+        object: MenuItemObject::Post {
+            post_type: "page".into(),
+            id: about.id,
+        },
+        title: String::new(),
+        parent: None,
+        target: String::new(),
+        classes: Vec::new(),
+        attr_title: Some("About us".into()),
+        description: Some("Who we are".into()),
+        xfn: Some("me friend!".into()),
+    }];
+    save_nav_menu_with(db, &menu, author, Some(&rows), None, Some(true))
+        .await
+        .unwrap();
+    assert_eq!(auto_add_menus(db).await.unwrap(), [menu.term_id]);
+    let stored = menu_items(db, &menu).await.unwrap();
+    assert_eq!(stored[0].attr_title, "About us");
+    assert_eq!(stored[0].description, "Who we are");
+    assert_eq!(stored[0].xfn, "me friend");
+
+    // A row without them keeps them.
+    let kept = [MenuItemInput {
+        id: Some(stored[0].id),
+        attr_title: None,
+        description: None,
+        xfn: None,
+        ..rows[0].clone()
+    }];
+    save_nav_menu_with(db, &menu, author, Some(&kept), None, None)
+        .await
+        .unwrap();
+    let stored = menu_items(db, &menu).await.unwrap();
+    assert_eq!(stored[0].attr_title, "About us");
+    assert_eq!(stored[0].xfn, "me friend");
+
+    let mut draft = page(db, author, "Draft", "draft", PostStatus::Draft).await;
+    let _child = page_under(
+        db,
+        author,
+        "Team",
+        "team",
+        PostStatus::Publish,
+        Some(&about),
+    )
+    .await;
+    Post::create(
+        db,
+        NewPost {
+            status: PostStatus::Publish,
+            title: "A post".into(),
+            ..NewPost::new(author, "post")
+        },
+    )
+    .await
+    .unwrap();
+    let contact = page(db, author, "Contact", "contact", PostStatus::Publish).await;
+    let objects = |items: &[mission_control_core::theme::StoredMenuItem]| {
+        items
+            .iter()
+            .map(|item| item.object.clone())
+            .collect::<Vec<_>>()
+    };
+    let page_of = |id: i64| MenuItemObject::Post {
+        post_type: "page".into(),
+        id,
+    };
+    assert_eq!(
+        objects(&menu_items(db, &menu).await.unwrap()),
+        [page_of(about.id), page_of(contact.id)]
+    );
+    assert!(menu_items(db, &other).await.unwrap().is_empty());
+
+    // Publishing the draft adds it; saving it again does not add it twice.
+    draft.status = PostStatus::Publish;
+    draft.save(db).await.unwrap();
+    draft.title = "Drafted".into();
+    draft.save(db).await.unwrap();
+    let items = menu_items(db, &menu).await.unwrap();
+    assert_eq!(
+        objects(&items),
+        [page_of(about.id), page_of(contact.id), page_of(draft.id)]
+    );
+    assert_eq!(items[2].parent, None);
+    assert_eq!(items[2].title, "", "the item shows the page's title");
+
+    // Turned off, nothing more is added.
+    save_nav_menu_with(db, &menu, author, None, None, Some(false))
+        .await
+        .unwrap();
+    assert!(auto_add_menus(db).await.unwrap().is_empty());
+    assert_eq!(
+        get_option(db, NAV_MENU_OPTIONS).await.unwrap(),
+        Some(json!({"auto_add": []}))
+    );
+    page(db, author, "Later", "later", PostStatus::Publish).await;
+    assert_eq!(menu_items(db, &menu).await.unwrap().len(), 3);
 }
