@@ -823,6 +823,9 @@ pub fn post_type_resource_with_access(
     resource.columns = columns;
     resource.form_layout = layout;
     resource.row_actions = actions;
+    // A trashed row shows only WordPress's Restore and Delete Permanently, not Ignite's Delete.
+    resource = resource
+        .hide_default_delete_when(ListFilter::new().where_eq(STATUS, PostStatus::Trash.as_str()));
     if has_title {
         // WordPress's permalink follows the title until it is edited by hand, and stays as it
         // is once the post is published, so its URL does not change with the title.
