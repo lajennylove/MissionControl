@@ -32,12 +32,14 @@
 //!   templates in the page form. The page `install.php` is reserved (Ruling R120).
 //! - Each post type's Ignite policy and user-aware queries (Task A1, see
 //!   `mission_control_core::admin::posts`): the list and New need the type's `edit_posts`, a
-//!   post's form and save `edit_post`, Delete `delete_post`; authors and contributors see and
-//!   edit their own posts, as WordPress lets them. Ignite answers a refusal with 403 and a post
-//!   outside the user's list with 404.
+//!   post's form and save `edit_post` (never on a post in the trash), the list's trash row
+//!   actions (Trash, Restore, Delete Permanently) and Ignite's Delete (in the trash only)
+//!   `delete_post`; authors and contributors see and edit their own posts, as WordPress lets
+//!   them. Ignite answers a refusal with 403 and a post outside the user's list with 404.
 //! - A fairing before Ignite's routes (Ruling R115, narrowed by Task A1): on a post type it
 //!   checks the New screen and its save (Ignite's create) with the type's `edit_posts`, with
-//!   WordPress's 403 messages ([`authorize_post_screen`]); on the media library it checks every
+//!   WordPress's 403 messages ([`authorize_post_screen`]), and answers the form and the save of
+//!   a post in the trash with `post.php`'s 409 message; on the media library it checks every
 //!   screen (the type's whole capability set and `unfiltered_html`, then the post's), and
 //!   refuses Ignite's create, as files are uploaded. A visitor is let through, and Ignite sends
 //!   them to its sign-in page. Ignite's own pages are not touched.
@@ -645,8 +647,11 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
     let screen = PostScreen::parse(request.method().as_str(), &rest);
     // A post type's list, forms and Delete are decided by the type's policy and its user-aware
     // queries (Task A1). The fairing also checks the New screen and its save (Ignite's create),
-    // so a refusal there has WordPress's message.
-    if slug != media::ATTACHMENT && !matches!(screen, PostScreen::New | PostScreen::Create) {
+    // so a refusal there has WordPress's message, and the edit form and its save of a post in
+    // the trash, which `post.php` refuses with 409 and its own message.
+    let edit = matches!(screen, PostScreen::Edit(_) | PostScreen::Update(_));
+    if slug != media::ATTACHMENT && !edit && !matches!(screen, PostScreen::New | PostScreen::Create)
+    {
         return None;
     }
     let (db, caps) = match signed_in_caps(request).await? {
@@ -671,6 +676,11 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
     }
     match authorize_post_screen(&db, &caps, &def, screen).await {
         Ok(Some(_)) if upload_page => Some(AdminRefusal::Refused(Refusal::UploadFiles)),
+        // The other refusals of a post type's form are the policy's (403, or 404 for a post
+        // outside the user's list).
+        Ok(Some(refused)) if edit && slug != media::ATTACHMENT => {
+            (refused == Refusal::InTrash).then_some(AdminRefusal::Refused(Refusal::InTrash))
+        }
         Ok(refused) => refused.map(AdminRefusal::Refused),
         Err(e) => {
             log::error!("Could not check the admin request {screen:?} on `{slug}`: {e}");
@@ -806,8 +816,8 @@ fn refused_routes() -> Vec<Route> {
     routes
 }
 
-/// Answers a refused admin request: WordPress's 403 message, or a 500 page when the check could
-/// not be made.
+/// Answers a refused admin request: WordPress's message with its status (403, or 409 for a post
+/// in the trash), or a 500 page when the check could not be made.
 #[rocket::get("/__mission-control/admin-refused")]
 fn refused(refusal: AdminRefusal) -> (Status, RawHtml<String>) {
     match refusal {

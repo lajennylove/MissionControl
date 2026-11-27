@@ -220,6 +220,18 @@ async fn save(client: &Client, post_type: &str, id: i64, fields: &[(&str, &str)]
     assert_eq!(status, Status::SeeOther, "saves: {body}");
 }
 
+/// Runs the list's row action `name` (`trash`, `untrash` or `delete`) on `post_type` post `id`.
+async fn row_action(client: &Client, post_type: &str, id: i64, name: &str) -> Status {
+    let csrf = token(client).await;
+    post(
+        client,
+        &format!("/mc-admin/{post_type}/{id}/actions/{name}"),
+        &[("_token", &csrf)],
+    )
+    .await
+    .status()
+}
+
 async fn delete(client: &Client, post_type: &str, id: i64) -> Status {
     let csrf = token(client).await;
     post(
@@ -1286,18 +1298,33 @@ async fn posts(client: &Client, db: &Database, editor: i64) {
     assert_eq!(status, Status::Ok);
     assert!(page.contains("Written in the admin"), "{page}");
 
-    // Delete moves it to the trash (Ruling R117); it leaves the front end.
-    assert_eq!(delete(client, "post", id).await, Status::SeeOther);
+    // Ignite's Delete is for the trash only: a post out of it goes there with "Trash".
+    assert_eq!(delete(client, "post", id).await, Status::Forbidden);
+    assert_eq!(find(db, id).await.unwrap().status, PostStatus::Publish);
+    // The row action Trash moves it to the trash (Ruling R117); it leaves the front end.
+    assert_eq!(
+        row_action(client, "post", id, "trash").await,
+        Status::SeeOther
+    );
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Trash);
     assert_eq!(get(client, &front).await.0, Status::NotFound);
-    // Saving it with another status restores it.
-    save(client, "post", id, &[title, ("status", "draft")]).await;
+    // Restore brings it back as a draft (see `trash.rs` for the whole flow).
+    assert_eq!(
+        row_action(client, "post", id, "untrash").await,
+        Status::SeeOther
+    );
     let restored = find(db, id).await.unwrap();
     assert_eq!(restored.status, PostStatus::Draft);
     assert_eq!(restored.content, html);
-    // Delete on a trashed post deletes it for good.
-    assert_eq!(delete(client, "post", id).await, Status::SeeOther);
-    assert_eq!(delete(client, "post", id).await, Status::SeeOther);
+    // Delete Permanently, in the trash, deletes it for good.
+    assert_eq!(
+        row_action(client, "post", id, "trash").await,
+        Status::SeeOther
+    );
+    assert_eq!(
+        row_action(client, "post", id, "delete").await,
+        Status::SeeOther
+    );
     assert!(find(db, id).await.is_none());
     assert_eq!(
         get(client, &format!("/mc-admin/post/{id}/edit")).await.0,
@@ -1541,15 +1568,15 @@ async fn others_are_refused(
         Status::Forbidden
     );
     // Their own post goes to the trash and comes back.
-    assert_eq!(delete(client, "post", id).await, Status::SeeOther);
+    assert_eq!(
+        row_action(client, "post", id, "trash").await,
+        Status::SeeOther
+    );
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Trash);
-    save(
-        client,
-        "post",
-        id,
-        &[("title", "By the author"), ("status", "draft")],
-    )
-    .await;
+    assert_eq!(
+        row_action(client, "post", id, "untrash").await,
+        Status::SeeOther
+    );
     assert_eq!(find(db, id).await.unwrap().status, PostStatus::Draft);
     sign_out(client).await;
 

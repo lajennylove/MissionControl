@@ -8,9 +8,12 @@
 //!
 //! - [`PostTypePolicy`], registered for each post type's slug: the list and the New screen need
 //!   the type's `edit_posts` (`edit.php`, `post-new.php`); editing or saving a post needs
-//!   `edit_post` on it, and on a trashed post `delete_post` too (a save restores it, as
-//!   `wp_untrash_post`); Delete needs `delete_post`. Each is mapped as `map_meta_cap` maps it,
-//!   with the site's special pages (an editor may not edit the privacy policy page).
+//!   `edit_post` on it, and a trashed post is not edited at all (`post.php` answers 409, "You
+//!   cannot edit this item because it is in the Trash. Please restore it and try again."), so
+//!   its list row has no Edit; Ignite's Delete needs `delete_post` and is for a trashed post
+//!   only, as WordPress's list offers "Delete Permanently" only in the Trash (the other rows
+//!   have the resource's "Trash" row action). Each is mapped as `map_meta_cap` maps it, with
+//!   the site's special pages (an editor may not edit the privacy policy page).
 //! - The resource's own queries ([`PostTypeData`](crate::types::PostTypeData)'s `list_for` and
 //!   `find_for`) leave out what the user may not see, and its `update_for` writes what WordPress's
 //!   `edit_post` writes for them: kses for a user without `unfiltered_html`, no author change
@@ -97,6 +100,9 @@ pub enum Refusal {
     /// A save of a trashed post (which restores it, or keeps it in the trash) needs
     /// `delete_post`, as `wp_untrash_post` does, and it is refused.
     RestorePost,
+    /// The post is in the trash: its edit form and its save are refused for everyone, as
+    /// `post.php` refuses to edit a trashed post (with 409). Restore it first.
+    InTrash,
     /// The media library's upload page (`<mount>/attachment/new`, WordPress's `media-new.php`)
     /// is refused: the user lacks the screen's capabilities or `upload_files`.
     UploadFiles,
@@ -115,9 +121,12 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    /// The HTTP status: 403, as `wp_die` answers these.
+    /// The HTTP status: 403, as `wp_die` answers these, or 409 for a post in the trash.
     pub fn status(self) -> u16 {
-        403
+        match self {
+            Self::InTrash => 409,
+            _ => 403,
+        }
     }
 
     /// The heading WordPress's error page shows, if any.
@@ -131,6 +140,7 @@ impl Refusal {
             | Self::TrashPost
             | Self::DeletePost
             | Self::RestorePost
+            | Self::InTrash
             | Self::UploadFiles
             | Self::ManageOptions
             | Self::ManagePrivacyOptions
@@ -149,6 +159,10 @@ impl Refusal {
             Self::TrashPost => "Sorry, you are not allowed to move this item to the Trash.",
             Self::DeletePost => "Sorry, you are not allowed to delete this item.",
             Self::RestorePost => "Sorry, you are not allowed to restore this item from the Trash.",
+            Self::InTrash => {
+                "You cannot edit this item because it is in the Trash. Please restore it and try \
+                 again."
+            }
             Self::UploadFiles => "Sorry, you are not allowed to upload files.",
             Self::ManageOptions => "Sorry, you are not allowed to manage options for this site.",
             Self::ManagePrivacyOptions => {
@@ -252,10 +266,9 @@ pub async fn authorize_post_screen(
     if !can(user, "edit_post", Some(&object)) {
         return Ok(Some(Refusal::EditPost));
     }
-    // A trashed post's form saves it out of the trash (or keeps it there): `wp_untrash_post`
-    // needs `delete_post`.
-    if trashed && !can(user, "delete_post", Some(&object)) {
-        return Ok(Some(Refusal::RestorePost));
+    // `post.php`: a trashed post is restored from the list (its Restore row action), not edited.
+    if trashed {
+        return Ok(Some(Refusal::InTrash));
     }
     Ok(None)
 }
@@ -334,6 +347,10 @@ impl Policy for PostTypePolicy {
         })
     }
 
+    /// Ignite's Delete, and the row actions that need the delete ability (Restore and Delete
+    /// Permanently): `delete_post`, on a post in the trash only. A post out of the trash goes
+    /// there with the resource's "Trash" row action, as WordPress's list has no Delete for it
+    /// (`WP_Posts_List_Table::handle_row_actions`, with `EMPTY_TRASH_DAYS` on).
     fn delete<'a>(
         &'a self,
         db: &'a Database,
@@ -341,11 +358,15 @@ impl Policy for PostTypePolicy {
         record: &'a Row,
     ) -> RuntimeFuture<'a, bool> {
         Box::pin(async move {
-            match record_id(record) {
-                Some(id) => self.allows(db, user, PostScreen::Delete(id)).await,
+            let Some(id) = record_id(record) else {
                 // A record without an id is no post: refused.
-                None => Ok(false),
-            }
+                return Ok(false);
+            };
+            let trashed = Post::query()
+                .find(db, id)
+                .await?
+                .is_some_and(|post| post.status == PostStatus::Trash);
+            Ok(trashed && self.allows(db, user, PostScreen::Delete(id)).await?)
         })
     }
 }

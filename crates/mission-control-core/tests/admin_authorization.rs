@@ -108,8 +108,7 @@ async fn editors_use_the_screens_and_the_post_checks_apply() {
         Some(Refusal::DeletePost)
     );
 
-    // The front page: an editor may edit it, not trash it (`manage_options`); a save of it once
-    // it is in the trash is a restore, which needs `delete_post` too (`wp_untrash_post`).
+    // The front page: an editor may edit it, not trash it (`manage_options`).
     let front = published(db, owner, "page").await;
     set_option(db, "page_on_front", &json!(front.id))
         .await
@@ -122,22 +121,29 @@ async fn editors_use_the_screens_and_the_post_checks_apply() {
         check(&editor, &page_def, PostScreen::Delete(front.id)).await,
         Some(Refusal::TrashPost)
     );
+    // A post in the trash is not edited, by anyone (`post.php`'s 409): it is restored from the
+    // list first.
     let mut trashed_front = front.clone();
     trashed_front.trash(db).await.unwrap();
-    // Its form saves it out of the trash, so it is refused too.
-    assert_eq!(
-        check(&editor, &page_def, PostScreen::Edit(front.id)).await,
-        Some(Refusal::RestorePost)
-    );
-    assert_eq!(
-        check(&editor, &page_def, PostScreen::Update(front.id)).await,
-        Some(Refusal::RestorePost)
-    );
-    // An editor restores another user's trashed post.
     let mut trashed_post = someones_post.clone();
     trashed_post.trash(db).await.unwrap();
+    for (def, id) in [(&page_def, front.id), (&post_def, someones_post.id)] {
+        for screen in [PostScreen::Edit(id), PostScreen::Update(id)] {
+            assert_eq!(
+                check(&editor, def, screen).await,
+                Some(Refusal::InTrash),
+                "{screen:?}"
+            );
+        }
+    }
+    assert_eq!(Refusal::InTrash.status(), 409);
     assert_eq!(
-        check(&editor, &post_def, PostScreen::Update(someones_post.id)).await,
+        Refusal::InTrash.message(),
+        "You cannot edit this item because it is in the Trash. Please restore it and try again."
+    );
+    // Restoring another user's trashed post needs `delete_post` on it, which an editor has.
+    assert_eq!(
+        check(&editor, &post_def, PostScreen::Delete(someones_post.id)).await,
         None
     );
 

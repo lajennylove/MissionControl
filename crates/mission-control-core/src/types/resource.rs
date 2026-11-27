@@ -103,12 +103,22 @@
 //!   the title, content or excerpt of a type that supports `revisions` records a revision, as
 //!   `wp_save_post_revision` does (Ruling R118).
 //! - Saving a trashed post with another status takes it out of the trash first (`draft`, as
-//!   WordPress 5.6 and later restore), then applies the form. Choosing Trash moves it to the
-//!   trash after the save, except on the front page and the posts page, whose Trash needs
-//!   `manage_options` (the form refuses it; the list's Delete, checked by the admin, does not).
-//! - Delete moves a post to the trash; on a trashed post it deletes it permanently, with its
-//!   meta, term relationships and revisions (Ruling R117). The list shows every status but
-//!   `auto-draft`, with a Status column, so trashed posts can be found and restored.
+//!   WordPress 5.6 and later restore), then applies the form (the data layer's rule; the
+//!   admin's policy refuses the form of a trashed post, which is restored from the list).
+//!   Choosing Trash moves it to the trash after the save, except on the front page and the
+//!   posts page, whose Trash needs `manage_options` (the form refuses it; the list's Trash
+//!   action checks `delete_post`, which maps to it).
+//! - The trash, as WordPress's list (`WP_Posts_List_Table::handle_row_actions`, `edit.php`):
+//!   a post out of the trash has the row action "Trash" (`wp_trash_post`: the slug gets
+//!   `__trashed`, so another post can take it, and is kept in `_wp_desired_post_slug`), asked
+//!   for nothing; it then shows in the Trash tab, with "Restore" (`wp_untrash_post`: back to
+//!   `draft`, with its slug, see [`Post::untrash`]) and "Delete Permanently" (`wp_delete_post`
+//!   with its meta, term relationships and revisions, Ruling R117), which asks first with
+//!   WordPress's text ([`DELETE_PERMANENTLY_CONFIRMATION`]). Each needs `delete_post` on the
+//!   post, and shows only to a user who has it; the flash is WordPress's ("1 post moved to the
+//!   Trash."). A trashed post has no Edit: its form is refused (409), as `post.php` refuses it.
+//!   Ignite's Delete is for a trashed post only, and deletes it permanently. The list shows
+//!   every status but `auto-draft`, with a Status column.
 //!
 //! Every query is bounded: a list page has at most [`MAX_PER_PAGE`] rows and a field at most
 //! [`MAX_OPTIONS`] choices. Values are always bound, never written into the SQL.
@@ -139,8 +149,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, FixedOffset, NaiveDate, NaiveDateTime};
 use ignite_core::{
-    ActingUser, ColumnDef, Direction, FieldDef as IgniteFieldDef, FormLayout, Group, ListQuery,
-    Page, Row, RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, register_policy,
+    ActingUser, ActionAbility, ActionResult, BadgeColor, ColumnDef, Direction,
+    FieldDef as IgniteFieldDef, FormLayout, Group, ListFilter, ListQuery, Page, Row, RowAction,
+    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, register_policy,
     register_runtime, unregister_policy, unregister_runtime,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
@@ -151,7 +162,7 @@ use super::location::ScreenContext;
 use super::registry::Registry;
 use super::status_tabs;
 use crate::admin::navigation::{PostTypePositions, place_post_type};
-use crate::admin::posts::PostTypePolicy;
+use crate::admin::posts::{PostTypePolicy, Refusal};
 use crate::content::{
     MetaError, NewPost, NewTerm, Post, PostStatus, SaveError, Taxonomy, Term, TermError,
     delete_post_meta, get_option, save_revision, set_post_meta,
@@ -211,6 +222,16 @@ pub(super) const COL_TITLE: &str = "col_title";
 const COL_AUTHOR: &str = "col_author";
 const COL_STATUS: &str = "col_status";
 const COL_DATE: &str = "col_date";
+
+/// The key of each row the user-aware queries give (`list_for`, `find_for`): whether the
+/// signed-in user has `delete_post` on the post, which shows the row's "Trash" action. Not a
+/// column, and never a field's name (no field name starts with `col_`).
+const COL_DELETE_POST: &str = "col_delete_post";
+
+/// WordPress's confirmation before a permanent delete (`showNotice.warn` in
+/// `wp-admin/js/common.js`).
+pub const DELETE_PERMANENTLY_CONFIRMATION: &str = "You are about to permanently delete these \
+     items from your site.\nThis action cannot be undone.\n'Cancel' to stop, 'OK' to delete.";
 
 /// The post meta that holds a post's featured image.
 const THUMBNAIL_META: &str = "_thumbnail_id";
@@ -792,6 +813,7 @@ pub fn post_type_resource_with_access(
     };
     let layout = editor_layout(&data, group_sections);
     let has_title = data.title;
+    let actions = trash_actions(&data);
     let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data)
         // The New screen in the type's menu group, as WordPress's Posts > Add New Post.
         .navigation_create_item(true)
@@ -800,6 +822,7 @@ pub fn post_type_resource_with_access(
     resource.fields = fields;
     resource.columns = columns;
     resource.form_layout = layout;
+    resource.row_actions = actions;
     if has_title {
         // WordPress's permalink follows the title until it is edited by hand, and stays as it
         // is once the post is published, so its URL does not change with the title.
@@ -813,6 +836,43 @@ pub fn post_type_resource_with_access(
             });
     }
     resource
+}
+
+/// The trash's row actions of a post type's list, as WordPress's (see the [module](self)):
+/// "Trash" on a post out of the trash, "Restore" and "Delete Permanently" on a trashed one.
+fn trash_actions(data: &PostTypeData) -> Vec<RowAction> {
+    let in_trash = || ListFilter::new().where_eq(STATUS, PostStatus::Trash.as_str());
+    let noun = data.noun();
+    let trash = data.clone();
+    let restore = data.clone();
+    let delete = data.clone();
+    vec![
+        // `_x( 'Trash', 'verb' )`: the update ability (the row's Edit), and `delete_post`,
+        // which the row's flag shows and the handler checks.
+        RowAction::make("trash")
+            .label("Trash")
+            .color(BadgeColor::Danger)
+            .visible(|row| {
+                row.get(STATUS).and_then(Value::as_str) != Some(PostStatus::Trash.as_str())
+                    && row.get(COL_DELETE_POST) == Some(&Value::Bool(true))
+            })
+            .action(move |db, user, id, _| trash.clone().trash_row(db, user, id))
+            .success_notification_title(format!("1 {noun} moved to the Trash.")),
+        RowAction::make("untrash")
+            .label("Restore")
+            .authorize(ActionAbility::Delete)
+            .visible_when(in_trash())
+            .action(move |db, user, id, _| restore.clone().untrash_row(db, user, id))
+            .success_notification_title(format!("1 {noun} restored from the Trash.")),
+        RowAction::make("delete")
+            .label("Delete Permanently")
+            .color(BadgeColor::Danger)
+            .authorize(ActionAbility::Delete)
+            .modal_description(DELETE_PERMANENTLY_CONFIRMATION)
+            .visible_when(in_trash())
+            .action(move |db, user, id, _| delete.clone().delete_row(db, user, id))
+            .success_notification_title(format!("1 {noun} permanently deleted.")),
+    ]
 }
 
 /// The layout of a post type's edit form, as WordPress's editor with its settings sidebar
@@ -1466,6 +1526,10 @@ impl PostTypeData {
             );
         }
         row.insert(COL_STATUS.into(), Value::from(status_label(post.status)));
+        // The stored status, which the row actions' rules read (a list row has no form values;
+        // a form row has its own, a draft for an auto-draft).
+        row.entry(STATUS)
+            .or_insert_with(|| Value::from(post.status.as_str()));
         for taxonomy in &self.taxonomies {
             if let Some(key) = &taxonomy.column {
                 let names: Vec<&str> = terms
@@ -2518,11 +2582,11 @@ impl PostTypeData {
         {
             log::warn!(
                 "Post {id} is the front page or the posts page: the form cannot move it to the \
-                 trash; Delete can, for a user with `delete_post` on it."
+                 trash; the list's Trash action can, for a user with `delete_post` on it."
             );
             return Err(Error::Unsupported {
                 operation: "moving the front page or the posts page to the trash from the form \
-                            (use Delete, which checks delete_post)",
+                            (use the list's Trash action, which checks delete_post)",
                 driver: "Mission Control's post type resources",
             });
         }
@@ -2625,8 +2689,8 @@ impl PostTypeData {
     /// Whether post `id` is the static front page (`page_on_front`) or the posts page
     /// (`page_for_posts`), which only a user with `manage_options` may move to the trash
     /// (`map_meta_cap`'s `delete_post`). The data layer does not know the user, so the form's
-    /// Trash status is refused on them for everyone; the list's Delete, which the admin checks
-    /// with `delete_post`, still trashes them.
+    /// Trash status is refused on them for everyone; the list's Trash action, which checks
+    /// `delete_post`, still trashes them.
     async fn is_site_page(&self, db: &Database, id: i64) -> Result<bool, Error> {
         for option in ["page_on_front", "page_for_posts"] {
             let page = match get_option(db, option).await {
@@ -2639,6 +2703,123 @@ impl PostTypeData {
             }
         }
         Ok(false)
+    }
+
+    /// The noun of WordPress's list messages for the type (`$bulk_messages`): "page" for
+    /// `page`, "post" for the others.
+    fn noun(&self) -> &'static str {
+        if self.post_type == "page" {
+            "page"
+        } else {
+            "post"
+        }
+    }
+
+    /// The post `id` and whether `user` has `delete_post` on it, or the message for a post
+    /// that is gone: the row action's checks after Ignite's.
+    async fn post_for_action(
+        &self,
+        db: &Database,
+        user: &ActingUser,
+        id: i64,
+    ) -> Result<Result<(Post, bool), String>, Error> {
+        let Some(post) = self.post(db, id).await? else {
+            return Ok(Err(
+                "You attempted to edit an item that does not exist. Perhaps it was deleted?"
+                    .to_owned(),
+            ));
+        };
+        let actor = self.actor(db, user).await?;
+        let may = self.may(db, &actor, &post, "delete_post").await?;
+        Ok(Ok((post, may)))
+    }
+
+    /// The row action "Trash": `wp_trash_post`, for a user with `delete_post` on the post.
+    fn trash_row<'a>(
+        self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+    ) -> RuntimeFuture<'a, ActionResult> {
+        Box::pin(async move {
+            let (post, may) = match self.post_for_action(db, user, id).await? {
+                Ok(found) => found,
+                Err(message) => return Ok(Err(message)),
+            };
+            if !may {
+                return Ok(Err(Refusal::TrashPost.message().to_owned()));
+            }
+            if post.status != PostStatus::Trash {
+                self.delete_post(db, id).await?;
+            }
+            Ok(Ok(()))
+        })
+    }
+
+    /// The row action "Restore": `wp_untrash_post` (a draft, with its slug), for a user with
+    /// `delete_post` on the post.
+    fn untrash_row<'a>(
+        self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+    ) -> RuntimeFuture<'a, ActionResult> {
+        Box::pin(async move {
+            let (mut post, may) = match self.post_for_action(db, user, id).await? {
+                Ok(found) => found,
+                Err(message) => return Ok(Err(message)),
+            };
+            if !may {
+                return Ok(Err(Refusal::RestorePost.message().to_owned()));
+            }
+            post.untrash(db).await?;
+            sync_publication(db, &post).await.map_err(scheduler_error)?;
+            Ok(Ok(()))
+        })
+    }
+
+    /// The row action "Delete Permanently": `wp_delete_post` on a trashed post, for a user with
+    /// `delete_post` on it.
+    fn delete_row<'a>(
+        self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+    ) -> RuntimeFuture<'a, ActionResult> {
+        Box::pin(async move {
+            let (post, may) = match self.post_for_action(db, user, id).await? {
+                Ok(found) => found,
+                Err(message) => return Ok(Err(message)),
+            };
+            if !may {
+                return Ok(Err(Refusal::DeletePost.message().to_owned()));
+            }
+            if post.status == PostStatus::Trash {
+                post.delete(db).await?;
+            }
+            Ok(Ok(()))
+        })
+    }
+
+    /// Adds to each of `rows` whether `actor` has `delete_post` on its post
+    /// ([`COL_DELETE_POST`]).
+    async fn flag_delete_post(
+        &self,
+        db: &Database,
+        actor: &Actor,
+        rows: &mut [Row],
+    ) -> Result<(), Error> {
+        for row in rows {
+            let Some(id) = row.get("id").and_then(id_of) else {
+                continue;
+            };
+            let may = match self.post(db, id).await? {
+                Some(post) => self.may(db, actor, &post, "delete_post").await?,
+                None => false,
+            };
+            row.insert(COL_DELETE_POST.into(), Value::Bool(may));
+        }
+        Ok(())
     }
 
     /// Trashes post `id`, or deletes a trashed one for good. Returns how many posts went: 0 when
@@ -2708,7 +2889,9 @@ impl RuntimeData for PostTypeData {
         Box::pin(async move {
             let actor = self.actor(db, user).await?;
             let scope = self.scope(&actor.caps, actor.id);
-            self.list_page(db, query, Some(scope)).await
+            let mut page = self.list_page(db, query, Some(scope)).await?;
+            self.flag_delete_post(db, &actor, &mut page.rows).await?;
+            Ok(page)
         })
     }
 
@@ -2723,7 +2906,12 @@ impl RuntimeData for PostTypeData {
             let actor = self.actor(db, user).await?;
             let scope = self.scope(&actor.caps, actor.id);
             match self.post(db, id).await? {
-                Some(post) if Self::in_scope(&post, scope) => Ok(Some(self.row(db, &post).await?)),
+                Some(post) if Self::in_scope(&post, scope) => {
+                    let mut row = self.row(db, &post).await?;
+                    let may = self.may(db, &actor, &post, "delete_post").await?;
+                    row.insert(COL_DELETE_POST.into(), Value::Bool(may));
+                    Ok(Some(row))
+                }
                 _ => Ok(None),
             }
         })
