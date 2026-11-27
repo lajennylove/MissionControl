@@ -242,6 +242,17 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// The title of an upload with no title: its file name without the extension, as
+/// `media_handle_upload` makes it (`photo` for `2026/11/photo.jpg`, `archive.tar` for
+/// `archive.tar.gz`). A name that is only an extension (`.htaccess`) is kept whole.
+fn file_title(path: &str) -> &str {
+    let name = file_name(path);
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    }
+}
+
 /// Question marks for `n` binds.
 fn marks(n: usize) -> String {
     vec!["?"; n].join(", ")
@@ -532,14 +543,18 @@ impl AttachmentData {
     }
 
     /// Saves the form: each field sent replaces the stored value (a cleared one is empty), each
-    /// one not sent keeps it. The alternative text is stored without tags, as `edit_post`
+    /// one not sent keeps it. A title left empty is the file's name without its extension, as
+    /// `media_handle_upload` names an upload (`photo` for `2026/11/photo.jpg`). The alternative text is stored without tags, as `edit_post`
     /// strips them (`wp_strip_all_tags`); the other fields as sent.
     async fn update_row(&self, db: &Database, id: i64, input: Row) -> Result<Row, Error> {
         let Some(current) = listed_attachment(db, id).await? else {
             return Err(Error::NotFound { table: "posts" });
         };
         let value = |key: &str, stored: String| input.get(key).map_or(stored, row_text);
-        let title = value(TITLE, current.title);
+        let mut title = value(TITLE, current.title);
+        if title.trim().is_empty() {
+            title = file_title(&current.file).to_owned();
+        }
         let alt = strip_all_tags(&value(ALT_FIELD, current.alt))
             .trim()
             .to_owned();
@@ -1281,6 +1296,9 @@ mod tests {
     fn file_names_and_orientation() {
         assert_eq!(file_name("2026/11/photo.jpg"), "photo.jpg");
         assert_eq!(file_name("photo.jpg"), "photo.jpg");
+        assert_eq!(file_title("2026/11/photo.jpg"), "photo");
+        assert_eq!(file_title("archive.tar.gz"), "archive.tar");
+        assert_eq!(file_title(".htaccess"), ".htaccess");
         assert_eq!(orientation(300, 200), "landscape");
         assert_eq!(orientation(200, 300), "portrait");
         assert_eq!(file_url("http://x/mc-content/uploads", ""), "");

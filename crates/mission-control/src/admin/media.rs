@@ -1219,7 +1219,7 @@ fn grid_markup(token: &str) -> String {
         r#"<div id="mc-media-grid" data-ajax="{admin}/admin-ajax.php" data-admin="{admin}" data-token="{token}">
 <div class="mc-grid-toolbar">
 <label for="mc-grid-search">Search media</label>
-<input type="search" id="mc-grid-search">
+<input type="search" id="mc-grid-search" class="ig-input" maxlength="200">
 </div>
 <p class="mc-grid-status" role="status" aria-live="polite"></p>
 <div class="mc-grid-body">

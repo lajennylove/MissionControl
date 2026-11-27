@@ -528,6 +528,11 @@ async fn flow(scratch: &ScratchDatabase) {
     assert!(grid.contains(">Load more</button>"), "{grid}");
     assert!(grid.contains("class=\"mc-grid-count\""), "{grid}");
     assert!(grid.contains("<label for=\"mc-grid-search\">"), "{grid}");
+    // The search field is boxed as the modals' search fields are (Ignite's input).
+    assert!(
+        grid.contains("<input type=\"search\" id=\"mc-grid-search\" class=\"ig-input\""),
+        "{grid}"
+    );
     let (_, explicit) = get(&client, "/mc-admin/attachment?mode=grid").await;
     assert!(explicit.contains("id=\"mc-media-grid\""), "{explicit}");
     let response = client
@@ -594,6 +599,32 @@ async fn flow(scratch: &ScratchDatabase) {
         list.contains(&format!("/mc-admin/attachment/{photo}/edit")),
         "{list}"
     );
+
+    // A page beyond the last is sent to the last page, as `set_pagination_args` redirects;
+    // page 1 has no Previous.
+    let response = client
+        .get("/mc-admin/attachment?sort=col_title&dir=asc&page=99")
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    assert_eq!(
+        header(&response, "Location"),
+        "/mc-admin/attachment?sort=col_title&dir=asc"
+    );
+    let (_, first) = get(&client, "/mc-admin/attachment?mode=list").await;
+    assert!(first.contains("<span>Page 1 of 1"), "{first}");
+    assert!(!first.contains(">Previous</a>"), "{first}");
+
+    // A title left empty is the file's name without its extension (`media_handle_upload`).
+    let response = post(
+        &client,
+        &format!("/mc-admin/attachment/{photo}"),
+        &[("_token", &csrf), ("title", "  ")],
+    )
+    .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    let saved = Post::query().find(&*db, photo).await.unwrap().unwrap();
+    assert_eq!(saved.title, "Harbour-Boats");
 
     // The edit form saves the title, alt text, caption and description.
     let (status, form_page) = get(&client, &format!("/mc-admin/attachment/{photo}/edit")).await;

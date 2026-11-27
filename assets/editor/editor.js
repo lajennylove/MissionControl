@@ -177,6 +177,109 @@
     });
   }
 
+  function trim(text) {
+    return String(text).replace(/^\s+|\s+$/g, '');
+  }
+
+  /**
+   * The Visual tab's view of `[caption]`: the image and its caption in WordPress's
+   * `<div class="mceTemp"><dl class="wp-caption">` markup, as TinyMCE's wpcaption plugin
+   * (`wpeditimage`, `parseShortcode`) shows it. A shortcode without a width or a caption is
+   * shown as its content.
+   */
+  function toCaptions(html) {
+    return html.replace(
+      /(?:<p>)?\[(?:wp_)?caption([^\]]+)\]([\s\S]+?)\[\/(?:wp_)?caption\](?:<\/p>)?/g,
+      function (all, attributes, content) {
+        var id = attributes.match(/id=['"]([^'"]*)['"] ?/);
+        var align = attributes.match(/align=['"]([^'"]*)['"] ?/);
+        var classes = attributes.match(/class=['"]([^'"]*)['"] ?/);
+        var width = attributes.match(/width=['"]([0-9]*)['"] ?/);
+        var rest = attributes;
+        [id, align, classes, width].forEach(function (match) {
+          if (match) {
+            rest = rest.replace(match[0], '');
+          }
+        });
+        content = trim(content);
+        var image = content.match(/((?:<a [^>]+>)?<img [^>]+>(?:<\/a>)?)([\s\S]*)/i);
+        var caption;
+        if (image && image[2]) {
+          caption = trim(image[2]);
+          image = trim(image[1]);
+        } else {
+          // The old form, `[caption caption="..."]<img>[/caption]`.
+          caption = trim(rest).replace(/^caption=['"]/, '').replace(/['"]$/, '');
+          image = content;
+        }
+        id = id && id[1] ? id[1].replace(/[<>&]+/g, '') : '';
+        align = align && align[1] ? align[1].replace(/[<>&"]+/g, '') : 'alignnone';
+        classes = classes && classes[1] ? ' ' + classes[1].replace(/[<>&"]+/g, '') : '';
+        if (!width && image) {
+          width = image.match(/width=['"]([0-9]*)['"]/);
+        }
+        width = width && width[1] ? parseInt(width[1], 10) : 0;
+        if (!width || !caption) {
+          return content;
+        }
+        return '<div class="mceTemp"><dl id="' + escapeAttribute(id) + '" class="wp-caption ' +
+          align + classes + '" style="width: ' + width + 'px"><dt class="wp-caption-dt">' +
+          image + '</dt><dd class="wp-caption-dd">' + caption + '</dd></dl></div>';
+      }
+    );
+  }
+
+  /**
+   * The `[caption]` shortcodes of the Visual tab's captioned images, as the wpcaption plugin
+   * writes them back (`getShortcode`): `[caption id="…" align="…" width="…"]<img …> Caption
+   * [/caption]`, so the saved content is the shortcode the Add Media modal inserted.
+   */
+  function fromCaptions(html) {
+    return html.replace(
+      /(?:<div [^>]*mceTemp[^>]*>)?\s*(<dl [^>]*wp-caption[^>]*>[\s\S]+?<\/dl>)\s*(?:<\/div>)?/g,
+      function (all, dl) {
+        if (dl.indexOf('<img ') === -1 || dl.indexOf('</p>') !== -1) {
+          return dl.replace(/<d[ldt]( [^>]+)?>/g, '').replace(/<\/d[ldt]>/g, '');
+        }
+        var out = dl.replace(
+          /\s*<dl ([^>]+)>\s*<dt [^>]+>([\s\S]+?)<\/dt>\s*<dd [^>]+>([\s\S]*?)<\/dd>\s*<\/dl>\s*/gi,
+          function (match, attributes, image, caption) {
+            var width = image.match(/width="([0-9]*)"/);
+            width = width && width[1] ? width[1] : '';
+            var classes = attributes.match(/class="([^"]*)"/);
+            classes = classes && classes[1] ? classes[1] : '';
+            var align = classes.match(/align[a-z]+/i);
+            align = align ? align[0] : 'alignnone';
+            if (!width || !caption) {
+              if (align !== 'alignnone') {
+                image = image.replace(/><img/, ' class="' + align + '"><img');
+              }
+              return image;
+            }
+            var id = attributes.match(/id="([^"]*)"/);
+            id = id && id[1] ? id[1] : '';
+            classes = classes.replace(/wp-caption ?|align[a-z]+ ?/gi, '');
+            classes = trim(classes) ? ' class="' + trim(classes) + '"' : '';
+            caption = caption.replace(/\r\n|\r/g, '\n').replace(/<[a-zA-Z0-9]+( [^<>]+)?>/g,
+              function (tag) {
+                return tag.replace(/[\r\n\t]+/, ' ');
+              });
+            caption = caption.replace(/\s*\n\s*/g, '<br />');
+            return '[caption id="' + id + '" align="' + align + '" width="' + width + '"' +
+              classes + ']' + image + ' ' + caption + '[/caption]';
+          }
+        );
+        if (out.indexOf('[caption') === -1) {
+          out = dl.replace(
+            /[\s\S]*?((?:<a [^>]+>)?<img [^>]+>(?:<\/a>)?)(<p>[\s\S]*<\/p>)?[\s\S]*/gi,
+            '<p>$1</p>$2'
+          );
+        }
+        return out;
+      }
+    );
+  }
+
   /** WordPress's classic editor settings (`_WP_Editors::editor_settings`), for TinyMCE 7. */
   var settings = {
     license_key: 'gpl',
@@ -219,7 +322,14 @@
     content_style:
       'img.mce-mc-more,img.mce-mc-nextpage{display:block;width:100%;height:16px;' +
       'margin:15px auto 0;border:0;border-top:2px dashed #8c8f94;cursor:default}' +
-      'img.mce-mc-nextpage{border-top-style:dotted}'
+      'img.mce-mc-nextpage{border-top-style:dotted}' +
+      // The captioned image (wpcaption's view of `[caption]`).
+      '.mceTemp{margin:1em 0}dl.wp-caption{max-width:100%;margin:0;padding:0}' +
+      'dl.wp-caption.aligncenter{margin-left:auto;margin-right:auto}' +
+      'dl.wp-caption.alignleft{float:left;margin:0 1em 1em 0}' +
+      'dl.wp-caption.alignright{float:right;margin:0 0 1em 1em}' +
+      '.wp-caption-dt{margin:0}.wp-caption-dt img{display:block;max-width:100%;height:auto}' +
+      '.wp-caption-dd{margin:0;padding:4px 0;font-size:13px;color:#50575e}'
   };
 
   function rememberedAdv() {
@@ -308,11 +418,11 @@
       if (event.load) {
         event.content = autop(event.content);
       }
-      event.content = toPlaceholders(event.content);
+      event.content = toCaptions(toPlaceholders(event.content));
     });
     editor.on('PostProcess', function (event) {
       if (event.get && typeof event.content === 'string') {
-        event.content = fromPlaceholders(event.content);
+        event.content = fromPlaceholders(fromCaptions(event.content));
       }
     });
   }

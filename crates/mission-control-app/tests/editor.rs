@@ -421,3 +421,57 @@ async fn form_flow(scratch: &ScratchDatabase) {
 
     db.close().await;
 }
+
+/// The Visual tab shows a `[caption]` as the captioned image (WordPress's wpcaption plugin,
+/// `parseShortcode`), and writes the same shortcode back (`getShortcode`), so the saved content
+/// is unchanged. Runs the script's two functions with Node when it is installed; otherwise
+/// checks that the editor uses them.
+#[test]
+fn captions_show_as_images_in_the_visual_tab() {
+    let path = assets().join("editor.js");
+    let script = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        script.contains("event.content = toCaptions(toPlaceholders(event.content));"),
+        "editor.js"
+    );
+    assert!(
+        script.contains("event.content = fromPlaceholders(fromCaptions(event.content));"),
+        "editor.js"
+    );
+    let check = r#"
+const src = require('fs').readFileSync(process.argv[1], 'utf8');
+const take = (name) => {
+  const start = src.indexOf('  function ' + name + '(');
+  let depth = 0;
+  for (let i = src.indexOf('{', start); ; i++) {
+    if (src[i] === '{') depth++;
+    if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
+  }
+};
+eval(take('escapeAttribute') + take('trim') + take('toCaptions') + take('fromCaptions'));
+const shortcode = '[caption id="attachment_140" align="aligncenter" width="80"]' +
+  '<img class="size-thumbnail wp-image-140" src="/a.png" alt="" width="80" height="80" />' +
+  ' modal caption[/caption]';
+const visual = toCaptions('<p>' + shortcode + '</p>');
+if (visual.indexOf('[caption') !== -1) throw new Error('shortcode text shown: ' + visual);
+if (visual.indexOf('<dl id="attachment_140" class="wp-caption aligncenter"') === -1 ||
+    visual.indexOf('<dd class="wp-caption-dd">modal caption</dd>') === -1) {
+  throw new Error('no captioned image: ' + visual);
+}
+const back = fromCaptions(visual);
+if (back !== shortcode) throw new Error('not the same shortcode: ' + back);
+"#;
+    match std::process::Command::new("node")
+        .arg("-e")
+        .arg(check)
+        .arg(&path)
+        .output()
+    {
+        Ok(output) => assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(e) => eprintln!("Node is not installed ({e}); the caption round trip is not run"),
+    }
+}

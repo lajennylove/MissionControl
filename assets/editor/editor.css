@@ -481,6 +481,12 @@
   gap: 0.75rem;
   margin: 0 0 1rem;
 }
+/* The search field is an Ignite input, boxed as the media modals' search fields are. */
+.mc-grid-toolbar #mc-grid-search {
+  flex: 0 1 18rem;
+  width: auto;
+  min-width: 12rem;
+}
 .mc-grid-add {
   margin-left: 0.5rem;
   font-size: 0.875rem;
