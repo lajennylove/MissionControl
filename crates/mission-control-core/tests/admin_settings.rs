@@ -841,13 +841,14 @@ async fn the_menus_screen_saves_menus_locations_and_items() {
         .await
         .unwrap();
         // Refused on the items field: the form shows the reason under it.
-        let refused = data.update(db, menu_id, input).await.unwrap_err();
+        let user = ignite_core::ActingUser::new(1, "admin", "admin@example.com");
+        let refused = data
+            .try_update_for(db, &user, menu_id, input)
+            .await
+            .expect("no database error")
+            .expect_err("refuses the items");
         assert!(
-            matches!(
-                &refused,
-                orbit_orm::Error::UniqueViolation { index: Some(index) }
-                    if index == "nav-menus_items_unique"
-            ),
+            refused.errors()["items"].contains("to nothing"),
             "{refused:?}"
         );
         let menu = get_nav_menu(db, menu_id).await.unwrap().unwrap();

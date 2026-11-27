@@ -9,13 +9,14 @@
 //!
 //! A save is WordPress's `options.php`: each option the form sent goes through
 //! [`sanitize_option`], the rules the REST settings route also uses, and is stored in `options`.
-//! Every option is sanitized before any is written. Ruling R135 (interim for owner item O10):
-//! when `sanitize_option` refuses one, nothing is written: [`save_settings`] returns the errors
-//! by field, and the form comes back (422) with the typed values and WordPress's message under
-//! the field, such as "A structure tag is required when using custom permalinks." for a custom
-//! permalink structure with no `%tag%` (see [`super::field_errors`]; WordPress keeps the stored
-//! value and shows the message as a notice). Ignite's own checks come first and show on the form: a required value,
-//! a whole number, an email address, a URL, one of a select's or a lookup's choices. The
+//! Every option is sanitized before any is written. Ruling R135: when `sanitize_option` refuses
+//! one, nothing is written: [`save_settings`] returns the errors by field, and the form comes
+//! back (422) with the typed values and WordPress's message under each refused field, such as
+//! "A structure tag is required when using custom permalinks." for a custom permalink structure
+//! with no `%tag%` (Ignite's `ValidationError`, from [`RuntimeData::try_update_for`]; WordPress
+//! keeps the stored value and shows the message as a notice). Ignite's own checks come first
+//! and show on the form: a required value, a whole number, an email address, a URL, one of a
+//! select's or a lookup's choices. The
 //! title and tagline are stored escaped (`esc_html`) and shown decoded on the form and the
 //! site, as WordPress's `esc_attr` and `esc_html` do not encode an entity twice. The Reading
 //! screen keeps the post counts between 1 and 1000 (Ruling R136).
@@ -58,13 +59,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ignite_core::{
-    ColumnDef, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page, Row, RuntimeData,
-    RuntimeError, RuntimeFuture, RuntimeResource, Section,
+    ActingUser, ColumnDef, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page, Row,
+    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, ValidationError,
 };
 use orbit_orm::{Database, Error, Value as Sql, raw};
 use serde_json::{Value, json};
 
-use super::field_errors::refuse_field;
 use super::posts::{PostScreen, Refusal};
 use crate::content::{
     MetaError, OptionError, PostStatus, get_option, is_timezone, sanitize_option, set_option,
@@ -1444,6 +1444,41 @@ impl SettingsData {
     pub fn new(screen: SettingsScreen, services: SettingsServices) -> Self {
         Self { screen, services }
     }
+
+    /// Saves record `id` from `input` ([`save_settings`]): the record read again, or, when
+    /// `sanitize_option` refused a value, nothing saved and WordPress's message by field. A
+    /// refused option the form has no field for is a server error.
+    async fn save(
+        &self,
+        db: &Database,
+        id: i64,
+        input: Row,
+    ) -> Result<Result<Row, ValidationError>, Error> {
+        if id != SETTINGS_RECORD {
+            return Err(Error::NotFound { table: "options" });
+        }
+        let errors = save_settings(db, self.screen, &input, &self.services).await?;
+        if errors.is_empty() {
+            return read_settings(db, self.screen).await.map(Ok);
+        }
+        let reasons: Vec<String> = errors
+            .iter()
+            .map(|(field, message)| format!("{field}: {message}"))
+            .collect();
+        log::warn!(
+            "The {} screen was not saved: {}",
+            self.screen.slug(),
+            reasons.join("; ")
+        );
+        let fields = settings_fields(self.screen);
+        if errors
+            .keys()
+            .any(|field| !fields.iter().any(|f| f.name == *field))
+        {
+            return Err(refused_save(&reasons.join("; ")));
+        }
+        Ok(Err(ValidationError::with_messages(errors)))
+    }
 }
 
 impl RuntimeData for SettingsData {
@@ -1483,37 +1518,29 @@ impl RuntimeData for SettingsData {
         })
     }
 
-    /// Saves the screen ([`save_settings`]). Ruling R135: when `sanitize_option` refuses a value,
-    /// nothing is saved, and the form comes back (422) with the typed values and WordPress's
-    /// message under the refused field (see [`super::field_errors`]); when several are refused,
-    /// the first field's message shows, and every reason is logged.
+    /// Saves the screen without the panel's field messages: a refused value is a server error.
+    /// The panel calls [`try_update_for`](RuntimeData::try_update_for), which shows them.
     fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
         Box::pin(async move {
-            if id != SETTINGS_RECORD {
-                return Err(Error::NotFound { table: "options" });
+            match self.save(db, id, input).await? {
+                Ok(row) => Ok(row),
+                Err(refusal) => Err(refused_save(&refusal.to_string())),
             }
-            let errors = save_settings(db, self.screen, &input, &self.services).await?;
-            if let Some((field, message)) = errors.iter().next() {
-                let reasons: Vec<String> = errors
-                    .iter()
-                    .map(|(field, message)| format!("{field}: {message}"))
-                    .collect();
-                log::warn!(
-                    "The {} screen was not saved: {}",
-                    self.screen.slug(),
-                    reasons.join("; ")
-                );
-                let label = settings_fields(self.screen)
-                    .into_iter()
-                    .find(|f| f.name == *field)
-                    .map(|f| f.label);
-                return Err(match label {
-                    Some(label) => refuse_field(self.screen.slug(), field, &label, message),
-                    None => refused_save(&reasons.join("; ")),
-                });
-            }
-            read_settings(db, self.screen).await
         })
+    }
+
+    /// Saves the screen ([`save_settings`]). Ruling R135: when `sanitize_option` refuses a value,
+    /// nothing is saved, and the form comes back (422) with the typed values and WordPress's
+    /// message under each refused field, as Laravel's `ValidationException::withMessages()`;
+    /// every reason is logged.
+    fn try_update_for<'a>(
+        &'a self,
+        db: &'a Database,
+        _user: &'a ActingUser,
+        id: i64,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move { self.save(db, id, input).await })
     }
 
     /// Refuses: a settings screen's record is never deleted.

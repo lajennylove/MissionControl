@@ -122,7 +122,6 @@ use rocket::{Build, Data, Request, Response, Rocket};
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
-mod field_messages;
 mod locks;
 mod media;
 mod wordpress_theme;
@@ -383,7 +382,6 @@ pub(crate) async fn mount_panel(
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
-        .attach(field_messages::FieldMessages)
         .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, settings_routes())
         .mount("/", refused_routes())

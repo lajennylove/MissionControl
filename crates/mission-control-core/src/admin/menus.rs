@@ -22,12 +22,13 @@
 //!   `menu-item-parent-id`; a new item, which has no id yet, can name a new parent by its **row
 //!   number** (1 for the first row; 0 or blank for the top level). Drag-and-drop ordering is a
 //!   follow-up.
-//! - Ruling R135 (interim for owner item O10): everything is checked before anything is written.
+//! - Ruling R135: everything is checked before anything is written.
 //!   A row that links to nothing (a post that is missing, trashed, an auto-draft or of another
 //!   type; a term that is missing; a type the screen does not offer), or more than
 //!   [`MAX_MENU_ITEMS`] rows, refuses the whole save: nothing is written, and the form comes
-//!   back (422) with the typed rows and the reason under the items (see
-//!   [`super::field_errors`]). WordPress's screen only offers existing objects.
+//!   back (422) with the typed rows and the reason under the items (Ignite's `ValidationError`,
+//!   from [`RuntimeData::try_create_for`] and [`RuntimeData::try_update_for`]). WordPress's
+//!   screen only offers existing objects.
 //! - The writes: the items and the locations are saved in one transaction
 //!   ([`save_nav_menu`]). Creating the menu's term (New) or renaming it comes first, in its own
 //!   transaction, because the term API has no transaction-scoped create or update: if the items'
@@ -42,14 +43,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ignite_core::{
-    ColumnDef, Direction, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page, Row,
-    RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section,
+    ActingUser, ColumnDef, Direction, FieldDef, FieldKindDef, FormLayout, Group, ListQuery, Page,
+    Row, RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource, Section, ValidationError,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
 
-use super::field_errors::refuse_field;
 use super::posts::{PostScreen, Refusal};
+use super::settings::refused_save;
 use crate::content::{MetaError, Post, PostStatus, Taxonomy, Term, TermError, terms_by_term_id};
 use crate::front::escape_like;
 use crate::theme::{
@@ -427,7 +428,7 @@ impl NavMenusData {
         db: &Database,
         menu: Option<&Term>,
         input: &Row,
-    ) -> Result<MenuPlan, Error> {
+    ) -> Result<MenuPlan, Refused> {
         let locations = self
             .locations
             .iter()
@@ -487,11 +488,11 @@ impl NavMenusData {
         db: &Database,
         rows: &[Value],
         stored: &[StoredMenuItem],
-    ) -> Result<Vec<MenuItemInput>, Error> {
+    ) -> Result<Vec<MenuItemInput>, Refused> {
         if rows.len() > MAX_MENU_ITEMS {
             let reason = format!("A menu holds at most {MAX_MENU_ITEMS} items.");
             log::warn!("The menu was not saved: {reason}");
-            return Err(refuse_field(NAV_MENUS, ITEMS, ITEMS_LABEL, &reason));
+            return Err(Refused::Items(reason));
         }
         let mut read: Vec<RowItem> = rows.iter().map(RowItem::read).collect();
         resolve_wordpress_types(db, &mut read).await?;
@@ -538,7 +539,7 @@ impl NavMenusData {
                 offered.join(", "),
             );
             log::warn!("The menu was not saved: {reason}");
-            return Err(refuse_field(NAV_MENUS, ITEMS, ITEMS_LABEL, &reason));
+            return Err(Refused::Items(reason));
         }
         let parents = parent_rows(&read, stored);
         Ok(read
@@ -799,6 +800,89 @@ async fn item_author(db: &Database, menu: &Term) -> Result<i64, Error> {
     first.ok_or(Error::NotFound { table: "users" })
 }
 
+/// Why a save of the form is refused before anything is written (Ruling R135): a row of the
+/// items (the reason shows under the items), or the database's error.
+enum Refused {
+    Items(String),
+    Database(Error),
+}
+
+impl From<Error> for Refused {
+    fn from(e: Error) -> Self {
+        Refused::Database(e)
+    }
+}
+
+/// `plan`, with a refused row as the items field's message.
+fn checked(plan: Result<MenuPlan, Refused>) -> Result<Result<MenuPlan, ValidationError>, Error> {
+    match plan {
+        Ok(plan) => Ok(Ok(plan)),
+        Err(Refused::Items(reason)) => Ok(Err(ValidationError::with_messages([(ITEMS, reason)]))),
+        Err(Refused::Database(e)) => Err(e),
+    }
+}
+
+/// A save's row, or its refusal as a server error, for the data layer's calls without the panel.
+fn refused_as_error(saved: Result<Row, ValidationError>) -> Result<Row, Error> {
+    saved.map_err(|refusal| refused_save(&refusal.to_string()))
+}
+
+impl NavMenusData {
+    /// `wp_create_nav_menu`, then the locations and items of the form; a refused row writes
+    /// nothing and answers its message under the items.
+    async fn create_menu(
+        &self,
+        db: &Database,
+        input: Row,
+    ) -> Result<Result<Row, ValidationError>, Error> {
+        let name = input
+            .get(NAME)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let plan = match checked(self.plan(db, None, &input).await)? {
+            Ok(plan) => plan,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        let menu = create_nav_menu(db, &name).await.map_err(menu_error)?;
+        self.apply(db, &menu, &plan).await?;
+        self.row(db, menu.term_id)
+            .await?
+            .ok_or(Error::NotFound { table: "terms" })
+            .map(Ok)
+    }
+
+    /// `wp_update_nav_menu_object` for the name, then the locations and items; a refused row
+    /// writes nothing and answers its message under the items.
+    async fn update_menu(
+        &self,
+        db: &Database,
+        id: i64,
+        input: Row,
+    ) -> Result<Result<Row, ValidationError>, Error> {
+        let Some(mut menu) = get_nav_menu(db, id).await? else {
+            return Err(Error::NotFound { table: "terms" });
+        };
+        let plan = match checked(self.plan(db, Some(&menu), &input).await)? {
+            Ok(plan) => plan,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        if let Some(name) = input.get(NAME).and_then(Value::as_str)
+            && name.trim() != menu.name
+        {
+            menu = rename_nav_menu(db, &menu, name.trim())
+                .await
+                .map_err(menu_error)?;
+        }
+        self.apply(db, &menu, &plan).await?;
+        self.row(db, menu.term_id)
+            .await?
+            .ok_or(Error::NotFound { table: "terms" })
+            .map(Ok)
+    }
+}
+
 impl RuntimeData for NavMenusData {
     fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
         Box::pin(async move { self.list_page(db, query).await })
@@ -808,43 +892,35 @@ impl RuntimeData for NavMenusData {
         Box::pin(async move { self.row(db, id).await })
     }
 
-    /// `wp_create_nav_menu`, then the locations and items of the form.
+    /// [`create_menu`](NavMenusData::create_menu); a refused row is a server error. The panel
+    /// calls [`try_create_for`](RuntimeData::try_create_for), which shows it on the form.
     fn create<'a>(&'a self, db: &'a Database, input: Row) -> RuntimeFuture<'a, Row> {
-        Box::pin(async move {
-            let name = input
-                .get(NAME)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
-            let plan = self.plan(db, None, &input).await?;
-            let menu = create_nav_menu(db, &name).await.map_err(menu_error)?;
-            self.apply(db, &menu, &plan).await?;
-            self.row(db, menu.term_id)
-                .await?
-                .ok_or(Error::NotFound { table: "terms" })
-        })
+        Box::pin(async move { refused_as_error(self.create_menu(db, input).await?) })
     }
 
-    /// `wp_update_nav_menu_object` for the name, then the locations and items.
+    /// [`update_menu`](NavMenusData::update_menu); a refused row is a server error. The panel
+    /// calls [`try_update_for`](RuntimeData::try_update_for), which shows it on the form.
     fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
-        Box::pin(async move {
-            let Some(mut menu) = get_nav_menu(db, id).await? else {
-                return Err(Error::NotFound { table: "terms" });
-            };
-            let plan = self.plan(db, Some(&menu), &input).await?;
-            if let Some(name) = input.get(NAME).and_then(Value::as_str)
-                && name.trim() != menu.name
-            {
-                menu = rename_nav_menu(db, &menu, name.trim())
-                    .await
-                    .map_err(menu_error)?;
-            }
-            self.apply(db, &menu, &plan).await?;
-            self.row(db, menu.term_id)
-                .await?
-                .ok_or(Error::NotFound { table: "terms" })
-        })
+        Box::pin(async move { refused_as_error(self.update_menu(db, id, input).await?) })
+    }
+
+    fn try_create_for<'a>(
+        &'a self,
+        db: &'a Database,
+        _user: &'a ActingUser,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move { self.create_menu(db, input).await })
+    }
+
+    fn try_update_for<'a>(
+        &'a self,
+        db: &'a Database,
+        _user: &'a ActingUser,
+        id: i64,
+        input: Row,
+    ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
+        Box::pin(async move { self.update_menu(db, id, input).await })
     }
 
     /// `wp_delete_nav_menu`.
