@@ -1,6 +1,6 @@
 //! Each admin screen is gated by the capability WordPress checks for it: the post types by
-//! their `edit_posts` (`edit.php`), the media library by `upload_files` (and the whole post
-//! capability set, Ruling R115), Categories and Tags by `manage_categories`, Menus by
+//! their `edit_posts` (`edit.php`), the media library by `upload_files` (`upload.php`: an
+//! author has it, a contributor does not), Categories and Tags by `manage_categories`, Menus by
 //! `edit_theme_options`, the settings screens by `manage_options`, the Users screens by
 //! `list_users` and the Roles screen by `promote_users`. A user without the capability sees no
 //! sidebar entry for the screen and is refused it (403). The capabilities are the roles' stored
@@ -34,7 +34,8 @@ fn allowed(role: &str) -> [bool; 9] {
     match role {
         "administrator" => [true; 9],
         "editor" => [true, true, true, true, false, false, false, false, false],
-        "author" | "contributor" => [true, false, false, false, false, false, false, false, false],
+        "author" => [true, false, true, false, false, false, false, false, false],
+        "contributor" => [true, false, false, false, false, false, false, false, false],
         _ => [false; 9],
     }
 }

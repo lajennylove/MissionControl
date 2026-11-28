@@ -24,10 +24,14 @@
 //! - Ignite's create is refused: a file is added by uploading it (the `mission-control` crate
 //!   answers `<mount>/attachment/new` with an upload page, Ruling R129).
 //!
-//! As the post type screens ([`super::posts`]), the data layer is never told who is signed in,
-//! so it writes as sent (no kses). It must only be served behind the admin's authorization:
-//! [`attachment_post_type`]'s whole capability set and `unfiltered_html` for the screen, and
-//! `edit_post` or `delete_post` on the attachment in the URL (Ruling R115).
+//! Who may use it, as WordPress decides: the list (`upload.php`) and the upload page
+//! (`media-new.php`) need `upload_files`; editing or deleting an attachment needs `edit_post`
+//! or `delete_post` on it (`map_meta_cap`, with the `post` capabilities: an author edits and
+//! deletes their own files, not others'). [`AttachmentPolicy`] decides each action and each
+//! row's Edit and Delete, and the admin's fairing checks the same in the URL. A save for a user
+//! without `unfiltered_html` runs kses on the title, caption and description, as `edit_post`
+//! does (`kses_init_filters`); the list leaves out private attachments for a user without
+//! `read_private_posts` (`wp_edit_attachments_query_vars`).
 //!
 //! # The picker and uploads (Ruling R128)
 //!
@@ -56,14 +60,15 @@ use std::sync::Arc;
 
 use chrono::{Duration, FixedOffset, NaiveDateTime};
 use ignite_core::{
-    ColumnDef, Direction, FieldDef as IgniteFieldDef, FieldKindDef, ListQuery, MediaItem,
-    MediaLibrary, Page, Row, RuntimeData, RuntimeError, RuntimeFuture, RuntimeResource,
+    ActingUser, ColumnDef, Direction, FieldDef as IgniteFieldDef, FieldKindDef, ListQuery,
+    MediaItem, MediaLibrary, Page, Policy, Row, RuntimeData, RuntimeError, RuntimeFuture,
+    RuntimeResource,
 };
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Map, Value, json};
 
-use super::posts::{site_pages, trash_status};
-use crate::content::{MetaError, Post, PostStatus, get_option};
+use super::posts::{PostScreen, authorize_post_screen, site_pages, trash_status};
+use crate::content::{MetaError, Post, PostFields, PostStatus, get_option};
 use crate::front::{escape_like, search_terms, site_address};
 use crate::media::{
     Attachment, AttachmentError, AttachmentMetadata, ImageSizes, Storage, UploadError,
@@ -72,7 +77,7 @@ use crate::media::{
 };
 use crate::rest::media::UPLOADS_PATH;
 use crate::text::strip_all_tags;
-use crate::types::PostTypeDef;
+use crate::types::{Access, PostTypeDef};
 use crate::users::{Object, PostContext, PostTypeCaps, UserCaps, can, has_cap};
 
 /// The post type of the media library, and the slug of its screen.
@@ -140,6 +145,7 @@ pub fn attachment_post_type() -> PostTypeDef {
 /// admin's authorization.
 pub struct AttachmentData {
     storage: Arc<dyn Storage>,
+    access: Access,
 }
 
 impl fmt::Debug for AttachmentData {
@@ -149,16 +155,17 @@ impl fmt::Debug for AttachmentData {
 }
 
 impl AttachmentData {
-    /// The rows of the attachments whose files are in `storage`, which Delete removes them from.
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+    /// The rows of the attachments whose files are in `storage`, which Delete removes them from,
+    /// for users whose capabilities and kses `access` gives.
+    pub fn new(storage: Arc<dyn Storage>, access: Access) -> Self {
+        Self { storage, access }
     }
 }
 
 /// The resource of the media library screen at `<mount>/attachment`: the form's title,
 /// alternative text, caption and description, and the list's title, file, type, author and
-/// date; see the [module](self).
-pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
+/// date; see the [module](self). `access` reads the acting user's capabilities and runs kses.
+pub fn attachment_resource(storage: Arc<dyn Storage>, access: Access) -> RuntimeResource {
     let field = |name: &str, label: &str, kind: FieldKindDef| IgniteFieldDef {
         name: name.to_owned(),
         label: label.to_owned(),
@@ -171,8 +178,12 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
         sortable,
         searchable,
     };
-    let mut resource =
-        RuntimeResource::new(ATTACHMENT, "Media", "Media", AttachmentData::new(storage));
+    let mut resource = RuntimeResource::new(
+        ATTACHMENT,
+        "Media",
+        "Media",
+        AttachmentData::new(storage, access),
+    );
     resource.fields = vec![
         field(TITLE, "Title", FieldKindDef::Text),
         field(ALT_FIELD, "Alternative Text", FieldKindDef::Text),
@@ -196,17 +207,15 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
     resource.navigation_create_item = true;
     resource.navigation_create_label = Some(super::navigation::CREATE_LABEL.to_owned());
     // `upload.php` and `media-new.php` need `upload_files`; editing and deleting a file are the
-    // post's `edit_post` and `delete_post`, which the admin's fairing checks. The library's data
-    // is not user-aware, so its screens also need the whole post capability set (Ruling R115):
-    // `edit_others_posts` keeps the entry from a user the fairing would refuse.
+    // post's `edit_post` and `delete_post` on it ([`AttachmentPolicy`]), which need at least
+    // `edit_posts` and `delete_posts` (an author's own files).
     super::ScreenCaps {
-        view: "upload_files",
-        create: "upload_files",
+        view: UPLOAD_FILES,
+        create: UPLOAD_FILES,
         update: "edit_posts",
         delete: "delete_posts",
     }
     .apply(resource)
-    .access_ability("edit_others_posts")
 }
 
 /// Registers [`attachment_resource`] on Ignite's runtime registry.
@@ -214,8 +223,77 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
 /// # Errors
 ///
 /// Ignite's refusal when another resource or a panel page has the slug `attachment`.
-pub fn register_attachment_resource(storage: Arc<dyn Storage>) -> Result<(), RuntimeError> {
-    ignite_core::register_runtime(attachment_resource(storage))
+pub fn register_attachment_resource(
+    storage: Arc<dyn Storage>,
+    access: Access,
+) -> Result<(), RuntimeError> {
+    ignite_core::register_runtime(attachment_resource(storage, access.clone()))?;
+    ignite_core::register_policy(ATTACHMENT, AttachmentPolicy::new(access));
+    Ok(())
+}
+
+/// The policy of the media library's screen, as WordPress decides for attachments: the list
+/// and the upload page need `upload_files` (Ignite's abilities check it first, so they are
+/// allowed here); seeing, editing and saving an attachment need `edit_post` on it, and Delete
+/// `delete_post` (`map_meta_cap`, with the `post` capabilities).
+pub struct AttachmentPolicy {
+    access: Access,
+}
+
+impl AttachmentPolicy {
+    /// The policy, reading users' capabilities through `access`.
+    pub fn new(access: Access) -> Self {
+        Self { access }
+    }
+
+    /// Whether `user` may make the request `screen` on the attachment `record`.
+    async fn allows(
+        &self,
+        db: &Database,
+        user: &ActingUser,
+        record: &Row,
+        screen: fn(i64) -> PostScreen,
+    ) -> Result<bool, Error> {
+        // A record without an id is no attachment: refused.
+        let Some(id) = record.get("id").and_then(Value::as_i64) else {
+            return Ok(false);
+        };
+        let caps = self.access.caps(db, user).await?;
+        Ok(
+            authorize_post_screen(db, &caps, &attachment_post_type(), screen(id))
+                .await?
+                .is_none(),
+        )
+    }
+}
+
+impl Policy for AttachmentPolicy {
+    fn view<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.allows(db, user, record, PostScreen::Edit))
+    }
+
+    fn update<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.allows(db, user, record, PostScreen::Update))
+    }
+
+    fn delete<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        record: &'a Row,
+    ) -> RuntimeFuture<'a, bool> {
+        Box::pin(self.allows(db, user, record, PostScreen::Delete))
+    }
 }
 
 /// Attachment `id`, when there is one with the status the screen lists.
@@ -493,13 +571,13 @@ impl AttachmentData {
     }
 
     /// One page of the screen's list.
-    async fn list_page(&self, db: &Database, query: &ListQuery) -> Result<Page<Row>, Error> {
-        let (filter, binds) = attachment_filter(
-            &[PostStatus::Inherit, PostStatus::Private],
-            query.search.as_deref(),
-            None,
-            None,
-        );
+    async fn list_page(
+        &self,
+        db: &Database,
+        query: &ListQuery,
+        statuses: &[PostStatus],
+    ) -> Result<Page<Row>, Error> {
+        let (filter, binds) = attachment_filter(statuses, query.search.as_deref(), None, None);
         let date = "COALESCE(p.published_at, p.modified_at)";
         let order = match &query.sort {
             Some((key, direction)) => {
@@ -556,8 +634,15 @@ impl AttachmentData {
     /// Saves the form: each field sent replaces the stored value (a cleared one is empty), each
     /// one not sent keeps it. A title left empty is the file's name without its extension, as
     /// `media_handle_upload` names an upload (`photo` for `2026/11/photo.jpg`). The alternative text is stored without tags, as `edit_post`
-    /// strips them (`wp_strip_all_tags`); the other fields as sent.
-    async fn update_row(&self, db: &Database, id: i64, input: Row) -> Result<Row, Error> {
+    /// strips them (`wp_strip_all_tags`); the other fields as sent, or through kses for `user`
+    /// when they lack `unfiltered_html`.
+    async fn update_row(
+        &self,
+        db: &Database,
+        id: i64,
+        input: Row,
+        user: Option<&UserCaps>,
+    ) -> Result<Row, Error> {
         let Some(current) = listed_attachment(db, id).await? else {
             return Err(Error::NotFound { table: "posts" });
         };
@@ -569,8 +654,30 @@ impl AttachmentData {
         let alt = strip_all_tags(&value(ALT_FIELD, current.alt))
             .trim()
             .to_owned();
-        let caption = value(CAPTION, current.caption);
-        let description = value(DESCRIPTION, current.description);
+        let mut caption = value(CAPTION, current.caption);
+        let mut description = value(DESCRIPTION, current.description);
+        if let Some(user) = user.filter(|user| !has_cap(user, "unfiltered_html")) {
+            let fields = self
+                .access
+                .kses
+                .filter(
+                    user,
+                    PostFields {
+                        title,
+                        content: description,
+                        excerpt: caption,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    Error::Database(sqlx::Error::Protocol(format!(
+                        "the admin's kses filter refused the save: {e}"
+                    )))
+                })?;
+            title = fields.title;
+            description = fields.content;
+            caption = fields.excerpt;
+        }
         update_attachment_details(db, id, &title, &alt, &caption, &description)
             .await
             .map_err(attachment_error)?;
@@ -593,7 +700,29 @@ impl AttachmentData {
 
 impl RuntimeData for AttachmentData {
     fn list<'a>(&'a self, db: &'a Database, query: &'a ListQuery) -> RuntimeFuture<'a, Page<Row>> {
-        Box::pin(async move { self.list_page(db, query).await })
+        Box::pin(async move {
+            self.list_page(db, query, &[PostStatus::Inherit, PostStatus::Private])
+                .await
+        })
+    }
+
+    /// The list for `user`: private attachments only with `read_private_posts`, as
+    /// `wp_edit_attachments_query_vars` lists them.
+    fn list_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        query: &'a ListQuery,
+    ) -> RuntimeFuture<'a, Page<Row>> {
+        Box::pin(async move {
+            let caps = self.access.caps(db, user).await?;
+            let statuses: &[PostStatus] = if has_cap(&caps, "read_private_posts") {
+                &[PostStatus::Inherit, PostStatus::Private]
+            } else {
+                &[PostStatus::Inherit]
+            };
+            self.list_page(db, query, statuses).await
+        })
     }
 
     fn find<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, Option<Row>> {
@@ -612,7 +741,22 @@ impl RuntimeData for AttachmentData {
     }
 
     fn update<'a>(&'a self, db: &'a Database, id: i64, input: Row) -> RuntimeFuture<'a, Row> {
-        Box::pin(async move { self.update_row(db, id, input).await })
+        Box::pin(async move { self.update_row(db, id, input, None).await })
+    }
+
+    /// The save for `user` (the policy has checked `edit_post`): kses on the title, caption and
+    /// description for a user without `unfiltered_html`, as `edit_post` filters them.
+    fn update_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        id: i64,
+        input: Row,
+    ) -> RuntimeFuture<'a, Row> {
+        Box::pin(async move {
+            let caps = self.access.caps(db, user).await?;
+            self.update_row(db, id, input, Some(&caps)).await
+        })
     }
 
     fn delete<'a>(&'a self, db: &'a Database, id: i64) -> RuntimeFuture<'a, u64> {

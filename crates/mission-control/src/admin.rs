@@ -40,8 +40,8 @@
 //!   checks the New screen and its save (Ignite's create) with the type's `edit_posts`, with
 //!   WordPress's 403 messages ([`authorize_post_screen`]), and answers the form and the save of
 //!   a post in the trash with `post.php`'s 409 message; on the media library it checks every
-//!   screen (the type's whole capability set and `unfiltered_html`, then the post's), and
-//!   refuses Ignite's create, as files are uploaded. A visitor is let through, and Ignite sends
+//!   screen (`upload_files`, then `edit_post` or `delete_post` on the attachment), and refuses
+//!   Ignite's create, as files are uploaded. A visitor is let through, and Ignite sends
 //!   them to its sign-in page. Ignite's own pages are not touched.
 //!   It fails closed: a post type whose Ignite resource this app did not register (another app
 //!   in the process holds it, or code took the slug first) answers 503, logged; and when this
@@ -58,10 +58,11 @@
 //! - The classic editor for the rich text fields (Task 6.3): the editor script at
 //!   [`editor_script_url`] is registered with Ignite, whose forms then load it.
 //! - The media library (Task 6.4, Rulings R127 to R129, see the `media` submodule): the screen of
-//!   `attachment` at `/mc-admin/attachment`, authorized by the same fairing with the
-//!   `attachment` type's capabilities (those of `post`) and `unfiltered_html`, and `edit_post`
-//!   or `delete_post` on the attachment; its upload page at `/mc-admin/attachment/new`; the
-//!   picker's endpoints `/mc-admin/async-upload.php` and `/mc-admin/admin-ajax.php`; and the
+//!   `attachment` at `/mc-admin/attachment`, authorized by the same fairing with
+//!   `upload_files` (`upload.php`, `media-new.php`), and `edit_post` or `delete_post` on the
+//!   attachment (`map_meta_cap`: an author edits and deletes their own files); its upload
+//!   page at `/mc-admin/attachment/new`; the picker's endpoints `/mc-admin/async-upload.php`
+//!   and `/mc-admin/admin-ajax.php`; and the
 //!   media library of Ignite's Image, File and Gallery fields.
 //!
 //! - The settings screens (Task 6.5, Ruling R132): General, Writing, Reading, Discussion, Media,
@@ -114,8 +115,8 @@ use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_typ
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
     TERM_SCREENS, attachment_post_type, authorize_menus_screen, authorize_post_screen,
-    authorize_settings_screen, authorize_term_screen, may_use_post_screens,
-    register_nav_menus_resource, register_settings_resources, register_term_resources,
+    authorize_settings_screen, authorize_term_screen, may_upload, register_nav_menus_resource,
+    register_settings_resources, register_term_resources,
 };
 use mission_control_core::admin::{dashboard, navigation};
 use mission_control_core::config::Config;
@@ -343,7 +344,7 @@ pub(crate) async fn mount_panel(
     }
     let resources = PostTypeResources::new(Arc::clone(&registry))
         .with_page_templates(theme.page_templates())
-        .with_access(access);
+        .with_access(access.clone());
     let menu_types = menu_object_types(&resources, &registry);
     let menu_sources = menus::menu_sources(&menu_types, &resources, &registry);
     let menus = match register_nav_menus_resource(theme, menu_types) {
@@ -374,7 +375,7 @@ pub(crate) async fn mount_panel(
     }
     // The media library (Task 6.4): its screen, upload page and endpoints, and Ignite's media
     // fields' library.
-    let (rocket, media_screen) = media::mount_media(rocket);
+    let (rocket, media_screen) = media::mount_media(rocket, access);
     // Each screen's abilities are WordPress capabilities (a custom post type's `edit_books`,
     // ...): registered as permissions, so the Roles screen offers them.
     let mut slugs: Vec<String> = resources.registered();
@@ -687,9 +688,10 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
     }
     // The media library's upload page is `media-new.php`: its refusal is WordPress's for it.
     let upload_page = slug == media::ATTACHMENT && rest == ["new"];
-    // The media library's screens stay open only to users with the type's whole capability set
-    // and `unfiltered_html` (Ruling R115): its data layer is not user-aware.
-    if slug == media::ATTACHMENT && !may_use_post_screens(&caps, &def) {
+    // The media library (`upload.php`, `media-new.php`) needs `upload_files`; an attachment's
+    // edit form, save and Delete need `edit_post` or `delete_post` on it, as for any post (an
+    // author's own files).
+    if slug == media::ATTACHMENT && !may_upload(&caps) {
         let refusal = match screen {
             _ if upload_page => Refusal::UploadFiles,
             PostScreen::New => Refusal::NewScreen,
@@ -697,8 +699,15 @@ async fn refusal(request: &Request<'_>) -> Option<AdminRefusal> {
         };
         return Some(AdminRefusal::Refused(refusal));
     }
+    if slug == media::ATTACHMENT
+        && matches!(
+            screen,
+            PostScreen::List | PostScreen::New | PostScreen::Other
+        )
+    {
+        return None;
+    }
     match authorize_post_screen(&db, &caps, &def, screen).await {
-        Ok(Some(_)) if upload_page => Some(AdminRefusal::Refused(Refusal::UploadFiles)),
         // The other refusals of a post type's form are the policy's (403, or 404 for a post
         // outside the user's list).
         Ok(Some(refused)) if edit && slug != media::ATTACHMENT => {

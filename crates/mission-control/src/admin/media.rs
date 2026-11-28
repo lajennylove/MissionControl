@@ -48,7 +48,7 @@ use mission_control_core::admin::media::{
     register_attachment_resource, size_format, upload_to_library,
 };
 use mission_control_core::media::{ImageSizes, Storage, validate};
-use mission_control_core::types::PostTypeResources;
+use mission_control_core::types::{Access, PostTypeResources};
 use mission_control_core::users::{PostTypeCaps, UserCaps};
 use orbit_orm::Database;
 use rocket::fairing::{Fairing, Info, Kind};
@@ -85,12 +85,12 @@ pub(crate) struct MediaScreen {
 /// on `rocket`; see the [module](self). The screen is not registered when Ignite already has a
 /// resource at `attachment` (another app in the process): the fairing then refuses it (fail
 /// closed), logged.
-pub(crate) fn mount_media(rocket: Rocket<Build>) -> (Rocket<Build>, MediaScreen) {
+pub(crate) fn mount_media(rocket: Rocket<Build>, access: Access) -> (Rocket<Build>, MediaScreen) {
     let Some(storage) = rocket.state::<Arc<dyn Storage>>().cloned() else {
         log::error!("The media library is not mounted: the uploads' storage is missing");
         return (rocket, MediaScreen { registered: false });
     };
-    let registered = match register_attachment_resource(storage) {
+    let registered = match register_attachment_resource(storage, access) {
         Ok(()) => true,
         Err(e) => {
             log::error!(

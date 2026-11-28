@@ -969,55 +969,16 @@ async fn flow(scratch: &ScratchDatabase) {
     );
     sign_out(&client).await;
 
-    // An author may upload (upload_files) but not use the screens (Ruling R127), nor attach to
-    // the editor's post.
-    sign_in(&client, &author).await;
-    let csrf = dashboard_token(&client).await;
-    let response = upload(&client, Some(&csrf), &[], Some(("mine.jpg", &jpeg))).await;
-    assert_eq!(json_of(response).await.0, Status::Ok);
-    let response = upload(
+    // Boxed: the flow's future is too large for the test thread's stack otherwise.
+    Box::pin(an_author_manages_their_own_media(
         &client,
-        Some(&csrf),
-        &[("post_id", &post_id_text)],
-        Some(("theirs.jpg", &jpeg)),
-    )
+        &db,
+        &author,
+        &jpeg,
+        lighthouse,
+        &post_id_text,
+    ))
     .await;
-    let (status, body, _) = json_of(response).await;
-    assert_eq!(status, Status::Forbidden);
-    assert_eq!(
-        body["data"]["message"],
-        "Sorry, you are not allowed to attach files to this post."
-    );
-    for uri in [
-        "/mc-admin/attachment".to_owned(),
-        "/mc-admin/attachment/new".to_owned(),
-        format!("/mc-admin/attachment/{lighthouse}/edit"),
-    ] {
-        let (status, body) = get(&client, &uri).await;
-        assert_eq!(status, Status::Forbidden, "{uri}: {body}");
-        if uri.ends_with("/new") {
-            // `media-new.php`'s refusal.
-            assert!(
-                body.contains("Sorry, you are not allowed to upload files."),
-                "{uri}: {body}"
-            );
-        }
-    }
-    let response = post(
-        &client,
-        &format!("/mc-admin/attachment/{lighthouse}/delete"),
-        &[("_token", &csrf)],
-    )
-    .await;
-    assert_eq!(response.status(), Status::Forbidden);
-    assert!(
-        Post::query()
-            .find(&*db, lighthouse)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    sign_out(&client).await;
 
     // A subscriber may not upload or list.
     sign_in(&client, &subscriber).await;
@@ -1035,7 +996,19 @@ async fn flow(scratch: &ScratchDatabase) {
         .dispatch()
         .await;
     assert_eq!(json_of(response).await.0, Status::Forbidden);
+    for uri in ["/mc-admin/attachment", "/mc-admin/attachment/new"] {
+        let (status, body) = get(&client, uri).await;
+        assert_eq!(status, Status::Forbidden, "{uri}: {body}");
+    }
+    let response = client
+        .post("/mc-admin/attachment/new")
+        .header(multipart_type())
+        .body(multipart(&[("_token", &csrf)], Some(("nope.jpg", &jpeg))))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Forbidden);
     assert_eq!(attachments(&db).await, before);
+    sign_out(&client).await;
 
     // Fail closed: a second app in the process finds Ignite's `attachment` taken by the first;
     // it does not serve the media screens, and refuses them instead of letting Ignite's coarse
@@ -1124,4 +1097,126 @@ async fn on_sqlite() {
         .await;
     assert_eq!(response.status(), Status::ServiceUnavailable);
     db.close().await;
+}
+
+/// An author (upload_files) uploads, lists, edits and deletes their own files, as `upload.php`,
+/// `media-new.php` and `map_meta_cap`'s `edit_post` and `delete_post` let them; not another
+/// user's file (`lighthouse`), nor attach to the editor's post (`post_id`).
+async fn an_author_manages_their_own_media(
+    client: &Client,
+    db: &Database,
+    author: &str,
+    jpeg: &[u8],
+    lighthouse: i64,
+    post_id_text: &str,
+) {
+    sign_in(client, author).await;
+    let csrf = dashboard_token(client).await;
+    let (_, dashboard) = get(client, "/mc-admin").await;
+    assert!(
+        dashboard.contains("href=\"/mc-admin/attachment\""),
+        "the Media entry: {dashboard}"
+    );
+    let response = upload(client, Some(&csrf), &[], Some(("mine.jpg", jpeg))).await;
+    let (status, body, _) = json_of(response).await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let mine = body["data"]["id"].as_i64().expect("the upload's id");
+    let response = upload(
+        client,
+        Some(&csrf),
+        &[("post_id", post_id_text)],
+        Some(("theirs.jpg", jpeg)),
+    )
+    .await;
+    let (status, body, _) = json_of(response).await;
+    assert_eq!(status, Status::Forbidden);
+    assert_eq!(
+        body["data"]["message"],
+        "Sorry, you are not allowed to attach files to this post."
+    );
+    let (status, page) = get(client, "/mc-admin/attachment/new").await;
+    assert_eq!(status, Status::Ok, "{page}");
+    assert!(page.contains("Drop files to upload"), "{page}");
+    let response = client
+        .post("/mc-admin/attachment/new")
+        .header(multipart_type())
+        .body(multipart(
+            &[("_token", &csrf)],
+            Some(("Author-Shot.jpg", jpeg)),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    let to = header(&response, "Location");
+    let shot: i64 = to
+        .strip_prefix("/mc-admin/attachment/")
+        .and_then(|rest| rest.strip_suffix("/edit"))
+        .unwrap_or_else(|| panic!("to the edit form: {to}"))
+        .parse()
+        .unwrap();
+    // The list shows every file, with Edit on the author's own only.
+    let (status, list) = get(client, "/mc-admin/attachment").await;
+    assert_eq!(status, Status::Ok, "{list}");
+    let (_, list) = get(client, "/mc-admin/attachment?q=Author-Shot").await;
+    assert!(
+        list.contains(&format!("/mc-admin/attachment/{shot}/edit")),
+        "{list}"
+    );
+    let (_, list) = get(client, "/mc-admin/attachment?q=Lighthouse").await;
+    assert!(list.contains("Lighthouse"), "{list}");
+    assert!(
+        !list.contains(&format!("/mc-admin/attachment/{lighthouse}/edit")),
+        "{list}"
+    );
+    let (status, form_page) = get(client, &format!("/mc-admin/attachment/{shot}/edit")).await;
+    assert_eq!(status, Status::Ok, "{form_page}");
+    // An author has no `unfiltered_html`: the save runs kses, as `edit_post` does.
+    let response = post(
+        client,
+        &format!("/mc-admin/attachment/{shot}"),
+        &[
+            ("_token", &csrf),
+            ("title", "My shot"),
+            ("caption", "Taken <em>today</em>"),
+            ("description", "<p>Mine</p><script>alert(1)</script>"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    let saved = Post::query().find(db, shot).await.unwrap().unwrap();
+    assert_eq!(saved.title, "My shot");
+    assert_eq!(saved.excerpt, "Taken <em>today</em>");
+    assert!(saved.content.contains("<p>Mine</p>"), "{}", saved.content);
+    assert!(!saved.content.contains("<script"), "{}", saved.content);
+    // Another user's file: no edit form, no save, no Delete.
+    let (status, body) = get(client, &format!("/mc-admin/attachment/{lighthouse}/edit")).await;
+    assert_eq!(status, Status::Forbidden, "{body}");
+    let response = post(
+        client,
+        &format!("/mc-admin/attachment/{lighthouse}"),
+        &[("_token", &csrf), ("title", "Taken over")],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Forbidden);
+    let response = post(
+        client,
+        &format!("/mc-admin/attachment/{lighthouse}/delete"),
+        &[("_token", &csrf)],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Forbidden);
+    let kept = Post::query().find(db, lighthouse).await.unwrap().unwrap();
+    assert_ne!(kept.title, "Taken over");
+    // The author deletes their own files.
+    for id in [shot, mine] {
+        let response = post(
+            client,
+            &format!("/mc-admin/attachment/{id}/delete"),
+            &[("_token", &csrf)],
+        )
+        .await;
+        assert_eq!(response.status(), Status::SeeOther, "{id}");
+        assert!(Post::query().find(db, id).await.unwrap().is_none(), "{id}");
+    }
+    sign_out(client).await;
 }

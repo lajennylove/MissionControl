@@ -20,6 +20,7 @@ use mission_control_core::content::{
 };
 use mission_control_core::media::{ImageSizes, LocalStorage, Storage, validate};
 use mission_control_core::migrations::migrator;
+use mission_control_core::types::Access;
 use mission_control_core::users::{AUTHOR, EDITOR, PostTypeCaps, SUBSCRIBER, UserCaps};
 use mission_control_testing::{create_users_table, database, unique_email};
 use orbit_orm::{Database, Model, raw};
@@ -156,7 +157,7 @@ async fn the_screen_lists_edits_and_deletes_attachments() {
     let trashed = post(db, editor_id, "attachment", PostStatus::Trash).await;
     let page = post(db, editor_id, "page", PostStatus::Publish).await;
 
-    let resource = attachment_resource(Arc::clone(&storage));
+    let resource = attachment_resource(Arc::clone(&storage), Access::default());
     assert_eq!(resource.slug, "attachment");
     let fields: Vec<&str> = resource.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(fields, ["title", "alt", "caption", "description"]);

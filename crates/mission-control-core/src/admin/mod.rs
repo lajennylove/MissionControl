@@ -19,8 +19,8 @@ pub mod settings;
 pub mod terms;
 
 pub use media::{
-    ATTACHMENT, AttachmentData, AttachmentPage, AttachmentQuery, Attachments, UploadRefusal,
-    attachment_for_js, attachment_post_type, attachment_resource, may_upload,
+    ATTACHMENT, AttachmentData, AttachmentPage, AttachmentPolicy, AttachmentQuery, Attachments,
+    UploadRefusal, attachment_for_js, attachment_post_type, attachment_resource, may_upload,
     prepare_attachment_for_js, query_attachments, register_attachment_resource, upload_to_library,
 };
 pub use menus::{
