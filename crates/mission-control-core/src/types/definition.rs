@@ -2427,6 +2427,7 @@ fn acf_type(kind: &FieldKindDef) -> Option<&'static str> {
         FieldKindDef::Email => "email",
         FieldKindDef::Url => "url",
         FieldKindDef::Radio(_) => "radio",
+        FieldKindDef::CheckboxList(_) => "checkbox",
         FieldKindDef::Color => "color_picker",
         FieldKindDef::Image => "image",
         FieldKindDef::File => "file",
