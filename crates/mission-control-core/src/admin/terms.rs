@@ -36,8 +36,10 @@
 //!   and editors hold `manage_categories`.
 //!
 //! - The custom taxonomies in use (stored in the Taxonomies manager, or registered in code or by
-//!   a plugin) get the same screen at `/mc-admin/<taxonomy>`, under Posts after Categories and
-//!   Tags, with their labels and capabilities ([`TaxonomyScreens`], Task 5.7).
+//!   a plugin) get the same screen at `/mc-admin/<taxonomy>`, with their labels and capabilities
+//!   ([`TaxonomyScreens`], Task 5.7), listed under the post type they are attached to, as ACF
+//!   Pro's taxonomies are (it passes `object_type` to `register_taxonomy`, and WordPress's
+//!   `wp-admin/menu.php` adds the term screen to that post type's submenu).
 //!
 //! Not served yet, because Ignite 0.6.3 has no list bulk actions: WordPress's bulk Delete.
 
@@ -60,7 +62,7 @@ use crate::content::{
 };
 use crate::front::escape_like;
 use crate::rest::{KsesLimiter, id_of};
-use crate::types::{Access, Registry, TaxonomyDef};
+use crate::types::{Access, Registry, ShowInMenu, TaxonomyDef};
 use crate::users::{Object, TaxonomyCaps, TermContext, UserCaps, can, map_meta_cap};
 
 /// The slug of the Categories screen: the taxonomy's name, as `edit-tags.php?taxonomy=category`.
@@ -188,9 +190,16 @@ struct TermScreen {
 }
 
 /// The term screen of a stored or registered custom taxonomy `def` (Task 5.7, design gap M5),
-/// as `edit-tags.php?taxonomy=genre`: at `/mc-admin/<taxonomy>`, under Posts after Categories
-/// and Tags (at `sort`), with the taxonomy's labels and capabilities.
-pub fn custom_terms_resource(def: &TaxonomyDef, kses: KsesLimiter, sort: i32) -> RuntimeResource {
+/// as `edit-tags.php?taxonomy=genre`: at `/mc-admin/<taxonomy>`, with the taxonomy's labels and
+/// capabilities, listed at `sort` under the post type screen `parent` (see
+/// [`term_screen_parent`]), or, with no parent, at the top level of the Content group, last
+/// ([`navigation::NOT_IN_MENU`]), as a post type outside the menu is listed.
+pub fn custom_terms_resource(
+    def: &TaxonomyDef,
+    kses: KsesLimiter,
+    sort: i32,
+    parent: Option<&str>,
+) -> RuntimeResource {
     let title = if def.labels.name.is_empty() {
         def.slug.clone()
     } else {
@@ -211,10 +220,37 @@ pub fn custom_terms_resource(def: &TaxonomyDef, kses: KsesLimiter, sort: i32) ->
         title,
         singular,
         parent_label,
-        sort,
+        sort: if parent.is_some() {
+            sort
+        } else {
+            navigation::NOT_IN_MENU
+        },
         caps: def.caps(),
     };
-    screen_resource(&def.to_taxonomy(), screen, kses)
+    let mut resource = screen_resource(&def.to_taxonomy(), screen, kses);
+    // In the Content group whatever its sort, as the post types it is listed under are.
+    resource.navigation_group = Some(navigation::CONTENT.to_owned());
+    resource.navigation_parent_item = parent.map(str::to_owned);
+    resource
+}
+
+/// The post type screen a custom taxonomy's term screen is listed under, as ACF Pro places its
+/// taxonomies: ACF registers each with `register_taxonomy( $key, $object_type, $args )`
+/// (`includes/post-types/class-acf-taxonomy.php`) and adds no menu page of its own, so
+/// WordPress's `wp-admin/menu.php` lists the term screen in the submenu of each post type in
+/// `object_type` that is in the menu (`show_in_menu` true), and under Media for `attachment`,
+/// when the taxonomy's `show_ui` and `show_in_menu` are on. Ignite lists an entry under one
+/// parent, so this is the first of those post types, in the taxonomy's `object_type` order;
+/// `menu_types` are the post type screens in the menu. `None` when the taxonomy is not in the
+/// menu or none of its post types is, where WordPress lists it nowhere.
+pub fn term_screen_parent(def: &TaxonomyDef, menu_types: &[String]) -> Option<String> {
+    if !def.show_in_menu.unwrap_or_else(|| def.effective_show_ui()) {
+        return None;
+    }
+    def.object_type
+        .iter()
+        .find(|post_type| menu_types.contains(post_type))
+        .cloned()
 }
 
 /// The term screen `screen` of `taxonomy`.
@@ -271,8 +307,8 @@ fn screen_resource(taxonomy: &Taxonomy, screen: TermScreen, kses: KsesLimiter) -
     resource.hide_default_delete_when =
         Some(ListFilter::new().where_eq(DEFAULT_TERM_KEY, Value::Bool(true)));
     navigation::place(&mut resource, screen.sort, navigation::POST_ICON);
-    // Categories, Tags and the custom taxonomies are in Posts' submenu (WordPress's
-    // `edit.php`), in the Content group with it.
+    // Categories and Tags are in Posts' submenu (WordPress's `edit.php`), in the Content group
+    // with it; a custom taxonomy's parent is set by `custom_terms_resource`.
     resource.navigation_parent_item = Some(navigation::POSTS_PARENT.to_owned());
     // `edit-tags.php` needs the taxonomy's `manage_terms`, a new term and an edit its
     // `edit_terms`, and Delete its `delete_terms`, each as `map_meta_cap` maps it to a
@@ -322,13 +358,15 @@ pub fn register_term_resources(access: &Access) -> (Vec<&'static str>, Vec<Runti
 }
 
 /// The term screens of the custom taxonomies in use (Task 5.7, design gap M5): each one of the
-/// [`Registry`] whose `show_ui` is on gets its screen at `/mc-admin/<taxonomy>`, under Posts
-/// after Categories and Tags, with its [`TermsPolicy`]. Call [`sync`](Self::sync) at start and
-/// after every change to a taxonomy; it registers them again, as
+/// [`Registry`] whose `show_ui` is on gets its screen at `/mc-admin/<taxonomy>`, with its
+/// [`TermsPolicy`]. Call [`sync`](Self::sync) at start and after every change to a taxonomy or a
+/// post type; it registers them again, as
 /// [`PostTypeResources::sync`](crate::types::PostTypeResources::sync) does the post types'.
 ///
-/// WordPress lists a taxonomy's screen under each post type it is attached to; the owner's rule
-/// for Task 5.7 lists them under Posts, as Categories and Tags are.
+/// Each screen is listed under the post type it is attached to, as ACF Pro's taxonomies are
+/// ([`term_screen_parent`]): under Posts after Categories and Tags for `post`, under Books for
+/// `book`, under Media for `attachment`. This replaces the owner's earlier rule for Task 5.7,
+/// which listed every one under Posts.
 pub struct TaxonomyScreens {
     registry: Arc<Registry>,
     access: Access,
@@ -374,6 +412,7 @@ impl TaxonomyScreens {
             .all_taxonomies()
             .into_iter()
             .filter(TaxonomyDef::effective_show_ui);
+        let menu_types = self.menu_types();
         for (sort, def) in (TAGS_SORT + 1..).zip(taxonomies) {
             if ignite_core::runtime_resource(&def.slug).is_some()
                 || ignite_core::policy(&def.slug).is_some()
@@ -385,10 +424,12 @@ impl TaxonomyScreens {
                 def.slug.clone(),
                 TermsPolicy::with_caps(def.to_taxonomy(), def.caps(), self.access.clone()),
             );
+            let parent = term_screen_parent(&def, &menu_types);
             match ignite_core::register_runtime(custom_terms_resource(
                 &def,
                 self.access.kses.clone(),
                 sort,
+                parent.as_deref(),
             )) {
                 Ok(()) => registered.push(def.slug.clone()),
                 Err(e) => {
@@ -398,6 +439,28 @@ impl TaxonomyScreens {
             }
         }
         refused
+    }
+
+    /// The post type screens in WordPress's menu, which a term screen can be listed under:
+    /// `post`, `page` and Media (`attachment`), then the registry's post types whose `show_ui`
+    /// is on and whose `show_in_menu` is `true` (a type under another menu has no submenu of its
+    /// own in WordPress).
+    fn menu_types(&self) -> Vec<String> {
+        let mut types: Vec<String> = ["post", "page", super::media::ATTACHMENT]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        types.extend(
+            self.registry
+                .all_post_types()
+                .into_iter()
+                .filter(|def| {
+                    def.effective_show_ui()
+                        && def.effective_show_in_menu() == ShowInMenu::Show(true)
+                })
+                .map(|def| def.slug),
+        );
+        types
     }
 
     /// The taxonomies whose screen this value has registered, in order.
@@ -907,5 +970,55 @@ impl Policy for TermsPolicy {
         record: &'a Row,
     ) -> RuntimeFuture<'a, bool> {
         Box::pin(self.on_term(db, user, "delete_term", record))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn menu(types: &[&str]) -> Vec<String> {
+        types.iter().map(|&t| t.to_owned()).collect()
+    }
+
+    #[test]
+    fn a_term_screen_is_listed_under_its_first_post_type_in_the_menu() {
+        let menu = menu(&["post", "page", "attachment", "book"]);
+        let public = |slug: &str, types: &[&str]| TaxonomyDef {
+            public: true,
+            ..TaxonomyDef::new(slug, types, slug, slug)
+        };
+        // As ACF Pro registers it: under the post type it is attached to.
+        assert_eq!(
+            term_screen_parent(&public("genre", &["book"]), &menu).as_deref(),
+            Some("book")
+        );
+        assert_eq!(
+            term_screen_parent(&public("topic", &["post"]), &menu).as_deref(),
+            Some("post")
+        );
+        assert_eq!(
+            term_screen_parent(&public("folder", &["attachment"]), &menu).as_deref(),
+            Some("attachment")
+        );
+        // A post type outside the menu is skipped for the next one.
+        assert_eq!(
+            term_screen_parent(&public("mood", &["movie", "page"]), &menu).as_deref(),
+            Some("page")
+        );
+        // Nowhere in WordPress's menu: no post type in the menu, or `show_in_menu` off.
+        assert_eq!(term_screen_parent(&public("loose", &[]), &menu), None);
+        assert_eq!(term_screen_parent(&public("odd", &["movie"]), &menu), None);
+        let hidden = TaxonomyDef {
+            show_in_menu: Some(false),
+            ..public("hidden", &["book"])
+        };
+        assert_eq!(term_screen_parent(&hidden, &menu), None);
+        // `show_in_menu` defaults to `show_ui`, which defaults to `public`.
+        let private = TaxonomyDef {
+            show_ui: Some(true),
+            ..TaxonomyDef::new("private", &["book"], "private", "private")
+        };
+        assert_eq!(term_screen_parent(&private, &menu).as_deref(), Some("book"));
     }
 }

@@ -1,7 +1,7 @@
 //! The Taxonomies manager (Task 5.7, design `cpt-field-manager-design.md` 2.2): an
 //! administrator creates a taxonomy at `/mc-admin/taxonomies` attached to a post type made in
-//! the Post Types manager; its term screen is under Posts on the next page load, without a
-//! restart, a term can be added there, and the post type's form assigns it. WordPress's own
+//! the Post Types manager; its term screen is under that post type (Books) on the next page
+//! load, as ACF Pro places its taxonomies, without a restart, a term can be added there, and the post type's form assigns it. WordPress's own
 //! categories and tags are listed locked.
 //!
 //! The flows run on MySQL or MariaDB only (see `admin_support`).
@@ -103,11 +103,23 @@ fn an_administrator_creates_a_taxonomy_and_its_terms() {
         .unwrap();
         assert_eq!(stored, 1);
 
-        // Its term screen is under Posts on the next page load.
+        // Its term screen is under Books on the next page load, not under Posts: ACF Pro
+        // registers a taxonomy for its post types, and WordPress's menu lists the term screen
+        // in each attached post type's submenu.
         let (_, page) = get(&client, "/mc-admin/post").await;
         let nav = sidebar(&page);
-        let under_posts = &nav[nav.find("</i>Posts</a>").expect("the Posts entry")..];
-        assert!(under_posts.contains("href=\"/mc-admin/genre\""), "{nav}");
+        let books = nav.find("</i>Books</a>").expect("the Books entry");
+        // A child entry (Ignite's submenu link), after Books, the last entry of Content.
+        let genre = nav
+            .find("pl-11 text-[13px]\" href=\"/mc-admin/genre\"")
+            .expect("the Genres child entry");
+        assert!(genre > books, "Genres is listed under Books: {nav}");
+        let posts = nav.find("</i>Posts</a>").expect("the Posts entry");
+        let pages = nav.find("</i>Pages</a>").expect("the Pages entry");
+        assert!(
+            !nav[posts..pages].contains("href=\"/mc-admin/genre\""),
+            "Genres is not under Posts: {nav}"
+        );
 
         // A term is added on it.
         let (status, html) = get(&client, "/mc-admin/genre/new").await;

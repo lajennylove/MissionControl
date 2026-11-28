@@ -39,8 +39,8 @@ pub use settings::{
 };
 pub use terms::{
     CATEGORY_SCREEN, POST_TAG_SCREEN, TERM_SCREENS, TaxonomyScreens, TermsData, TermsPolicy,
-    authorize_term_screen, custom_terms_resource, register_term_resources, term_screen_taxonomy,
-    terms_resource,
+    authorize_term_screen, custom_terms_resource, register_term_resources, term_screen_parent,
+    term_screen_taxonomy, terms_resource,
 };
 
 /// `resource` with its saves staying on the edit page, as WordPress's screens do: a create goes
