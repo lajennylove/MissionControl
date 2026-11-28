@@ -45,6 +45,8 @@
 //!   TinyMCE's `cache_suffix`), which changes whenever a file of the bundle changes. A request
 //!   with the current version is cached for a year (`immutable`); any other is sent with
 //!   `no-cache`, so a stale URL is never kept.
+//! - The favicon is also served at `/favicon.ico`, which browsers ask for on every site, cached
+//!   for a day.
 
 use std::sync::OnceLock;
 
@@ -213,7 +215,8 @@ fn content_type(path: &str) -> ContentType {
 /// A file of the bundle, found for the request's path.
 pub(crate) struct EditorFile {
     asset: &'static Asset,
-    current: bool,
+    /// The `Cache-Control` it is sent with.
+    cache: &'static str,
 }
 
 /// The file of the bundle at `segments` (percent-decoded, after `/mc-includes`), if any: an
@@ -244,22 +247,18 @@ impl<'r> FromRequest<'r> for EditorFile {
             .query_value::<&str>("ver")
             .and_then(Result::ok)
             .is_some_and(|ver| ver == editor_version());
-        Outcome::Success(Self { asset, current })
+        let cache = if current { CACHE_IMMUTABLE } else { "no-cache" };
+        Outcome::Success(Self { asset, cache })
     }
 }
 
 impl<'r> Responder<'r, 'static> for EditorFile {
     fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
-        let cache = if self.current {
-            CACHE_IMMUTABLE
-        } else {
-            "no-cache"
-        };
         Response::build()
             .status(Status::Ok)
             .header(content_type(self.asset.path))
             .header(Header::new("X-Content-Type-Options", "nosniff"))
-            .header(Header::new("Cache-Control", cache))
+            .header(Header::new("Cache-Control", self.cache))
             .sized_body(
                 self.asset.bytes.len(),
                 std::io::Cursor::new(self.asset.bytes),
@@ -268,9 +267,25 @@ impl<'r> Responder<'r, 'static> for EditorFile {
     }
 }
 
-/// The route that serves the bundle.
+/// The routes that serve the bundle, and the site's favicon.
 pub(crate) fn routes() -> Vec<Route> {
-    rocket::routes![editor_file]
+    rocket::routes![editor_file, favicon]
+}
+
+/// How long the favicon at `/favicon.ico` is cached: a day. Its URL has no version to change.
+const CACHE_FAVICON: &str = "public, max-age=86400";
+
+/// `/favicon.ico`, which browsers ask for on every site: the Mission Control favicon from
+/// `assets/brand/` (`image/x-icon`), the bundle's `images/favicon.ico`. WordPress answers the
+/// path before it looks a post up (`is_favicon` in `template-loader.php`), and so does this
+/// route, which ranks above the public site's catch-all; no post can have the slug
+/// `favicon.ico` anyway, since `sanitize_title` turns the dot into a hyphen.
+#[rocket::get("/favicon.ico")]
+fn favicon() -> Option<EditorFile> {
+    find(&["images", "favicon.ico"]).map(|asset| EditorFile {
+        asset,
+        cache: CACHE_FAVICON,
+    })
 }
 
 /// A file of the editor's bundle.

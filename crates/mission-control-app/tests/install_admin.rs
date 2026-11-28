@@ -185,6 +185,27 @@ fn the_installed_administrator_signs_in() {
         let client = Client::tracked(rocket_with_options(config, AppOptions::default()))
             .await
             .expect("the installed app ignites");
+        // A repeated install gets WordPress's Already Installed page, with its Log In link,
+        // since the admin is mounted here; not the admin's own pages.
+        for uri in [INSTALL_PATH.to_owned(), format!("{INSTALL_PATH}?step=2")] {
+            let (status, page) = get(&client, &uri).await;
+            assert_eq!(status, Status::Ok, "{uri}: {page}");
+            assert!(page.contains("<h1>Already Installed</h1>"), "{page}");
+            assert!(
+                page.contains(
+                    "You appear to have already installed Mission Control. To reinstall please \
+                     clear your old database tables first."
+                ),
+                "{page}"
+            );
+            assert!(
+                page.contains("href=\"/mc-admin/login\">Log In</a>"),
+                "{page}"
+            );
+        }
+        let response = post(&client, &format!("{INSTALL_PATH}?step=2"), &[]).await;
+        assert_eq!(response.status(), Status::Ok);
+
         // A wrong password is refused; the one typed in the installer signs in, by email.
         let (status, to) = sign_in(&client, ADMIN_EMAIL, "not-the-password").await;
         assert_ne!(to, "/mc-admin", "{status}");

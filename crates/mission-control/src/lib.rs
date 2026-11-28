@@ -67,11 +67,16 @@
 //! TinyMCE 7 (GPL-2.0-or-later), with the Visual and Text tabs and the Add Media button. Its
 //! files are compiled into the binary and served at [`INCLUDES_PATH`]
 //! (`/mc-includes/js/editor.js`, the picker `/mc-includes/js/media.js`,
-//! `/mc-includes/js/tinymce/...`), with the version [`editor_version`] in each URL.
+//! `/mc-includes/js/tinymce/...`), with the version [`editor_version`] in each URL. The
+//! Mission Control favicon is also served at `/favicon.ico`.
+//!
+//! On an installed site (the `siteurl` option is set), the installer's path
+//! `/mc-admin/install.php` answers WordPress's "Already Installed" page, ahead of the admin.
 
 mod admin;
 mod editor;
 mod front;
+mod installed;
 mod rest;
 mod uploads;
 
@@ -409,7 +414,11 @@ async fn ignite(
     {
         log::error!("The Media settings' image sizes could not be read: {e}");
     }
-    let rocket = match admin::admin_mode(&config, &db) {
+    let admin_mode = admin::admin_mode(&config, &db);
+    // The installer's path on an installed site: WordPress's "Already Installed" page, ahead of
+    // the admin's routes and its 503 page.
+    let rocket = rocket.mount("/", installed::routes(admin_mode == AdminMode::Panel));
+    let rocket = match admin_mode {
         AdminMode::Panel => {
             admin::mount_panel(
                 rocket,
