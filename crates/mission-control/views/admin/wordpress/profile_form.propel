@@ -28,6 +28,23 @@
 #profile-page .new-application-password-notice input { width: 25em; max-width: 100%; }
 #profile-page .submit { margin-top: 20px; padding: 1.5em 0; }
 #profile-page.js .hide-if-js, #profile-page:not(.js) .hide-if-no-js { display: none; }
+#profile-page .application-passwords-user { table-layout: fixed; }
+/* A phone's width, as WordPress's forms.css: each label above its field, the fields at the form's full width, and nothing wider than the screen. */
+@media screen and (max-width: 782px) {
+  #profile-page .form-table th, #profile-page .form-table td { display: block; width: auto; }
+  #profile-page .form-table th { padding: 10px 0 0; }
+  #profile-page .form-table td { padding: 4px 0 6px; }
+  #profile-page .regular-text, #profile-page .form-table td input[type="text"], #profile-page .form-table td input[type="email"], #profile-page .form-table td input[type="url"], #profile-page .form-table td input[type="password"], #profile-page .form-table td select, #profile-page textarea, #profile-page .create-application-password input[type="text"], #profile-page .new-application-password-notice input { box-sizing: border-box; display: block; max-width: none; width: 100%; }
+  #profile-page .form-table td .description { display: block; margin-top: 4px; }
+  #profile-page .wp-pwd .button { margin: 4px 4px 0 0; }
+  #profile-page input[type="file"] { max-width: 100%; }
+  #profile-page .application-passwords-user thead { display: none; }
+  #profile-page .application-passwords-user, #profile-page .application-passwords-user tbody, #profile-page .application-passwords-user tr, #profile-page .application-passwords-user td { box-sizing: border-box; display: block; width: 100%; }
+  #profile-page .application-passwords-user td { padding: 3px 10px; }
+  #profile-page .application-passwords-user td:not(.column-primary):not(.column-revoke)::before { color: #646970; content: attr(data-colname) ": "; }
+  #profile-page .application-passwords-user td.column-primary { font-weight: 600; padding-top: 10px; }
+  #profile-page .application-passwords-user td.column-revoke { padding-bottom: 10px; }
+}
 </style>
 @if (has_message)<div id="message" class="updated notice notice-success is-dismissible"><p><strong>{{ $message }}</strong></p></div>
 @endif@if (has_errors)<div class="error notice notice-error">@foreach (error in errors)<p><strong>Error:</strong> {{ $error.text }}</p>@endforeach</div>
@@ -155,7 +172,7 @@
 @if (has_app_passwords)<div class="application-passwords-list-table-wrapper">
 <table class="wp-list-table widefat fixed striped table-view-list application-passwords-user">
 <thead><tr><th scope="col" class="manage-column column-name column-primary">Name</th><th scope="col" class="manage-column column-created">Created</th><th scope="col" class="manage-column column-last_used">Last Used</th><th scope="col" class="manage-column column-last_ip">Last IP</th><th scope="col" class="manage-column column-revoke">Revoke</th></tr></thead>
-<tbody>@foreach (item in app_passwords)<tr data-uuid="{{ $item.uuid }}"><td class="name column-name column-primary">{{ $item.name }}</td><td class="created column-created">{{ $item.created }}</td><td class="last_used column-last_used">{{ $item.last_used }}</td><td class="last_ip column-last_ip">{{ $item.last_ip }}</td><td class="revoke column-revoke"><button type="submit" class="button delete" form="{{ $item.form_id }}" aria-label="Revoke &#8220;{{ $item.name }}&#8221;">Revoke</button></td></tr>@endforeach</tbody>
+<tbody>@foreach (item in app_passwords)<tr data-uuid="{{ $item.uuid }}"><td class="name column-name column-primary" data-colname="Name">{{ $item.name }}</td><td class="created column-created" data-colname="Created">{{ $item.created }}</td><td class="last_used column-last_used" data-colname="Last Used">{{ $item.last_used }}</td><td class="last_ip column-last_ip" data-colname="Last IP">{{ $item.last_ip }}</td><td class="revoke column-revoke" data-colname="Revoke"><button type="submit" class="button delete" form="{{ $item.form_id }}" aria-label="Revoke &#8220;{{ $item.name }}&#8221;">Revoke</button></td></tr>@endforeach</tbody>
 </table>
 <div class="tablenav bottom"><div class="alignleft actions bulkactions"><button type="submit" class="button delete" id="revoke-all-application-passwords" form="mc-revoke-all-form">Revoke all application passwords</button></div></div>
 </div>

@@ -1,0 +1,55 @@
+{{-- The WordPress admin theme's list screen (`wp-admin/edit.php`): Ignite's list page values (the same as its `index` view reads) in WordPress's markup. The heading with "Add New" as `.page-title-action`, the status tabs as WordPress's status links (`.subsubsub`), the search box, and the `.wp-list-table.widefat.fixed.striped` table: its heading row (`.manage-column`), its striped rows, and each row's actions in `.row-actions`, which the layout's script moves under the title (WordPress's `column-primary`); without the script they stay in their own column. The pager is WordPress's `.tablenav-pages`. The markup Mission Control reads on the Media screen stays as Ignite's: the list in `<section class="ig-card p-0">`, the rows as `<tr>` with plain `<td>` cells, and the pager a `div` starting `<div class="mt-5`, without nested ones. --}}@extends('ignite::layouts.app')
+
+@section('ignite_brand_name'){{ $brand.name }}@endsection
+
+@section('ignite_favicon')@include('ignite::partials.favicon')@endsection
+
+@section('ignite_stylesheets')@include('ignite::partials.stylesheets')@endsection
+
+@section('ignite_head')@if (theme_style)<style>{!! $theme_style !!}</style>@endif@if (has_list_styles)@vite(['ui::resources/css/list.css'])@endif@endsection
+
+@section('ignite_html')data-theme="{{ $theme }}"@endsection
+
+@section('ignite_aside')
+  @include('ignite::partials.nav')
+@endsection
+
+@section('ignite_column')ig-with-sidebar@endsection
+
+@section('ignite_bar')
+  <header class="sticky top-0 z-20 flex items-center border-b border-border bg-page px-5 py-3">
+    @include('ignite::partials.topbar')
+  </header>
+@endsection
+
+@section('ignite_flash')
+  @include('ignite::partials.flash')
+@endsection
+
+@section('title')
+  {{ $title }}
+@endsection
+
+@section('content')
+<h1 class="wp-heading-inline">{{ $title }}</h1>
+@if (can_create)<a class="page-title-action" href="{{ $new_url }}">Add New {{ $singular }}</a>
+@endif<hr class="wp-header-end">
+@if (has_tabs)<h2 class="screen-reader-text">Filter {{ $title }} list</h2>
+<ul class="subsubsub">@foreach (tab in tabs)<li><a class="{{ $tab.class }}" href="{{ $tab.url }}"@if (tab.active) aria-current="page"@endif>{{ $tab.label }} <span class="count">({{ $tab.count }})</span></a></li>@endforeach</ul>
+@endif<div class="mc-wp-list">
+<section class="ig-card p-0">
+<form class="search-form" method="get" action="{{ $index_url }}">
+<p class="search-box"><label class="screen-reader-text" for="mc-search-input">Search {{ $title }}:</label><input type="search" id="mc-search-input" name="q" value="{{ $search }}">@if (has_tab_param)<input type="hidden" name="tab" value="{{ $tab_param }}">@endif <input type="submit" id="search-submit" class="button" value="Search {{ $title }}"></p>
+</form>
+<h2 class="screen-reader-text">{{ $title }} list</h2>
+<table class="wp-list-table widefat fixed striped table-view-list">
+<thead><tr>@foreach (column in columns)<th scope="col" class="manage-column">@if (column.sortable)<a href="{{ $column.sort_url }}"><span>{{ $column.label }}</span> <span class="sorting-indicator" aria-hidden="true">{{ $column.indicator }}</span></a>@else{{ $column.label }}@endif</th>@endforeach<th scope="col" class="manage-column column-actions"><span class="screen-reader-text">Actions</span></th></tr></thead>
+<tbody>
+@forelse (row in rows)<tr>@foreach (cell in row.cells)<td>@if (cell.badge)<span class="ig-badge ig-badge-{{ $cell.color }}">{{ $cell.text }}</span>@else{{ $cell.text }}@endif@if (cell.has_badges)@foreach (inline in cell.badges) <span class="ig-badge ig-badge-{{ $inline.color }}">{{ $inline.text }}</span>@endforeach@endif</td>@endforeach<td class="column-actions"><div class="row-actions">@if (row.can_update)<span class="edit"><a href="{{ $row.edit_url }}">{{ $row.edit_label }}</a></span>@endif@if (row.has_actions)@foreach (action in row.actions)<span class="mc-row-action">@if (action.is_post)<form method="post" action="{{ $action.url }}"@if (action.has_confirm) data-confirm="{{ $action.confirm }}"@endif><input type="hidden" name="_token" value="{{ $csrf_token }}"><input type="hidden" name="_back" value="{{ $return_url }}"><button type="submit" class="{{ $action.class }}">{{ $action.label }}</button></form>@else<a class="{{ $action.class }}" href="{{ $action.url }}">{{ $action.label }}</a>@endif</span>@endforeach@endif@if (row.can_delete)<span class="delete"><form method="post" action="{{ $row.delete_url }}" data-confirm="Delete this record? This cannot be undone."><input type="hidden" name="_token" value="{{ $csrf_token }}"><button type="submit" class="submitdelete">Delete</button></form></span>@endif</div></td></tr>
+@empty<tr class="no-items"><td colspan="{{ $colspan }}" class="colspanchange">No records found.</td></tr>
+@endforelse</tbody>
+</table>
+</section>
+<div class="mt-5 tablenav bottom"><span class="tablenav-pages"><span class="displaying-num">{{ $total }} in total</span> <span class="pagination-links">@if (has_prev)<a class="prev-page button" href="{{ $prev_url }}"><span class="screen-reader-text">Previous page</span><span aria-hidden="true">&lsaquo;</span></a> @endif<span class="paging-input">Page {{ $page }} of <span class="total-pages">{{ $last_page }}</span></span>@if (has_next) <a class="next-page button" href="{{ $next_url }}"><span class="screen-reader-text">Next page</span><span aria-hidden="true">&rsaquo;</span></a>@endif</span></span></div>
+</div>
+@endsection

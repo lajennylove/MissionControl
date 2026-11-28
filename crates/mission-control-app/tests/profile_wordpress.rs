@@ -496,12 +496,34 @@ fn the_password_sessions_and_application_passwords_work() {
             "shown once"
         );
         assert!(
-            html.contains("<td class=\"name column-name column-primary\">Laptop</td>"),
+            html.contains(
+                "<td class=\"name column-name column-primary\" data-colname=\"Name\">Laptop</td>"
+            ),
             "{html}"
         );
         assert!(
-            html.contains("<td class=\"last_used column-last_used\">\u{2014}</td>"),
+            html.contains(
+                "<td class=\"last_used column-last_used\" data-colname=\"Last Used\">\u{2014}</td>"
+            ),
             "{html}"
+        );
+        // The table is in the page flow under the form, as WordPress's wp-list-table: Ignite's
+        // CSS has a `.fixed` utility (position: fixed), and WordPress's `table.fixed` is only
+        // its table layout, so the theme's stylesheet puts it back to static. The Revoke button
+        // is in the table's row.
+        assert!(
+            html.contains("<table class=\"wp-list-table widefat fixed striped table-view-list application-passwords-user\">"),
+            "{html}"
+        );
+        assert!(
+            html.contains("body.wp-admin table.fixed { position: static; table-layout: fixed; }"),
+            "{html}"
+        );
+        let row = &html[html.find("<tr data-uuid=").expect("the row")..];
+        let row = &row[..row.find("</tr>").unwrap()];
+        assert!(
+            row.contains("<td class=\"revoke column-revoke\" data-colname=\"Revoke\"><button type=\"submit\" class=\"button delete\""),
+            "{row}"
         );
 
         // Revoked.
@@ -587,5 +609,67 @@ fn the_ignite_theme_keeps_ignites_profile_page() {
         let html = page(&client).await;
         assert!(html.contains(">Save details</button>"), "{html}");
         let _ = id;
+    });
+}
+
+/// The CSS rules inside the page's `@media screen and (max-width: 782px)` blocks: the narrow
+/// screens' rules, WordPress's breakpoint for a phone.
+fn narrow_rules(html: &str) -> String {
+    const OPEN: &str = "@media screen and (max-width: 782px) {";
+    let mut rules = String::new();
+    for block in html.split(OPEN).skip(1) {
+        // A block ends at the first closing brace on a line of its own.
+        let end = block.find("\n}").unwrap_or(block.len());
+        rules.push_str(&block[..end]);
+        rules.push('\n');
+    }
+    rules
+}
+
+/// No element of the WordPress profile is wider than a 375px phone. A browser measured it
+/// (`document.documentElement.scrollWidth` is 375 at a 375px viewport, from 456 before); this
+/// test reads the stylesheet's rules that make it so: every rule that gives a profile element a
+/// fixed width wider than a phone's content (the 200px label column beside the field, the
+/// 25em `.regular-text` fields, the 500px biography and the 600px admin bar) has a narrow-screen
+/// rule that stacks it or sets it to the form's width.
+#[test]
+fn the_profile_fits_a_phones_width() {
+    run("profile_wordpress_narrow", |client, db| async move {
+        let (_, email) = user(&db, "grace", "administrator").await;
+        sign_in(&client, &email).await;
+        choose_theme(&client, "wordpress").await;
+        let html = page(&client).await;
+        // The fixed widths, at any width.
+        for wide in [
+            "#profile-page .form-table th { color: #1d2327; font-weight: 600; line-height: 1.3; padding: 20px 10px 20px 0; text-align: left; vertical-align: top; width: 200px; }",
+            "#profile-page .regular-text { width: 25em; max-width: 100%; }",
+            "#profile-page textarea { line-height: 1.4; padding: 2px 6px; width: 100%; max-width: 500px; }",
+            "min-width: 600px;",
+        ] {
+            assert!(html.contains(wide), "{wide}");
+        }
+        let narrow = narrow_rules(&html);
+        for expected in [
+            // The label above its field, at the form's width.
+            "#profile-page .form-table th, #profile-page .form-table td { display: block; width: auto; }",
+            // The fields at the form's full width, with their borders inside it.
+            "#profile-page .regular-text, #profile-page .form-table td input[type=\"text\"]",
+            "#profile-page textarea, #profile-page .create-application-password input[type=\"text\"], #profile-page .new-application-password-notice input { box-sizing: border-box; display: block; max-width: none; width: 100%; }",
+            // The application passwords table stacked, each cell after its column's name.
+            "#profile-page .application-passwords-user, #profile-page .application-passwords-user tbody, #profile-page .application-passwords-user tr, #profile-page .application-passwords-user td { box-sizing: border-box; display: block; width: 100%; }",
+            // Every WordPress screen: no field wider than its column, and the bar's narrow width.
+            "body.wp-admin input:not([type=\"checkbox\"]):not([type=\"radio\"]):not([type=\"hidden\"]), body.wp-admin select, body.wp-admin textarea { box-sizing: border-box; max-width: 100%; }",
+            "#wpadminbar { height: 46px; min-width: 240px; }",
+            ".wrap { margin-left: 0; margin-right: 12px; }",
+        ] {
+            assert!(narrow.contains(expected), "`{expected}` in {narrow}");
+        }
+        // The page has the viewport meta that makes a phone lay it out at its own width.
+        assert!(
+            html.contains(
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            ),
+            "{html}"
+        );
     });
 }

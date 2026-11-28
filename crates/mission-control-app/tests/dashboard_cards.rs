@@ -285,6 +285,24 @@ fn the_dashboard_has_wordpresss_cards() {
         ] {
             assert!(quick.contains(expected), "`{expected}` in {quick}");
         }
+        // Quick Draft in WordPress's postbox, with its header and inside; its recent drafts,
+        // when the page has them, show under the form.
+        assert!(
+            quick.starts_with("<h2 class=\"hndle\">Quick Draft</h2></div>\n<div class=\"inside\">"),
+            "{quick}"
+        );
+        if let Some(drafts) = quick.find("class=\"drafts\"") {
+            assert!(quick.find("</form>").unwrap() < drafts, "{quick}");
+        }
+        // At a Glance's rows have WordPress's Dashicons, chosen by the screen each one links to.
+        for expected in [
+            "#dashboard-widgets .main li:not(:has(> span))::before { color: #646970; content: \"\\f159\"; display: inline-block; font: normal 20px/1 dashicons;",
+            "#dashboard-widgets .main li:has(> a[href$=\"/post\"])::before { content: \"\\f109\"; }",
+            "#dashboard-widgets .main li:has(> a[href$=\"/page\"])::before { content: \"\\f105\"; }",
+            "#dashboard-widgets .main li:has(> a[href$=\"/users\"])::before { content: \"\\f110\"; }",
+        ] {
+            assert!(wordpress.contains(expected), "`{expected}` in {wordpress}");
+        }
         let first = wordpress.find("id=\"postbox-container-1\"").unwrap();
         let second = wordpress.find("id=\"postbox-container-2\"").unwrap();
         let at = |title: &str| wordpress.find(&format!(">{title}</h2>")).unwrap();

@@ -1,4 +1,4 @@
-{{-- The WordPress admin theme's dashboard (`wp-admin/index.php`): Ignite's dashboard widgets, the same the default theme shows, in WordPress's dashboard boxes (`.postbox` with its `.postbox-header` heading). The list widgets (`ListWidget`: At a Glance, `wp_dashboard_right_now`, and Activity, `wp_dashboard_recent_posts`) fill the first column, each row as WordPress lists it (a value such as the date first, then the label or its link); the form widgets (`FormWidget`: Quick Draft, `wp_dashboard_quick_press`) fill the second, posting to their resource's create with their hidden values and the way back, as Ignite's widget does. The stat cards (`StatsOverviewWidget`) are not shown: WordPress has no such cards, and At a Glance gives the same counts. --}}@extends('ignite::layouts.app')
+{{-- The WordPress admin theme's dashboard (`wp-admin/index.php`): Ignite's dashboard widgets, the same the default theme shows, in WordPress's dashboard boxes (`.postbox` with its `.postbox-header` heading). The list widgets (`ListWidget`: At a Glance, `wp_dashboard_right_now`, and Activity, `wp_dashboard_recent_posts`) fill the first column, each row as WordPress lists it (a value such as the date first, then the label or its link); the form widgets (`FormWidget`: Quick Draft, `wp_dashboard_quick_press`) fill the second, posting to their resource's create with their hidden values and the way back, as Ignite's widget does, and with the widget's rows, when it has any, under the form as Quick Draft's "Your Recent Drafts" (the place stays empty without them). At a Glance's rows show WordPress's Dashicons, chosen by the screen each row links to. The stat cards (`StatsOverviewWidget`) are not shown: WordPress has no such cards, and At a Glance gives the same counts. --}}@extends('ignite::layouts.app')
 
 @section('ignite_brand_name'){{ $brand.name }}@endsection
 
@@ -41,6 +41,21 @@
 #dashboard-widgets .inside ul { list-style: none; margin: 0; padding: 0; }
 #dashboard-widgets .inside li { margin-bottom: 8px; overflow-wrap: anywhere; }
 #dashboard-widgets .inside li > span { color: #646970; display: inline-block; margin-right: 5px; min-width: 150px; }
+/* At a Glance (#dashboard_right_now): its rows have no value before them, two to a line, each after its Dashicon as WordPress shows them; the icon follows the screen the row counts, and a row of another type has WordPress's generic one. */
+#dashboard-widgets .main ul:not(:has(> li > span)) { display: grid; gap: 0 12px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+#dashboard-widgets .main li:not(:has(> span))::before { color: #646970; content: "\f159"; display: inline-block; font: normal 20px/1 dashicons; padding: 0 10px 0 0; speak: never; vertical-align: top; -webkit-font-smoothing: antialiased; }
+#dashboard-widgets .main li:has(> a[href$="/post"])::before { content: "\f109"; }
+#dashboard-widgets .main li:has(> a[href$="/page"])::before { content: "\f105"; }
+#dashboard-widgets .main li:has(> a[href$="/category"])::before { content: "\f318"; }
+#dashboard-widgets .main li:has(> a[href$="/post_tag"])::before { content: "\f323"; }
+#dashboard-widgets .main li:has(> a[href$="/attachment"])::before { content: "\f104"; }
+#dashboard-widgets .main li:has(> a[href$="/users"])::before { content: "\f110"; }
+#dashboard-widgets .main li:has(> a[href*="comment"])::before { content: "\f101"; }
+/* Quick Draft's "Your Recent Drafts" (.drafts), under the form. */
+#dashboard-widgets .drafts { border-top: 1px solid #f0f0f1; margin: 12px -12px 0; padding: 0 12px; }
+#dashboard-widgets .drafts h2 { color: #1d2327; font-size: 14px; font-weight: 400; margin: 12px 0 8px; }
+#dashboard-widgets .drafts li { margin-bottom: 1em; }
+#dashboard-widgets .drafts .draft-title span { color: #646970; margin-left: 5px; }
 #dashboard-widgets .no-activity p { color: #646970; font-size: 16px; margin: 0; padding: 12px 0; text-align: center; }
 .mc-dashboard-form label { color: #646970; display: block; margin: 0 0 4px; }
 .mc-dashboard-form .input-text-wrap, .mc-dashboard-form .textarea-wrap { margin: 0 0 12px; }
@@ -79,7 +94,8 @@
 @else<div class="input-text-wrap"><label for="{{ $field.name }}">{{ $field.label }}</label><input type="text" name="{{ $field.name }}" id="{{ $field.name }}" value="{{ $field.value }}" autocomplete="off"></div>
 @endif@endforeach<p class="submit"><input type="submit" name="save" class="button button-primary" value="{{ $widget.submit_label }}"></p>
 </form>
-</div>
+@if (widget.has_rows)<div class="drafts"><h2>Your Recent Drafts</h2><ul>@foreach (row in widget.rows)<li><div class="draft-title">@if (row.has_url)<a href="{{ $row.url }}">{{ $row.label }}</a>@else{{ $row.label }}@endif@if (row.has_value) <span>{{ $row.value }}</span>@endif</div></li>@endforeach</ul></div>
+@endif</div>
 </div>
 @endif@endforeach</div>
 </div>

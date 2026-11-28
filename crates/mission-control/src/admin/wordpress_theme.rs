@@ -23,6 +23,12 @@
 //!   action, fields and hidden values), not Ignite's widget partials, so the boxes have
 //!   WordPress's markup. The stat cards are left out: WordPress has none, and At a Glance shows
 //!   the same counts.
+//! - Its own list screen (`index`), WordPress's `edit.php`: the heading with its
+//!   `.page-title-action`, the status links, the search box and the `.wp-list-table.widefat`
+//!   table with its striped rows and the row actions under the title. It reads Ignite's list
+//!   page values, and keeps the markup the Media screen's list reads (see `admin::media`).
+//! - The admin bar's logo is Mission Control's mark, icon-sized as WordPress's logo: the full
+//!   logo's wordmark is unreadable at the bar's height.
 //! - WordPress's Dashicons for the menu, with the Dashicons stylesheet loaded only while this
 //!   theme is the page's theme.
 
@@ -68,7 +74,8 @@ const FLASH: &str = "themes.wordpress.partials.flash";
 
 /// The theme's views by name, built into the binary. `dashboard` (the dashboard's widgets in
 /// WordPress's boxes), `profile` (the page that holds WordPress's profile form, see
-/// `admin::profile`), `login`, `forgot` and `reset` replace the panel's pages of those names.
+/// `admin::profile`), `index` (the list screens as WordPress's `edit.php`), `login`, `forgot`
+/// and `reset` replace the panel's pages of those names.
 const VIEWS: &[(&str, &str)] = &[
     (
         LAYOUT,
@@ -97,6 +104,10 @@ const VIEWS: &[(&str, &str)] = &[
     (
         "profile",
         include_str!("../../views/admin/wordpress/profile.propel"),
+    ),
+    (
+        "index",
+        include_str!("../../views/admin/wordpress/index.propel"),
     ),
     (
         "login",
@@ -277,7 +288,7 @@ mod tests {
             assert!(WordPressTheme.view(name).is_some(), "{name}");
         }
         // The panel's other views are its own.
-        assert_eq!(WordPressTheme.view("index"), None);
+        assert_eq!(WordPressTheme.view("form"), None);
         assert_eq!(WordPressTheme.view("partials.field"), None);
     }
 
@@ -386,16 +397,104 @@ mod tests {
     }
 
     #[test]
-    fn the_logo_sits_on_a_light_panel_in_the_dark_bar() {
+    fn the_logo_is_an_icon_sized_mark_on_a_light_panel() {
         let bar = WordPressTheme.view(TOP_BAR).expect("the admin bar");
+        // The mark, not the full logo: its wordmark would be about 4px high in the 32px bar.
         assert!(
-            bar.contains("<span class=\"mc-wp-brand-panel\"><img"),
+            bar.contains("<span class=\"mc-wp-brand-panel\"><img src=\"/mc-includes/images/mission-control-mark.webp\" alt=\"{{ $brand.name }}\" class=\"mc-wp-brand-mark\"></span>"),
             "{bar}"
         );
         let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        // WordPress's logo is a 20px Dashicon: the mark is 20px high on a 24px panel.
+        for expected in [
+            "#wpadminbar .mc-wp-brand-panel { align-items: center; background: #fff; border-radius: 3px; box-sizing: border-box; display: flex; height: 24px; justify-content: center; width: 24px; }",
+            "#wpadminbar .mc-wp-brand-mark { display: block; height: 20px; max-width: 20px;",
+        ] {
+            assert!(layout.contains(expected), "{expected}");
+        }
+        assert!(!layout.contains(".mc-wp-brand {"), "{layout}");
+    }
+
+    #[test]
+    fn a_list_table_stays_in_the_page_flow() {
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        // Ignite's CSS has a .fixed utility (position: fixed); WordPress's table.fixed is only
+        // its table layout.
         assert!(
-            layout.contains("#wpadminbar .mc-wp-brand-panel { background: #fff;"),
+            layout.contains("body.wp-admin table.fixed { position: static; table-layout: fixed; }"),
             "{layout}"
+        );
+    }
+
+    #[test]
+    fn the_list_screen_is_wordpresss_edit_php() {
+        let index = WordPressTheme.view("index").expect("the list screen");
+        for expected in [
+            "<h1 class=\"wp-heading-inline\">{{ $title }}</h1>",
+            "<a class=\"page-title-action\" href=\"{{ $new_url }}\">Add New {{ $singular }}</a>",
+            "<ul class=\"subsubsub\">",
+            "<p class=\"search-box\">",
+            "<table class=\"wp-list-table widefat fixed striped table-view-list\">",
+            "<th scope=\"col\" class=\"manage-column\">",
+            "<td class=\"column-actions\"><div class=\"row-actions\">",
+            "<span class=\"tablenav-pages\">",
+            // The markup the Media screen's list reads (`admin::media`).
+            "<section class=\"ig-card p-0\">",
+            "<tbody>\n@forelse (row in rows)<tr>@foreach (cell in row.cells)<td>",
+            "<div class=\"mt-5 ",
+        ] {
+            assert!(index.contains(expected), "{expected}");
+        }
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        for expected in [
+            ".striped > tbody > :nth-child(odd) { background-color: #f6f7f7; }",
+            ".widefat thead th { border-bottom: 1px solid #c3c4c7;",
+            "primary.appendChild(actions);",
+        ] {
+            assert!(layout.contains(expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn every_screen_fits_a_phones_width() {
+        let layout = WordPressTheme.view(LAYOUT).expect("the layout");
+        let narrow = &layout[layout
+            .find("@media screen and (max-width: 782px)")
+            .expect("the narrow screens' rules")..];
+        for expected in [
+            "body.wp-admin input:not([type=\"checkbox\"]):not([type=\"radio\"]):not([type=\"hidden\"]), body.wp-admin select, body.wp-admin textarea { box-sizing: border-box; max-width: 100%; }",
+            ".form-table, .form-table tbody, .form-table tr, .form-table th, .form-table td { display: block; width: auto; }",
+            ".wp-list-table, .wp-list-table tbody, .wp-list-table tr, .wp-list-table td { box-sizing: border-box; display: block; width: 100%; }",
+        ] {
+            assert!(narrow.contains(expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn the_posts_submenu_has_one_add_new() {
+        let nav = WordPressTheme.view(NAVIGATION).expect("the admin menu");
+        // The entry's own create link, then its children without theirs, as WordPress's Posts
+        // submenu: All Posts, Add New Post, Categories, Tags.
+        assert!(
+            nav.contains("<li><a href=\"{{ $group.add_url }}\">{{ $group.add_label }}</a></li>@endif@foreach (link in group.children)"),
+            "{nav}"
+        );
+        assert!(!nav.contains("group.sub_items)"), "{nav}");
+    }
+
+    #[test]
+    fn menus_show_wordpresss_appearance_icon() {
+        // The Menus screen is in WordPress's Appearance menu: its icon is Appearance's brush,
+        // not Posts' pin.
+        assert_eq!(
+            WordPressTheme
+                .icon(mission_control_core::admin::navigation::APPEARANCE_ICON)
+                .as_deref(),
+            Some("dashicons dashicons-admin-appearance")
+        );
+        assert_ne!(
+            WordPressTheme.icon("appearance"),
+            WordPressTheme.icon("post")
         );
     }
 

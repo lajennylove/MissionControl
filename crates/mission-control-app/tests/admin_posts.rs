@@ -995,7 +995,9 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "<ul id=\"adminmenu\">",
         "<span class=\"dashicons dashicons-admin-post\"></span></div><div class=\"wp-menu-name\">Posts</div>",
         "<li class=\"wp-has-submenu wp-not-current-submenu menu-top\"><a class=\"wp-has-submenu wp-not-current-submenu menu-top\" href=\"/mc-admin/post\" aria-haspopup=\"true\">",
-        "<li class=\"wp-first-item\"><a href=\"/mc-admin/post\" class=\"wp-first-item\">All Posts</a></li><li><a href=\"/mc-admin/post/new\">Add new</a></li><li><a href=\"/mc-admin/category\">Categories</a></li><li><a href=\"/mc-admin/category/new\">Add new</a></li><li><a href=\"/mc-admin/post_tag\">Tags</a></li><li><a href=\"/mc-admin/post_tag/new\">Add new</a></li></ul>",
+        "<li class=\"wp-first-item\"><a href=\"/mc-admin/post\" class=\"wp-first-item\">All Posts</a></li><li><a href=\"/mc-admin/post/new\">Add new</a></li><li><a href=\"/mc-admin/category\">Categories</a></li><li><a href=\"/mc-admin/post_tag\">Tags</a></li></ul>",
+        // Menus is in WordPress's Appearance menu: Appearance's brush, not Posts' pin.
+        "<span class=\"dashicons dashicons-admin-appearance\"></span></div><div class=\"wp-menu-name\">Menus</div>",
         "<div class=\"wp-menu-name\">Settings</div></a>\n<ul class=\"wp-submenu wp-submenu-wrap\"><li class=\"wp-submenu-head\" aria-hidden=\"true\">Settings</li><li><a href=\"/mc-admin/options-general\">General</a></li><li><a href=\"/mc-admin/options-writing\">Writing</a></li>",
         "<li><a href=\"/mc-admin/options-permalink\">Permalinks</a></li><li><a href=\"/mc-admin/options-privacy\">Privacy</a></li></ul>",
         "<li class=\"wp-menu-separator\" aria-hidden=\"true\"></li>",
@@ -1015,19 +1017,33 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "<li id=\"wp-admin-bar-edit-profile\"><a class=\"ab-item\" href=\"/mc-admin/profile\">Edit Profile</a></li>",
         "<button type=\"submit\" class=\"ab-item\">Log Out</button>",
         "#wpadminbar .menupop.hover > .ab-sub-wrapper",
-        "<span class=\"mc-wp-brand-panel\"><img src=\"/mc-includes/images/mission-control-logo.webp\"",
+        // Mission Control's mark, icon-sized as WordPress's admin-bar logo.
+        "<span class=\"mc-wp-brand-panel\"><img src=\"/mc-includes/images/mission-control-mark.webp\" alt=\"RocketBoost Mission Control\" class=\"mc-wp-brand-mark\"></span>",
+        "#wpadminbar .mc-wp-brand-mark { display: block; height: 20px; max-width: 20px;",
     ] {
         assert!(wordpress.contains(expected), "`{expected}` in {wordpress}");
     }
     assert!(!wordpress.contains("data-theme-toggle"), "{wordpress}");
-    // "New Post" is white on WordPress's blue: the link colour skips the buttons.
-    let (_, list) = get(client, "/mc-admin/post").await;
+    // No category or tag create links in the submenu: WordPress's Posts submenu has one.
     assert!(
-        list.contains(
-            "<a class=\"ig-btn ig-btn-primary\" href=\"/mc-admin/post/new\">New Post</a>"
-        ),
-        "{list}"
+        !wordpress.contains("<a href=\"/mc-admin/category/new\">"),
+        "{wordpress}"
     );
+    // The list screen is WordPress's edit.php: "Add New Post" as .page-title-action, and the
+    // .widefat table with its heading row, striped rows and row actions, in the page flow.
+    let (_, list) = get(client, "/mc-admin/post").await;
+    for expected in [
+        "<h1 class=\"wp-heading-inline\">Posts</h1>",
+        "<a class=\"page-title-action\" href=\"/mc-admin/post/new\">Add New Post</a>",
+        "<table class=\"wp-list-table widefat fixed striped table-view-list\">",
+        "<th scope=\"col\" class=\"manage-column\"><a href=\"/mc-admin/post?tab=all&amp;sort=col_title&amp;dir=asc\"><span>Title</span>",
+        "<td class=\"column-actions\"><div class=\"row-actions\"><span class=\"edit\"><a href=\"/mc-admin/post/",
+        "body.wp-admin table.fixed { position: static; table-layout: fixed; }",
+        ".striped > tbody > :nth-child(odd) { background-color: #f6f7f7; }",
+    ] {
+        assert!(list.contains(expected), "`{expected}` in {list}");
+    }
+    assert!(!list.contains("class=\"ig-table\""), "{list}");
     assert!(
         list.contains("body.wp-admin a:not(.ig-btn) { color: #2271b1; }"),
         "{list}"

@@ -28,9 +28,10 @@ body.wp-admin a.ig-btn-primary, body.wp-admin a.ig-btn-primary:hover, body.wp-ad
 #wpadminbar li:hover > .ab-item, #wpadminbar li:focus-within > .ab-item { background: #2c3338; color: #72aee6; }
 #wpadminbar .ab-icon { color: #a7aaad; font-size: 20px; height: 20px; width: 20px; }
 #wpadminbar li:hover > .ab-item .ab-icon { color: #72aee6; }
-/* The brand's logo is dark: a light panel behind it reads on the dark bar. */
-#wpadminbar .mc-wp-brand-panel { background: #fff; border-radius: 3px; display: block; padding: 1px 4px; }
-#wpadminbar .mc-wp-brand { display: block; height: 22px; width: auto; }
+/* The brand's mark where WordPress's logo is: an icon-sized mark (WordPress's is a 20px Dashicon in a 34 by 32px item), on a light 24px panel so the dark mark reads on the dark bar. The full logo's wordmark would be about 4px high at the bar's height, so the bar shows the mark only. */
+#wpadminbar #wp-admin-bar-wp-logo > .ab-item { padding: 0 7px; }
+#wpadminbar .mc-wp-brand-panel { align-items: center; background: #fff; border-radius: 3px; box-sizing: border-box; display: flex; height: 24px; justify-content: center; width: 24px; }
+#wpadminbar .mc-wp-brand-mark { display: block; height: 20px; max-width: 20px; object-fit: contain; width: auto; }
 /* The user's avatar: the picture, or the initials on WordPress's grey circle. */
 #wpadminbar .avatar { border: 1px solid #8c8f94; border-radius: 50%; box-sizing: border-box; flex: none; height: 18px; object-fit: cover; width: 18px; }
 #wpadminbar .avatar-initials { align-items: center; background: #c3c4c7; color: #1d2327; display: inline-flex; font-size: 9px; font-weight: 600; justify-content: center; line-height: 1; text-transform: uppercase; }
@@ -80,6 +81,53 @@ body.wp-admin a.ig-btn-primary, body.wp-admin a.ig-btn-primary:hover, body.wp-ad
 .notice p { margin: 0.5em 0; padding: 2px; }
 .notice-success { border-left-color: #00a32a; }
 .notice-error { border-left-color: #d63638; }
+/* WordPress's buttons (forms.css). */
+body.wp-admin .button { background: #f6f7f7; border: 1px solid #2271b1; border-radius: 3px; box-sizing: border-box; color: #2271b1; cursor: pointer; display: inline-block; font-size: 13px; line-height: 2.15384615; margin: 0; min-height: 30px; padding: 0 10px; text-decoration: none; vertical-align: top; white-space: nowrap; }
+body.wp-admin .button:hover { background: #f0f0f1; border-color: #0a4b78; color: #0a4b78; }
+body.wp-admin .button-primary { background: #2271b1; border-color: #2271b1; color: #fff; }
+body.wp-admin .button-primary:hover { background: #135e96; border-color: #135e96; color: #fff; }
+/* Ignite's CSS has a utility named .fixed (position: fixed); WordPress's table.fixed is only the table layout, so its list tables stay in the page flow. */
+body.wp-admin table.fixed { position: static; table-layout: fixed; }
+/* The list screens, as WordPress's edit.php: the heading with its .page-title-action, the status links (.subsubsub), the search box, and the .widefat table with its heading row, striped rows and row actions under the title. */
+.wp-heading-inline { display: inline-block; margin-right: 5px; }
+.wrap h1.wp-heading-inline { margin-bottom: 0; }
+body.wp-admin a.page-title-action { background: #f6f7f7; border: 1px solid #2271b1; border-radius: 3px; color: #2271b1; cursor: pointer; display: inline-block; font-size: 13px; font-weight: 600; line-height: normal; margin-left: 4px; padding: 4px 8px; position: relative; text-decoration: none; top: -3px; }
+body.wp-admin a.page-title-action:hover { background: #f0f0f1; border-color: #0a4b78; color: #0a4b78; }
+.wp-header-end { border: 0; margin: -2px 0 0; visibility: hidden; }
+.subsubsub { color: #646970; float: left; font-size: 13px; list-style: none; margin: 8px 0 0; padding: 0; }
+.subsubsub li { display: inline-block; margin: 0; padding: 0; white-space: nowrap; }
+.subsubsub li + li::before { content: "| "; }
+body.wp-admin .subsubsub a { background: none; border: 0; display: inline; line-height: 2; margin: 0; padding: 0.2em; text-decoration: none; }
+body.wp-admin .subsubsub a.ig-tab-active { color: #000; font-weight: 600; }
+.subsubsub .count { color: #50575e; font-weight: 400; }
+.mc-wp-list { clear: both; }
+.mc-wp-list > .ig-card { background: none; border: 0; border-radius: 0; box-shadow: none; overflow: visible; }
+.mc-wp-list .search-form { display: flex; justify-content: flex-end; margin: 0 0 8px; }
+.mc-wp-list p.search-box { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; max-width: 100%; }
+.mc-wp-list p.search-box input[type="search"] { background: #fff; border: 1px solid #8c8f94; border-radius: 4px; box-sizing: border-box; font-size: 14px; line-height: 2; max-width: 100%; min-height: 30px; padding: 0 8px; }
+.widefat { background: #fff; border: 1px solid #c3c4c7; border-spacing: 0; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04); clear: both; margin: 0; width: 100%; }
+.widefat * { word-wrap: break-word; }
+.widefat td, .widefat th { color: #50575e; padding: 8px 10px; text-align: left; }
+.widefat thead th { border-bottom: 1px solid #c3c4c7; color: #2c3338; font-size: 14px; font-weight: 400; line-height: 1.4em; }
+.widefat td { font-size: 13px; line-height: 1.5em; vertical-align: top; }
+.widefat thead th a { display: inline-block; text-decoration: none; }
+.striped > tbody > :nth-child(odd) { background-color: #f6f7f7; }
+.wp-list-table td:first-child, .wp-list-table td.column-primary { color: #2c3338; font-size: 14px; font-weight: 600; }
+.wp-list-table .column-actions { width: 0; }
+.wp-list-table.mc-row-actions-moved .column-actions { display: none; }
+body.wp-admin .mc-wp-list .ig-badge { background: none; border: 0; color: #50575e; display: inline; font-size: inherit; font-weight: 600; margin: 0; padding: 0; }
+.mc-wp-list .ig-badge::before { content: "\2014\00a0"; }
+.row-actions { color: #a7aaad; font-size: 13px; font-weight: 400; left: -9999em; padding: 2px 0 0; position: relative; }
+.wp-list-table tr:hover .row-actions, .row-actions:focus-within, .wp-list-table .column-actions .row-actions { position: static; }
+.row-actions > span + span::before { content: " | "; }
+.row-actions form { display: inline; margin: 0; }
+body.wp-admin .row-actions a, body.wp-admin .row-actions button { background: none; border: 0; border-radius: 0; box-shadow: none; color: #2271b1; cursor: pointer; display: inline; font: inherit; line-height: inherit; margin: 0; min-height: 0; padding: 0; text-decoration: none; }
+body.wp-admin .row-actions a:hover, body.wp-admin .row-actions button:hover { color: #135e96; text-decoration: underline; }
+body.wp-admin .row-actions .ig-btn-danger, body.wp-admin .row-actions .ig-action-danger, body.wp-admin .row-actions .submitdelete { color: #b32d2e; }
+.tablenav { clear: both; margin: 6px 0 4px; min-height: 30px; padding-top: 5px; }
+.tablenav .tablenav-pages { color: #646970; float: right; margin: 0 0 9px; }
+.tablenav .displaying-num { margin-right: 7px; }
+.tablenav .pagination-links .button { font-size: 16px; min-width: 30px; padding: 0 4px; text-align: center; }
 #wpfooter { bottom: 0; color: #50575e; left: 0; padding: 10px 20px; position: absolute; right: 0; }
 #wpfooter p { font-size: 13px; line-height: 1.55; margin: 0; }
 #wpfooter { margin-left: 160px; }
@@ -99,6 +147,28 @@ body.wp-admin a.ig-btn-primary, body.wp-admin a.ig-btn-primary:hover, body.wp-ad
   #adminmenuwrap { position: absolute; }
   #wpcontent, #wpfooter { margin-left: 0; }
   #wpcontent { padding-left: 10px; }
+  #wpadminbar #wp-admin-bar-wp-logo > .ab-item { padding: 0 10px; }
+  #wpadminbar .mc-wp-brand-panel { height: 32px; width: 32px; }
+  #wpadminbar .mc-wp-brand-mark { height: 28px; max-width: 28px; }
+  /* Every screen fits a phone's width, as WordPress's forms.css and list-tables.css: the wrap's margins, the fields at the full width, and the form tables and list tables stacked. */
+  .wrap { margin-left: 0; margin-right: 12px; }
+  body.wp-admin input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), body.wp-admin select, body.wp-admin textarea { box-sizing: border-box; max-width: 100%; }
+  body.wp-admin img, body.wp-admin video, body.wp-admin iframe { max-width: 100%; }
+  .form-table, .form-table tbody, .form-table tr, .form-table th, .form-table td { display: block; width: auto; }
+  .form-table th { padding: 10px 0 0; }
+  .form-table td { padding: 4px 0 6px; }
+  .form-table td input.regular-text, .form-table td input[type="text"], .form-table td input[type="email"], .form-table td input[type="url"], .form-table td input[type="password"], .form-table td select, .form-table td textarea { display: block; max-width: none; width: 100%; }
+  .form-table td .description { display: block; }
+  .wp-list-table, .wp-list-table tbody, .wp-list-table tr, .wp-list-table td { box-sizing: border-box; display: block; width: 100%; }
+  .wp-list-table thead { display: none; }
+  .wp-list-table td { padding: 3px 10px; }
+  .wp-list-table td:first-child { padding-top: 10px; }
+  .wp-list-table td:last-child { padding-bottom: 10px; }
+  .wp-list-table td[data-colname]:not(.column-primary):not(:empty)::before { color: #646970; content: attr(data-colname) ": "; font-weight: 400; }
+  .wp-list-table .column-actions { width: 100%; }
+  .row-actions { left: auto; padding: 4px 0 0; position: static; }
+  .mc-wp-list .search-form { justify-content: flex-start; }
+  .subsubsub { float: none; }
 }
 </style>
 @yield('ignite_head')@yield('ignite_stylesheets')</head>
@@ -120,5 +190,25 @@ body.wp-admin a.ig-btn-primary, body.wp-admin a.ig-btn-primary:hover, body.wp-ad
   <p id="footer-left">Thank you for creating with @yield('ignite_brand_name', 'Mission Control').</p>
 </div>
 </div>
+<script>
+// The list tables, as WordPress's: each row's actions move under the title (the first cell
+// without a picture, WordPress's column-primary), and each cell takes its column's name for
+// the stacked rows on a phone. Without the script the actions stay in their own column.
+(function () {
+  document.querySelectorAll('.mc-wp-list .wp-list-table').forEach(function (table) {
+    var names = Array.prototype.map.call(table.querySelectorAll('thead th'), function (th) { return th.textContent.trim(); });
+    table.querySelectorAll('tbody > tr').forEach(function (row) {
+      var cells = Array.prototype.slice.call(row.children);
+      cells.forEach(function (cell, i) { if (names[i]) cell.setAttribute('data-colname', names[i]); });
+      var actions = row.querySelector('.column-actions .row-actions');
+      var primary = cells.filter(function (cell) { return !cell.classList.contains('column-actions') && !cell.querySelector('img'); })[0];
+      if (!actions || !primary) return;
+      primary.classList.add('column-primary');
+      primary.appendChild(actions);
+    });
+    table.classList.add('mc-row-actions-moved');
+  });
+})();
+</script>
 </body>
 </html>
