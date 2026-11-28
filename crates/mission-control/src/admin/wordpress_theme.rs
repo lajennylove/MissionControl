@@ -52,6 +52,11 @@ const DASHICONS: &[(&str, &str)] = &[
     ("users", "dashicons dashicons-admin-users"),
     ("tools", "dashicons dashicons-admin-tools"),
     ("settings", "dashicons dashicons-admin-settings"),
+    // The managers of post types, taxonomies and field groups (Task 5.7), as the design names
+    // their Dashicons.
+    ("post-types", "dashicons dashicons-admin-post"),
+    ("taxonomies", "dashicons dashicons-tag"),
+    ("field-groups", "dashicons dashicons-list-view"),
 ];
 
 /// WordPress's generic icon, for a resource without one.

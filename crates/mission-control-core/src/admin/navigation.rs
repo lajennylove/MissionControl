@@ -8,7 +8,8 @@
 //! each screen here gets:
 //!
 //! - its group: [`CONTENT`] for an entry above WordPress's separator at 59, [`SITE`] for one at
-//!   or below it ([`group_for`]);
+//!   or below it ([`group_for`]); every post type is in [`CONTENT`], whatever its position
+//!   ([`place_post_type`], the owner's rule);
 //! - its WordPress position as the sort;
 //! - an Ignite icon name for it (`post`, `media`, ...; see `ignite_panel::theme::icons`). Each
 //!   admin theme maps the name to its own icon: the WordPress theme to Dashicons, which it loads
@@ -193,7 +194,10 @@ impl PostTypePositions {
 }
 
 /// Places the resource of the post type `def` at `position`: `post` and `page` with their own
-/// icons, a custom type with its `menu_icon` ([`post_type_icon`]).
+/// icons, a custom type with its `menu_icon` ([`post_type_icon`]). Every post type is in the
+/// [`CONTENT`] group, whatever its position (the owner's rule, Task 5.7: the post types are
+/// listed under Content, below Posts and Pages); WordPress would list a type at 59 or more
+/// after its separator, with Appearance and Settings.
 pub fn place_post_type(resource: &mut RuntimeResource, def: &PostTypeDef, position: i32) {
     let icon = match def.slug.as_str() {
         "page" => PAGE_ICON.to_owned(),
@@ -201,7 +205,23 @@ pub fn place_post_type(resource: &mut RuntimeResource, def: &PostTypeDef, positi
         _ => post_type_icon(def),
     };
     place(resource, position, &icon);
+    resource.navigation_group = Some(CONTENT.to_owned());
 }
+
+/// The sidebar positions of the managers of post types, taxonomies and field groups (Task
+/// 5.7): in [`SITE`], above Settings, in this order.
+pub const POST_TYPES_MANAGER: i32 = SETTINGS - 3;
+/// The Taxonomies manager's position.
+pub const TAXONOMIES_MANAGER: i32 = SETTINGS - 2;
+/// The Field Groups manager's position.
+pub const FIELD_GROUPS_MANAGER: i32 = SETTINGS - 1;
+
+/// The Post Types manager's icon name: Dashicons `admin-post` in the WordPress theme.
+pub const POST_TYPES_ICON: &str = "post-types";
+/// The Taxonomies manager's icon name: Dashicons `tag`.
+pub const TAXONOMIES_ICON: &str = "taxonomies";
+/// The Field Groups manager's icon name: Dashicons `list-view`.
+pub const FIELD_GROUPS_ICON: &str = "field-groups";
 
 #[cfg(test)]
 mod tests {

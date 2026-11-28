@@ -124,6 +124,11 @@ pub const RESERVED_POST_TYPES: &[&str] = &[
     "author",
     "order",
     "theme",
+    // The admin's managers of post types, taxonomies and field groups (Task 5.7), whose
+    // screens are at `/mc-admin/<slug>` as a post type's are.
+    "post-types",
+    "taxonomies",
+    "field-groups",
 ];
 
 /// WordPress's own taxonomies, which a definition may not replace.
@@ -136,6 +141,10 @@ pub const RESERVED_TAXONOMIES: &[&str] = &[
     "wp_theme",
     "wp_template_part_area",
     "wp_pattern_category",
+    // The admin's managers (Task 5.7); a taxonomy's term screens are at `/mc-admin/<slug>`.
+    "post-types",
+    "taxonomies",
+    "field-groups",
 ];
 
 /// Why a definition was refused.

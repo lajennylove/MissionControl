@@ -11,6 +11,7 @@ use ignite_core::{RedirectAfter, ResourceAction, RuntimeResource};
 
 pub mod dashboard;
 pub mod locks;
+pub mod managers;
 pub mod media;
 pub mod menus;
 pub mod navigation;

@@ -113,13 +113,21 @@
 //! before its capabilities were stored (by the installer, or an earlier version) is given
 //! WordPress's defaults at start. Errors are logged, and the site starts anyway.
 //!
-//! The post types are read once, at start: a post type, taxonomy or field group saved or removed
-//! later (by the admin or a plugin) reaches the admin's screens at the next start.
+//! - The managers of post types, taxonomies and field groups (Task 5.7, see
+//!   `mission_control_core::admin::managers`) at `/mc-admin/post-types` and the others, in the
+//!   Site group above Settings, for users with `manage_options`. A save there registers the post
+//!   type screens again, so a new type is in the sidebar under Content on the next page load,
+//!   and grants a new type's capabilities to Administrator ([`IgniteGrants`]).
+//!
+//! A post type, taxonomy or field group a plugin registers or removes after the start reaches
+//! the admin's screens at the next start, or at the next save in a manager. The Menus screen
+//! reads its object types at start (gap M8).
 
 use std::sync::{Arc, OnceLock};
 
 use ignite_panel::authz::{self, AuthzError};
 use ignite_panel::{AdminUser, Ignite, NavigationItem, NotFound, Role, ignite_core};
+use mission_control_core::admin::managers::{CapabilityGrants, Managers};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
@@ -382,9 +390,22 @@ pub(crate) async fn mount_panel(
     for e in refused_terms {
         log::error!("A term screen is not served by this app: {e}");
     }
-    let resources = PostTypeResources::new(Arc::clone(&registry))
-        .with_page_templates(theme.page_templates())
-        .with_access(access.clone());
+    let resources = Arc::new(
+        PostTypeResources::new(Arc::clone(&registry))
+            .with_page_templates(theme.page_templates())
+            .with_access(access.clone()),
+    );
+    // The managers of post types, taxonomies and field groups (Task 5.7), before the post
+    // types, so a post type cannot take their slugs. A save there registers the screens again.
+    let managers = Managers {
+        registry: Arc::clone(&registry),
+        resources: Arc::clone(&resources),
+        grants: Arc::new(IgniteGrants),
+    };
+    let (manager_screens, refused_managers) = managers.register();
+    for e in refused_managers {
+        log::error!("A manager screen is not served by this app: {e}");
+    }
     let menu_types = menu_object_types(&resources, &registry);
     let menu_sources = menus::menu_sources(&menu_types, &resources, &registry);
     let menus = match register_nav_menus_resource(theme, menu_types) {
@@ -424,6 +445,7 @@ pub(crate) async fn mount_panel(
     }
     slugs.extend(terms.iter().map(|slug| (*slug).to_owned()));
     slugs.extend(settings.iter().map(|slug| (*slug).to_owned()));
+    slugs.extend(manager_screens.iter().map(|slug| (*slug).to_owned()));
     if menus {
         slugs.push(NAV_MENUS.to_owned());
     }
@@ -453,12 +475,43 @@ pub(crate) async fn mount_panel(
         .mount(ADMIN_PATH, profile::routes())
         .mount(ADMIN_PATH, chrome::routes())
         .mount("/", refused_routes())
-        .manage(Arc::new(resources))
+        .manage(resources)
         .manage(AdminScreens {
             settings,
             menus,
             terms,
         })
+}
+
+/// Grants a post type's capabilities to a role with Ignite's permissions (Task 5.7): each is
+/// registered as a permission first, so the Roles screen lists it, then granted.
+struct IgniteGrants;
+
+impl CapabilityGrants for IgniteGrants {
+    fn grant<'a>(
+        &'a self,
+        db: &'a Database,
+        role: &'a str,
+        caps: Vec<String>,
+    ) -> ignite_core::RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            let failed = |e: AuthzError| match e {
+                AuthzError::Database(e) => e,
+                other => orbit_orm::Error::Database(orbit_orm::__sqlx::Error::Protocol(
+                    other.to_string(),
+                )),
+            };
+            ignite_panel::register_abilities(db, caps.iter().cloned())
+                .await
+                .map_err(failed)?;
+            for cap in &caps {
+                authz::grant_permission(db, role, cap)
+                    .await
+                    .map_err(failed)?;
+            }
+            Ok(())
+        })
+    }
 }
 
 /// What a menu item can link to (Ruling R133): a custom link, a page, a post, a category and a
