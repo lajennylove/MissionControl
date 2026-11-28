@@ -1,0 +1,241 @@
+{{-- WordPress's profile form (`wp-admin/user-edit.php` for the current user, `profile.php`), in WordPress's order and words: Personal Options, Name, Contact Info, About Yourself (with the Profile Picture), Account Management (New Password, Sessions) and Application Passwords, then "Update Profile". The picture, the sessions and the application passwords post their own forms, which sit after the profile form; their inputs join them with the `form` attribute, so the profile form does not send them. --}}<style>
+#profile-page .form-table { border-collapse: collapse; margin-top: 0.5em; width: 100%; clear: both; }
+#profile-page .form-table th { color: #1d2327; font-weight: 600; line-height: 1.3; padding: 20px 10px 20px 0; text-align: left; vertical-align: top; width: 200px; }
+#profile-page .form-table td { line-height: 1.3; margin-bottom: 9px; padding: 15px 10px; vertical-align: middle; }
+#profile-page .form-table td p { margin: 4px 0 0; }
+#profile-page h2 { color: #1d2327; font-size: 1.3em; margin: 1em 0; }
+#profile-page .regular-text { width: 25em; max-width: 100%; }
+#profile-page input[type="text"], #profile-page input[type="email"], #profile-page input[type="url"], #profile-page input[type="password"], #profile-page select, #profile-page textarea { background: #fff; border: 1px solid #8c8f94; border-radius: 4px; box-shadow: 0 0 0 transparent; box-sizing: border-box; color: #2c3338; font-size: 14px; line-height: 2; min-height: 30px; padding: 0 8px; }
+#profile-page textarea { line-height: 1.4; padding: 2px 6px; width: 100%; max-width: 500px; }
+#profile-page input[disabled] { background: rgba(255, 255, 255, 0.5); border-color: rgba(220, 220, 222, 0.75); color: rgba(44, 51, 56, 0.5); }
+#profile-page .description { color: #646970; font-size: 13px; font-style: normal; }
+#profile-page .button { background: #f6f7f7; border: 1px solid #2271b1; border-radius: 3px; color: #2271b1; cursor: pointer; display: inline-block; font-size: 13px; line-height: 2.15384615; min-height: 30px; padding: 0 10px; text-decoration: none; vertical-align: top; }
+#profile-page .button[disabled] { background: #f6f7f7; border-color: #dcdcde; color: #a7aaad; cursor: default; }
+#profile-page .button-primary { background: #2271b1; border-color: #2271b1; color: #fff; }
+#profile-page .button-primary:hover { background: #135e96; border-color: #135e96; }
+#profile-page .avatar { border-radius: 50%; height: 96px; object-fit: cover; width: 96px; }
+#profile-page .avatar-initials { align-items: center; background: #c3c4c7; color: #1d2327; display: inline-flex; font-size: 32px; font-weight: 600; justify-content: center; text-transform: uppercase; }
+#profile-page .mc-field-error { color: #d63638; }
+#profile-page [aria-invalid="true"] { border-color: #d63638; }
+#profile-page .wp-pwd { margin-top: 8px; }
+#profile-page .wp-pwd .button { margin-left: 4px; }
+#profile-page .application-passwords-list-table-wrapper { margin-top: 1em; }
+#profile-page .widefat { background: #fff; border: 1px solid #c3c4c7; border-spacing: 0; width: 100%; }
+#profile-page .widefat th, #profile-page .widefat td { padding: 8px 10px; text-align: left; }
+#profile-page .widefat thead th { border-bottom: 1px solid #c3c4c7; }
+#profile-page .create-application-password .form-field { margin: 1em 0; }
+#profile-page .create-application-password label { display: block; font-weight: 600; margin-bottom: 4px; }
+#profile-page .new-application-password-notice input { width: 25em; max-width: 100%; }
+#profile-page .submit { margin-top: 20px; padding: 1.5em 0; }
+#profile-page.js .hide-if-js, #profile-page:not(.js) .hide-if-no-js { display: none; }
+</style>
+@if (has_message)<div id="message" class="updated notice notice-success is-dismissible"><p><strong>{{ $message }}</strong></p></div>
+@endif@if (has_errors)<div class="error notice notice-error">@foreach (error in errors)<p><strong>Error:</strong> {{ $error.text }}</p>@endforeach</div>
+@endif<form id="your-profile" action="{{ $action }}" method="post" novalidate="novalidate">
+<input type="hidden" name="_token" value="{{ $csrf_token }}">
+<input type="hidden" name="from" value="profile">
+
+<h2>Personal Options</h2>
+<table class="form-table" role="presentation">
+<tr class="user-rich-editing-wrap">
+<th scope="row">Visual Editor</th>
+<td><label for="rich_editing"><input name="rich_editing" type="checkbox" id="rich_editing" value="false" @if (rich_editing_disabled) checked@endif> Disable the visual editor when writing</label></td>
+</tr>
+@if (has_admin_themes)<tr class="user-admin-theme-wrap">
+<th scope="row"><label for="admin_theme">Admin Theme</label></th>
+<td><select name="admin_theme" id="admin_theme">@foreach (option in admin_themes)<option value="{{ $option.value }}" @if (option.selected)selected@endif>{{ $option.label }}</option>@endforeach</select>
+<p class="description">The look of the admin for you. WordPress has no light or dark mode, so this theme stays light.</p></td>
+</tr>
+@endif<tr class="user-comment-shortcuts-wrap">
+<th scope="row">Keyboard Shortcuts</th>
+<td><label for="comment_shortcuts"><input type="checkbox" name="comment_shortcuts" id="comment_shortcuts" value="true" @if (comment_shortcuts) checked@endif> Enable keyboard shortcuts for comment moderation.</label></td>
+</tr>
+<tr class="show-admin-bar user-admin-bar-front-wrap">
+<th scope="row">Toolbar</th>
+<td><label for="admin_bar_front"><input name="admin_bar_front" type="checkbox" id="admin_bar_front" value="1" @if (admin_bar_front) checked@endif> Show Toolbar when viewing site</label></td>
+</tr>
+</table>
+
+<h2>Name</h2>
+<table class="form-table" role="presentation">
+<tr class="user-user-login-wrap">
+<th><label for="user_login">Username</label></th>
+<td><input type="text" name="user_login" id="user_login" value="{{ $username }}" disabled="disabled" class="regular-text"> <span class="description">Usernames cannot be changed.</span></td>
+</tr>
+<tr class="user-first-name-wrap">
+<th><label for="first_name">First Name</label></th>
+<td><input type="text" name="first_name" id="first_name" value="{{ $first_name }}" class="regular-text"></td>
+</tr>
+<tr class="user-last-name-wrap">
+<th><label for="last_name">Last Name</label></th>
+<td><input type="text" name="last_name" id="last_name" value="{{ $last_name }}" class="regular-text"></td>
+</tr>
+<tr class="user-nickname-wrap">
+<th><label for="nickname">Nickname <span class="description">(required)</span></label></th>
+<td><input type="text" name="nickname" id="nickname" value="{{ $nickname }}" class="regular-text" @if (has_nickname_error) aria-invalid="true" aria-describedby="nickname-error"@endif>@if (has_nickname_error)
+<p class="description mc-field-error" id="nickname-error">{{ $nickname_error }}</p>@endif</td>
+</tr>
+<tr class="user-display-name-wrap">
+<th><label for="display_name">Display name publicly as</label></th>
+<td><select name="display_name" id="display_name">@foreach (choice in display_names)<option @if (choice.selected) selected="selected"@endif>{{ $choice.name }}</option>@endforeach</select></td>
+</tr>
+</table>
+
+<h2>Contact Info</h2>
+<table class="form-table" role="presentation">
+<tr class="user-email-wrap">
+<th><label for="email">Email <span class="description">(required)</span></label></th>
+<td><input type="email" name="email" id="email" value="{{ $email }}" class="regular-text ltr" @if (has_email_error) aria-invalid="true" aria-describedby="email-error"@endif>@if (has_email_error)
+<p class="description mc-field-error" id="email-error">{{ $email_error }}</p>@endif</td>
+</tr>
+<tr class="user-url-wrap">
+<th><label for="url">Website</label></th>
+<td><input type="url" name="url" id="url" value="{{ $url }}" class="regular-text code" @if (has_url_error) aria-invalid="true" aria-describedby="url-error"@endif>@if (has_url_error)
+<p class="description mc-field-error" id="url-error">{{ $url_error }}</p>@endif</td>
+</tr>
+</table>
+
+<h2>About Yourself</h2>
+<table class="form-table" role="presentation">
+<tr class="user-description-wrap">
+<th><label for="description">Biographical Info</label></th>
+<td><textarea name="description" id="description" rows="5" cols="30">{{ $description }}</textarea>
+<p class="description">Share a little biographical information to fill out your profile. This may be shown publicly.</p></td>
+</tr>
+<tr class="user-profile-picture">
+<th>Profile Picture</th>
+<td>@if (has_avatar)<img src="{{ $avatar_url }}" alt="" class="avatar avatar-96 photo" height="96" width="96">@else<span class="avatar avatar-96 avatar-initials" aria-hidden="true">{{ $user_initials }}</span>@endif
+<p class="description">You can change your profile picture here: a PNG, JPEG or WebP picture of up to 1 MB. Without one, your initials show.</p>
+<p><input type="file" name="avatar" accept="image/png,image/jpeg,image/webp" form="mc-avatar-form" aria-label="Profile Picture"> <button type="submit" class="button" form="mc-avatar-form">Upload</button>@if (has_avatar) <button type="submit" class="button" form="mc-remove-avatar-form">Remove picture</button>@endif</p></td>
+</tr>
+</table>
+
+<h2>Account Management</h2>
+<table class="form-table" role="presentation">
+<tr id="password" class="user-pass1-wrap">
+<th><label for="pass1">New Password</label></th>
+<td><button type="button" class="button wp-generate-pw hide-if-no-js" aria-expanded="false" data-mc-set-password>Set New Password</button>
+<div class="wp-pwd hide-if-js" @if (has_pass1_error) data-mc-open@endif>
+<input type="password" name="pass1" id="pass1" class="regular-text" value="" autocomplete="new-password" spellcheck="false" @if (has_pass1_error) aria-invalid="true" aria-describedby="pass1-error"@endif>
+<button type="button" class="button wp-generate-pw-again hide-if-no-js" data-mc-generate-password>Generate Password</button>
+<button type="button" class="button wp-hide-pw hide-if-no-js" data-mc-hide-password aria-label="Hide password">Hide</button>
+<button type="button" class="button wp-cancel-pw hide-if-no-js" data-mc-cancel-password aria-label="Cancel password change">Cancel</button>@if (has_pass1_error)
+<p class="description mc-field-error" id="pass1-error">{{ $pass1_error }}</p>@endif
+</div></td>
+</tr>
+<tr class="user-pass2-wrap hide-if-js">
+<th scope="row"><label for="pass2">Repeat New Password</label></th>
+<td><input name="pass2" type="password" id="pass2" class="regular-text" value="" autocomplete="new-password" spellcheck="false" aria-describedby="pass2-desc">
+<p class="description" id="pass2-desc">Type your new password again.</p></td>
+</tr>
+<tr class="user-sessions-wrap">
+<th>Sessions</th>
+<td aria-live="assertive">@if (has_other_sessions)<div class="destroy-sessions"><button type="submit" class="button" id="destroy-sessions" form="mc-destroy-sessions-form">Log Out Everywhere Else</button></div>
+<p class="description">Did you lose your phone or leave your account logged in at a public computer? You can log out everywhere else, and stay logged in here.</p>@else<div class="destroy-sessions"><button type="button" disabled class="button">Log Out Everywhere Else</button></div>
+<p class="description">You are only logged in at this location.</p>@endif</td>
+</tr>
+</table>
+
+<div class="application-passwords" id="application-passwords-section">
+<h2>Application Passwords</h2>
+<p>Application passwords allow authentication via non-interactive systems, such as XML-RPC or the REST API, without providing your actual password. Application passwords can be easily revoked. They cannot be used for traditional logins to your website.</p>
+@if (has_new_app_password)<div class="notice notice-success is-dismissible new-application-password-notice" role="alert">
+<p class="application-password-display"><label for="new-application-password-value">Your new password for {{ $new_app_password_name }} is:</label> <input id="new-application-password-value" type="text" class="code" readonly="readonly" value="{{ $new_app_password }}"></p>
+<p>Be sure to save this in a safe location. You will not be able to retrieve it.</p>
+</div>
+@endif<div class="create-application-password form-wrap">
+<div class="form-field">
+<label for="new_application_password_name">New Application Password Name</label>
+<input type="text" size="30" id="new_application_password_name" name="new_application_password_name" form="mc-app-password-form" value="{{ $app_password_name }}" class="input" aria-required="true" aria-describedby="new_application_password_name_desc" spellcheck="false" @if (has_app_password_error) aria-invalid="true"@endif>
+<p class="description" id="new_application_password_name_desc">Required to create an Application Password, but not to update the user.</p>@if (has_app_password_error)
+<p class="description mc-field-error" id="new_application_password_name_error">{{ $app_password_error }}</p>@endif
+</div>
+<button type="submit" name="do_new_application_password" id="do_new_application_password" class="button button-secondary" form="mc-app-password-form">Add Application Password</button>
+</div>
+@if (has_app_passwords)<div class="application-passwords-list-table-wrapper">
+<table class="wp-list-table widefat fixed striped table-view-list application-passwords-user">
+<thead><tr><th scope="col" class="manage-column column-name column-primary">Name</th><th scope="col" class="manage-column column-created">Created</th><th scope="col" class="manage-column column-last_used">Last Used</th><th scope="col" class="manage-column column-last_ip">Last IP</th><th scope="col" class="manage-column column-revoke">Revoke</th></tr></thead>
+<tbody>@foreach (item in app_passwords)<tr data-uuid="{{ $item.uuid }}"><td class="name column-name column-primary">{{ $item.name }}</td><td class="created column-created">{{ $item.created }}</td><td class="last_used column-last_used">{{ $item.last_used }}</td><td class="last_ip column-last_ip">{{ $item.last_ip }}</td><td class="revoke column-revoke"><button type="submit" class="button delete" form="{{ $item.form_id }}" aria-label="Revoke &#8220;{{ $item.name }}&#8221;">Revoke</button></td></tr>@endforeach</tbody>
+</table>
+<div class="tablenav bottom"><div class="alignleft actions bulkactions"><button type="submit" class="button delete" id="revoke-all-application-passwords" form="mc-revoke-all-form">Revoke all application passwords</button></div></div>
+</div>
+@endif</div>
+
+<p class="submit"><input type="submit" name="submit" id="submit" class="button button-primary" value="Update Profile"></p>
+</form>
+<form id="mc-avatar-form" method="post" action="{{ $avatar_action }}" enctype="multipart/form-data" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
+<form id="mc-remove-avatar-form" method="post" action="{{ $remove_avatar_action }}" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
+<form id="mc-destroy-sessions-form" method="post" action="{{ $destroy_sessions_action }}" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
+<form id="mc-app-password-form" method="post" action="{{ $app_password_action }}" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
+<form id="mc-revoke-all-form" method="post" action="{{ $revoke_all_action }}" data-mc-confirm="Are you sure you want to revoke all passwords? This action cannot be undone." hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
+@foreach (item in app_passwords)<form id="{{ $item.form_id }}" method="post" action="{{ $revoke_action }}" data-mc-confirm="Are you sure you want to revoke this password? This action cannot be undone." hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"><input type="hidden" name="uuid" value="{{ $item.uuid }}"></form>
+@endforeach<script>
+(function () {
+  var page = document.getElementById('profile-page');
+  if (!page) return;
+  page.classList.add('js');
+  var pass1 = document.getElementById('pass1');
+  var pass2 = document.getElementById('pass2');
+  var box = page.querySelector('.wp-pwd');
+  var set = page.querySelector('[data-mc-set-password]');
+  function generate() {
+    // As wp_generate_password( 24 ): letters, digits and WordPress's special characters.
+    var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()';
+    var random = new Uint32Array(24);
+    crypto.getRandomValues(random);
+    var password = '';
+    for (var i = 0; i < random.length; i++) password += chars[random[i] % chars.length];
+    pass1.type = 'text';
+    pass1.value = password;
+    pass2.value = password;
+    pass1.focus();
+  }
+  function open(show) {
+    box.classList.toggle('hide-if-js', !show);
+    set.hidden = show;
+    set.setAttribute('aria-expanded', show ? 'true' : 'false');
+  }
+  if (box.hasAttribute('data-mc-open')) open(true);
+  set.addEventListener('click', function () { open(true); generate(); });
+  page.querySelector('[data-mc-generate-password]').addEventListener('click', generate);
+  page.querySelector('[data-mc-hide-password]').addEventListener('click', function (event) {
+    var hidden = pass1.type === 'password';
+    pass1.type = hidden ? 'text' : 'password';
+    event.currentTarget.textContent = hidden ? 'Hide' : 'Show';
+  });
+  page.querySelector('[data-mc-cancel-password]').addEventListener('click', function () {
+    pass1.value = '';
+    pass2.value = '';
+    pass1.type = 'password';
+    open(false);
+  });
+  // The repeated password is WordPress's no-script field: with the script, it follows the first.
+  pass1.addEventListener('input', function () { pass2.value = pass1.value; });
+  // "Display name publicly as" follows the names as they are typed, as user-profile.js does.
+  var select = document.getElementById('display_name');
+  var field = function (id) { var input = document.getElementById(id); return input ? input.value.trim() : ''; };
+  function names() {
+    var first = field('first_name'), last = field('last_name');
+    var list = [field('nickname'), field('user_login'), first, last];
+    if (first && last) { list.push(first + ' ' + last); list.push(last + ' ' + first); }
+    var chosen = select.value, out = [];
+    list.forEach(function (name) { if (name && out.indexOf(name) < 0) out.push(name); });
+    if (chosen && out.indexOf(chosen) < 0) out.unshift(chosen);
+    select.textContent = '';
+    out.forEach(function (name) {
+      var option = document.createElement('option');
+      option.textContent = name;
+      option.selected = name === chosen;
+      select.appendChild(option);
+    });
+  }
+  ['first_name', 'last_name', 'nickname'].forEach(function (id) {
+    document.getElementById(id).addEventListener('blur', names);
+  });
+  document.querySelectorAll('form[data-mc-confirm]').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+      if (!window.confirm(form.getAttribute('data-mc-confirm'))) event.preventDefault();
+    });
+  });
+})();
+</script>

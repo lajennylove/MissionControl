@@ -7,8 +7,10 @@
 //!   for the flash message, and WordPress's colours as Ignite's colour tokens, so the screens'
 //!   buttons and links are WordPress's blue. WordPress has no dark mode: the theme says so with
 //!   Ignite's `AdminTheme::dark_mode()` (Filament's `darkMode(false)`), so its pages render light,
-//!   its admin bar has no light or dark switch, and Ignite's own profile page shows no line about
-//!   the switch (its `theme_switcher_note` is none), with no copy of the page here.
+//!   and its admin bar has no light or dark switch.
+//! - Its own profile page, WordPress's `profile.php` with all its fields (see `admin::profile`):
+//!   the theme's `profile` view holds the page chrome and a marker where Mission Control puts
+//!   WordPress's profile form.
 //! - Its own sign-in, lost password and reset pages, as wp-login.php looks, on a layout of their
 //!   own. They post the same fields to the same actions as the panel's pages. A signed-out page
 //!   renders in the site's default admin theme (see `ignite_panel::theme`), so they show while
@@ -65,9 +67,8 @@ const TOP_BAR: &str = "themes.wordpress.partials.topbar";
 const FLASH: &str = "themes.wordpress.partials.flash";
 
 /// The theme's views by name, built into the binary. `dashboard` (the dashboard's widgets in
-/// WordPress's boxes), `login`, `forgot` and `reset` replace the panel's pages of those
-/// names. The profile page is the panel's: with [`AdminTheme::dark_mode`] off it shows no line
-/// about the light and dark switch.
+/// WordPress's boxes), `profile` (the page that holds WordPress's profile form, see
+/// `admin::profile`), `login`, `forgot` and `reset` replace the panel's pages of those names.
 const VIEWS: &[(&str, &str)] = &[
     (
         LAYOUT,
@@ -92,6 +93,10 @@ const VIEWS: &[(&str, &str)] = &[
     (
         "dashboard",
         include_str!("../../views/admin/wordpress/dashboard.propel"),
+    ),
+    (
+        "profile",
+        include_str!("../../views/admin/wordpress/profile.propel"),
     ),
     (
         "login",
@@ -370,13 +375,14 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_has_no_dark_mode_and_uses_the_panels_profile_page() {
+    fn the_theme_has_no_dark_mode_and_its_own_profile_page() {
         assert!(!WordPressTheme.dark_mode());
         assert!(!WordPressTheme.theme_switcher());
         assert_eq!(WordPressTheme.theme_switcher_note(), None);
         let bar = WordPressTheme.view(TOP_BAR).expect("the admin bar");
         assert!(!bar.contains("data-theme-toggle"), "{bar}");
-        assert_eq!(WordPressTheme.view("profile"), None);
+        let profile = WordPressTheme.view("profile").expect("the profile page");
+        assert!(profile.contains(super::super::profile::MARKER), "{profile}");
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! primitive capabilities ([`meta_cap`]). Users sign REST API clients in with application
 //! passwords ([`app_password`]); a signed-in user's roles come from a [`UserRoles`] provider
 //! ([`user_roles`]), such as [`IgniteUserRoles`], which reads Ignite's role tables
-//! ([`ignite_roles`]).
+//! ([`ignite_roles`]). A user's own profile, as WordPress's `profile.php` keeps it, is
+//! [`profile`].
 //!
 //! ```
 //! use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ pub mod app_password;
 pub mod capabilities;
 pub mod ignite_roles;
 pub mod meta_cap;
+pub mod profile;
 pub mod user_roles;
 
 pub use app_password::{

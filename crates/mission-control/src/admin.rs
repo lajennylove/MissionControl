@@ -80,7 +80,9 @@
 //!   holds answers 503 (fail closed).
 //!
 //! - The Users screens (`users.php`, `user-new.php`, `user-edit.php`) and the Roles screen, in
-//!   the Site group (see the `users` submodule), built on Ignite's.
+//!   the Site group (see the `users` submodule), built on Ignite's. In the WordPress admin theme,
+//!   the profile page is WordPress's `profile.php` with all its fields (the `profile`
+//!   submodule); the Ignite theme keeps Ignite's.
 //! - The dashboard's widgets (see `mission_control_core::admin::dashboard`): the At a Glance
 //!   cards, then WordPress's At a Glance, Activity and Quick Draft boxes as Ignite's list and
 //!   form widgets, in every admin theme.
@@ -139,6 +141,7 @@ mod forms;
 mod locks;
 mod media;
 mod menus;
+mod profile;
 mod users;
 mod wordpress_theme;
 
@@ -390,6 +393,8 @@ pub(crate) async fn mount_panel(
         .attach(menus::MenuBuilderViews)
         .attach(forms::FormViews)
         .attach(users::UserFormViews)
+        .attach(profile::ProfileView)
+        .manage(profile::ProfileNotices::default())
         .register(
             format!("{ADMIN_PATH}/profile"),
             rocket::catchers![picture_too_large],
@@ -400,6 +405,7 @@ pub(crate) async fn mount_panel(
         .manage(menu_sources)
         .mount(ADMIN_PATH, settings_routes())
         .mount(ADMIN_PATH, users::routes())
+        .mount(ADMIN_PATH, profile::routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))
         .manage(AdminScreens {
