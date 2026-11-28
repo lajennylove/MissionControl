@@ -81,7 +81,16 @@ async fn save_picture(client: &Client, value: &str) -> (Status, String) {
     (status, response.into_string().await.unwrap_or_default())
 }
 
+/// Both flows, in one test so their order is fixed: Ignite keeps the `attachment` resource of the
+/// first app built in the process, and a later app's media library screen is refused (fail closed,
+/// 503). The flow that opens the attachment screens builds the first app; the migration flow does
+/// not open them.
 #[test]
+fn pictures_are_attachments_of_the_media_library() {
+    the_picture_is_an_attachment_of_the_media_library();
+    a_picture_stored_before_becomes_an_attachment();
+}
+
 fn the_picture_is_an_attachment_of_the_media_library() {
     run("avatars", |client, db| async move {
         let (id, email) = user(&db, "ada", "administrator").await;
@@ -236,7 +245,6 @@ fn the_picture_is_an_attachment_of_the_media_library() {
     });
 }
 
-#[test]
 fn a_picture_stored_before_becomes_an_attachment() {
     let storage = Path::new("storage");
     let had_storage = storage.exists();
