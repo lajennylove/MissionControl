@@ -11,6 +11,7 @@
 //! let html = propel_runtime::render(&theme.loader(), &found.view, &context)?;
 //! ```
 
+mod global_styles;
 mod hierarchy;
 mod loader;
 mod manifest;
@@ -18,6 +19,9 @@ mod menus;
 mod request;
 mod widgets;
 
+pub use global_styles::{
+    MAX_THEME_JSON_BYTES, THEME_JSON, font_faces, global_stylesheet, theme_json,
+};
 pub(crate) use hierarchy::page_template_name;
 pub use hierarchy::templates_for;
 pub use loader::{
@@ -26,7 +30,7 @@ pub use loader::{
 pub(crate) use manifest::describe as describe_toml_error;
 pub use manifest::{
     MANIFEST_FILE, MAX_AREA_ID, MAX_MANIFEST_BYTES, MAX_TEMPLATE_NAME, Manifest, MenuLocation,
-    PageTemplate, Sidebar, Support,
+    PageTemplate, Sidebar, Support, ThemeImageSize,
 };
 pub(crate) use menus::auto_add_page_in;
 pub use menus::{

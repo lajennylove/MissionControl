@@ -25,7 +25,7 @@
 //! | Variable | What it holds | WordPress |
 //! | --- | --- | --- |
 //! | `site.name`, `site.description`, `site.url`, `site.language` | the site's title, tagline, address and language, as plain text: escape them (`{{ }}`), never output them raw. The title and tagline are stored escaped (`sanitize_option`'s `esc_html`) and decoded here, so `{{ }}` escapes them once, as WordPress's `bloginfo` does | `bloginfo` |
-//! | `head` | the robots meta tag (WordPress's `wp_robots`), then the tags that load the theme's built CSS and JavaScript; output raw | `wp_head` |
+//! | `head` | the robots meta tag (WordPress's `wp_robots`), the global styles made from the theme's `theme.json` (the `--wp--preset--*` variables, the layout, the element and block styles and the `has-*` classes) and its bundled fonts, then the tags that load the theme's built CSS and JavaScript; output raw | `wp_head` |
 //! | `document_title` | the `<title>` text | `wp_get_document_title` |
 //! | `body_class` | the classes for `<body>` | `body_class` |
 //! | `is.*` | the conditional tags: `front_page`, `home`, `singular`, `single`, `page`, `attachment`, `archive`, `category`, `tag`, `author`, `date`, `post_type_archive`, `search`, `not_found`, `paged` | `is_*` |
@@ -35,6 +35,7 @@
 //! | `search_query` | the search terms as typed | `get_search_query` |
 //! | `pagination.*` | `current`, `total`, `has_pages`, and the `previous` (newer) and `next` (older) page links or `null` | `posts_nav_link` |
 //! | `theme.slug`, `theme.name`, `theme.version` | the active theme | `wp_get_theme` |
+//! | `theme.stylesheet_url`, `theme.template_url`, `theme.built` | the URL of the active theme's built files and of its parent's (the theme's own for a standalone theme), and whether the parent's (or the theme's own) build exists, so a template links a built image only when it is there | `get_stylesheet_directory_uri`, `get_template_directory_uri` |
 //! | `menus.{location}` | each menu location the theme declares: its assigned [`NavMenu`] (`id`, `name`, `slug`, `items`), or `null` | `wp_nav_menu` |
 //! | `sidebars.{id}` | each widget area the theme declares: `id`, `name`, `active` and its rendered `widgets` ([`SidebarView`]) | `dynamic_sidebar` |
 //!
@@ -67,8 +68,8 @@ use crate::text::{escape_html, html_class, strip_all_tags};
 #[cfg(doc)]
 use crate::theme::NavMenuItem;
 use crate::theme::{
-    NavMenu, PageRequest, SidebarView, Theme, ThemeError, ThemeLoader, load_theme, templates_for,
-    theme_menus, theme_sidebars,
+    NavMenu, PageRequest, SidebarView, Theme, ThemeError, ThemeLoader, font_faces,
+    global_stylesheet, load_theme, templates_for, theme_json, theme_menus, theme_sidebars,
 };
 
 /// The theme used when the active theme cannot be loaded, as WordPress's `WP_DEFAULT_THEME`.
@@ -251,6 +252,11 @@ pub struct Frontend {
     theme: Theme,
     loader: ThemeLoader,
     assets: Assets,
+    /// The global stylesheet made from the theme's `theme.json`, in its `<style>` element; empty
+    /// for a theme without one.
+    global_styles: String,
+    /// The `theme.json` and the slug and folder of the theme that has it, for its fonts.
+    theme_json: Option<(serde_json::Value, String, PathBuf)>,
 }
 
 impl fmt::Debug for Frontend {
@@ -277,12 +283,23 @@ impl Frontend {
                     .url_prefix(asset_prefix(theme.slug())),
             );
         }
+        let json = theme_json(&theme)
+            .map(|(json, owner)| (json, owner.slug().to_owned(), owner.dir().to_path_buf()));
+        // WordPress prints it as `global-styles-inline-css` in `wp_head`.
+        let global_styles = json.as_ref().map_or_else(String::new, |(json, _, _)| {
+            format!(
+                "<style id=\"global-styles-inline-css\">{}</style>\n",
+                global_stylesheet(json)
+            )
+        });
         Self {
             loader: theme.loader(),
             db,
             hooks,
             theme,
             assets,
+            global_styles,
+            theme_json: json,
         }
     }
 
@@ -424,10 +441,16 @@ impl Frontend {
             archive,
             search_query,
             pagination,
-            theme: ThemeView {
-                slug: self.theme.slug().to_owned(),
-                name: manifest.name.clone(),
-                version: manifest.version.clone().unwrap_or_default(),
+            theme: {
+                let template = self.theme.parent().unwrap_or(&self.theme);
+                ThemeView {
+                    slug: self.theme.slug().to_owned(),
+                    name: manifest.name.clone(),
+                    version: manifest.version.clone().unwrap_or_default(),
+                    stylesheet_url: asset_prefix(self.theme.slug()),
+                    template_url: asset_prefix(template.slug()),
+                    built: template.dir().join("public/build/manifest.json").is_file(),
+                }
             },
             menus,
             sidebars,
@@ -438,7 +461,22 @@ impl Frontend {
     /// enqueued styles in `wp_head`. An entry the build does not have is left out, so a theme
     /// renders before `npm run build` has run.
     fn head(&self) -> String {
-        let mut head = String::new();
+        let mut head = self.global_styles.clone();
+        // The bundled fonts, once the build has copied them (`wp_print_font_faces`).
+        if let Some((json, slug, dir)) = &self.theme_json {
+            let build = dir.join("public").join("build");
+            let faces = font_faces(json, |rel| {
+                build
+                    .join(rel)
+                    .is_file()
+                    .then(|| format!("{}/{rel}", asset_prefix(slug)))
+            });
+            if !faces.is_empty() {
+                head.push_str(&format!(
+                    "<style class=\"wp-fonts-local\">{faces}</style>\n"
+                ));
+            }
+        }
         for theme in themes_of(&self.theme).into_iter().rev() {
             for entry in THEME_ENTRIES {
                 if let Some(tags) = self.assets.tags(&[format!("{}::{entry}", theme.slug())]) {
@@ -999,6 +1037,9 @@ struct ThemeView {
     slug: String,
     name: String,
     version: String,
+    stylesheet_url: String,
+    template_url: String,
+    built: bool,
 }
 
 /// A post as templates see it.

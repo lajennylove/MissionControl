@@ -9,6 +9,7 @@
 //! description = "The default theme."
 //! license = "GPL-2.0-or-later"
 //! requires = "0.1"
+//! tested = "0.1"            # Tested up to
 //! template = "orbit-base"   # the parent theme's slug, for a child theme
 //! supports = ["menus", "post-thumbnails", "custom-logo"]
 //!
@@ -17,6 +18,9 @@
 //!
 //! [sidebars]                # register_sidebar: id => name
 //! footer = "Footer"
+//!
+//! [image_sizes]             # add_image_size: name => size
+//! featured = { width = 1200, height = 800, crop = true }
 //! ```
 //!
 //! The theme's slug is the name of its folder, as in WordPress; the manifest cannot set it.
@@ -62,6 +66,8 @@ pub struct Manifest {
     pub license: Option<String>,
     /// The oldest Mission Control version the theme works with (`Requires at least`).
     pub requires: Option<String>,
+    /// The newest Mission Control version the theme was tested with (`Tested up to`).
+    pub tested: Option<String>,
     /// The parent theme's slug, for a child theme (WordPress's `Template` header). `None` for a
     /// standalone theme; an empty value is the same as none.
     pub template: Option<String>,
@@ -73,6 +79,33 @@ pub struct Manifest {
     pub menus: Vec<MenuLocation>,
     /// The theme's widget areas (`register_sidebar`), in the order written.
     pub sidebars: Vec<Sidebar>,
+    /// The image sizes the theme registers (`add_image_size`), in the order written.
+    pub image_sizes: Vec<ThemeImageSize>,
+}
+
+/// An image size a theme registers, as `add_image_size( $name, $width, $height, $crop )`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeImageSize {
+    /// The size's name, such as `featured`: lowercase ASCII letters, digits, `-` and `_`.
+    pub name: String,
+    /// The largest width, in pixels; 0 for any width.
+    pub width: u32,
+    /// The largest height, in pixels; 0 for any height.
+    pub height: u32,
+    /// Whether the image is cut to exactly this box.
+    pub crop: bool,
+}
+
+/// An `[image_sizes]` entry as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawImageSize {
+    #[serde(default)]
+    width: u32,
+    #[serde(default)]
+    height: u32,
+    #[serde(default)]
+    crop: bool,
 }
 
 /// A page template: WordPress's template file with a `Template Name:` header, which a page
@@ -151,11 +184,13 @@ struct RawManifest {
     description: Option<String>,
     license: Option<String>,
     requires: Option<String>,
+    tested: Option<String>,
     template: Option<String>,
     #[serde(default)]
     supports: Vec<Support>,
     menus: Option<toml::Table>,
     sidebars: Option<toml::Table>,
+    image_sizes: Option<toml::Table>,
 }
 
 impl Manifest {
@@ -189,6 +224,7 @@ impl Manifest {
             .into_iter()
             .map(|(id, name)| Sidebar { id, name })
             .collect::<Vec<_>>();
+        let image_sizes = image_sizes(raw.image_sizes).map_err(invalid)?;
         let mut supports = raw.supports;
         if !menus.is_empty() && !supports.contains(&Support::Menus) {
             supports.push(Support::Menus);
@@ -204,10 +240,12 @@ impl Manifest {
             description: raw.description,
             license: raw.license,
             requires: raw.requires,
+            tested: raw.tested,
             template: raw.template.filter(|template| !template.is_empty()),
             supports,
             menus,
             sidebars,
+            image_sizes,
         })
     }
 
@@ -215,6 +253,49 @@ impl Manifest {
     pub fn supports(&self, feature: Support) -> bool {
         self.supports.contains(&feature)
     }
+}
+
+/// The `[image_sizes]` table: each name lowercase letters, digits, `-` and `_` (at most
+/// [`MAX_AREA_ID`]), each value a table of `width`, `height` and `crop`, and at least one of the
+/// width and height set.
+fn image_sizes(table: Option<toml::Table>) -> Result<Vec<ThemeImageSize>, String> {
+    let mut sizes = Vec::new();
+    for (name, value) in table.unwrap_or_default() {
+        let valid_name = !name.is_empty()
+            && name.len() <= MAX_AREA_ID
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if !valid_name {
+            return Err(match echoable(&name) {
+                Some(name) => format!(
+                    "`[image_sizes]` name `{name}` is not valid: use lowercase letters, digits, \
+                     `-` and `_`"
+                ),
+                None => "an `[image_sizes]` name is not valid: use lowercase letters, digits, \
+                         `-` and `_`"
+                    .to_owned(),
+            });
+        }
+        let raw: RawImageSize = value.try_into().map_err(|_| {
+            format!(
+                "`[image_sizes]` `{name}` is not valid: write {{ width = 1200, height = 800, \
+                 crop = true }}"
+            )
+        })?;
+        if raw.width == 0 && raw.height == 0 {
+            return Err(format!(
+                "`[image_sizes]` `{name}` needs a width or a height"
+            ));
+        }
+        sizes.push(ThemeImageSize {
+            name,
+            width: raw.width,
+            height: raw.height,
+            crop: raw.crop,
+        });
+    }
+    Ok(sizes)
 }
 
 /// The longest menu location or widget area id.
