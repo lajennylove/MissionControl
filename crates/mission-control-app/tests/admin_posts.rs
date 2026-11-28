@@ -951,7 +951,7 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
     }
     // Each entry's links (its "Add new", the entries under it) are in its group, which shows
     // them while it, or one of them, is the current page: every group is closed on the
-    // dashboard, its links hidden. No Post Types, Taxonomies or Field Groups yet.
+    // dashboard, its links hidden.
     for (entry, links) in [
         (
             "Posts",
@@ -971,8 +971,15 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
             assert!(group.contains(link), "{link} in {entry}: {group}");
         }
     }
-    for absent in ["Post Types", "Taxonomies", "Field Groups"] {
-        assert!(!nav.contains(absent), "{absent}: {nav}");
+    // The managers of post types, taxonomies and field groups (Task 5.7) are in Site, after
+    // Menus and above Settings.
+    let site = nav.find("data-ig-nav-toggle>Site<").unwrap();
+    let settings = nav.find(">Settings</a>").unwrap();
+    for manager in ["post-types", "taxonomies", "field-groups"] {
+        let link = nav
+            .find(&format!("href=\"/mc-admin/{manager}\""))
+            .unwrap_or_else(|| panic!("{manager}: {nav}"));
+        assert!(site < link && link < settings, "{manager}: {nav}");
     }
     sidebar_children(client).await;
     // Choosing the WordPress theme on the profile page shows its Dashicons and loads their

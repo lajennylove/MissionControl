@@ -163,6 +163,9 @@ fn a_field_group_shows_its_field_on_the_post_types_form() {
         assert_eq!(status, Status::Ok, "{html}");
         assert!(html.contains("Book details"), "{html}");
         assert!(html.contains(&format!("name=\"{field_key}\"")), "{html}");
+        // Positioned "Side": in the sidebar column, after the Publish box.
+        let publish = html.find(">Publish<").expect("the Publish box");
+        assert!(html.find("Book details").unwrap() > publish, "{html}");
         let id = new_post(
             &client,
             "book",

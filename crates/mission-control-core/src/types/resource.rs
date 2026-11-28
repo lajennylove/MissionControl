@@ -157,7 +157,9 @@ use ignite_core::{
 use orbit_orm::{Database, Error, Model, Value as Sql, raw};
 use serde_json::{Value, json};
 
-use super::definition::{CapabilityType, FieldDef, FieldKindDef, Origin, PostTypeDef, Support};
+use super::definition::{
+    CapabilityType, FieldDef, FieldKindDef, Origin, Position, PostTypeDef, Support,
+};
 use super::location::ScreenContext;
 use super::registry::Registry;
 use super::status_tabs;
@@ -721,8 +723,8 @@ pub fn post_type_resource_with_access(
         });
     }
 
-    // The field groups' fields, one card per group in the main column.
-    let mut group_sections: Vec<Section> = Vec::new();
+    // The field groups' fields, one card per group, where its position puts it.
+    let mut group_sections: Vec<(Position, Section)> = Vec::new();
     for group in registry.groups_for(&ScreenContext::post(slug)) {
         let mut section = Section::make(group.title.clone());
         for def in group.fields {
@@ -767,7 +769,7 @@ pub fn post_type_resource_with_access(
             section = section.schema([name.clone()]);
             data.custom.push(CustomField { field: name, def });
         }
-        group_sections.push(section);
+        group_sections.push((group.position, section));
     }
 
     let column = |key: &str, label: &str, sortable: bool, searchable: bool| ColumnDef {
@@ -892,18 +894,25 @@ fn trash_actions(data: &PostTypeData) -> Vec<RowAction> {
 /// (Filament's `->columns(3)` with a main group spanning 2 and a sidebar group spanning 1):
 ///
 /// - the main column (two thirds): the title, the slug and the content in one card, the
-///   excerpt, and one card per field group (`group_sections`, headed by the group's title);
+///   excerpt, and one card per field group (`group_sections`, headed by the group's title, in
+///   ACF's order): a group positioned "High (after title)" after the title's card, a "Normal"
+///   one after the excerpt;
 /// - the sidebar (one third): Publish (status, date, password, sticky, author), the featured
-///   image, Page Attributes (parent, template, order), and one card per taxonomy with its
-///   field for new terms.
+///   image, Page Attributes (parent, template, order), one card per taxonomy with its field for
+///   new terms, then the field groups positioned "Side", as ACF's `side` boxes.
 ///
 /// A field the type does not have is not on the form, and Ignite leaves out a card with none.
-fn editor_layout(data: &PostTypeData, group_sections: Vec<Section>) -> FormLayout {
-    let mut main = vec![
-        Section::make("").schema([TITLE, SLUG, CONTENT]),
-        Section::make("Excerpt").schema([EXCERPT]),
-    ];
-    main.extend(group_sections);
+fn editor_layout(data: &PostTypeData, group_sections: Vec<(Position, Section)>) -> FormLayout {
+    let placed = |position: Position| {
+        group_sections
+            .iter()
+            .filter(move |(p, _)| *p == position)
+            .map(|(_, section)| section.clone())
+    };
+    let mut main = vec![Section::make("").schema([TITLE, SLUG, CONTENT])];
+    main.extend(placed(Position::AfterTitle));
+    main.push(Section::make("Excerpt").schema([EXCERPT]));
+    main.extend(placed(Position::Normal));
     let mut sidebar = vec![
         Section::make("Publish").schema([STATUS, DATE, PASSWORD, STICKY, AUTHOR]),
         Section::make("").schema([FEATURED_MEDIA]),
@@ -916,6 +925,7 @@ fn editor_layout(data: &PostTypeData, group_sections: Vec<Section>) -> FormLayou
         }
         sidebar.push(section);
     }
+    sidebar.extend(placed(Position::Side));
     FormLayout::new().columns(3).schema([
         Group::make(main).column_span(2),
         Group::make(sidebar).column_span(1),
