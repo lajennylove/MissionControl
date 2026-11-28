@@ -13,8 +13,14 @@
 //!   own. They post the same fields to the same actions as the panel's pages. A signed-out page
 //!   renders in the site's default admin theme (see `ignite_panel::theme`), so they show while
 //!   this theme is the site's default.
-//! - Its own dashboard: the panel's cards as WordPress's dashboard boxes, and WordPress's Quick
-//!   Draft box, whose form saves a draft through the Posts screen's create.
+//! - Its own dashboard view: Ignite's dashboard widgets, the ones the default theme shows, in
+//!   WordPress's dashboard boxes (`.postbox`, its heading in `.postbox-header`): the list
+//!   widgets At a Glance and Activity in the first column, each row as WordPress lists it, and
+//!   the form widget Quick Draft in the second, posting to the Posts screen's create. It reads
+//!   the dashboard's widget data (`widgets`: each widget's title, rows, empty state, and a form's
+//!   action, fields and hidden values), not Ignite's widget partials, so the boxes have
+//!   WordPress's markup. The stat cards are left out: WordPress has none, and At a Glance shows
+//!   the same counts.
 //! - WordPress's Dashicons for the menu, with the Dashicons stylesheet loaded only while this
 //!   theme is the page's theme.
 
@@ -58,8 +64,8 @@ const TOP_BAR: &str = "themes.wordpress.partials.topbar";
 /// The flash message, as an admin notice.
 const FLASH: &str = "themes.wordpress.partials.flash";
 
-/// The theme's views by name, built into the binary. `dashboard` (WordPress's dashboard boxes
-/// and its Quick Draft form), `login`, `forgot` and `reset` replace the panel's pages of those
+/// The theme's views by name, built into the binary. `dashboard` (the dashboard's widgets in
+/// WordPress's boxes), `login`, `forgot` and `reset` replace the panel's pages of those
 /// names. The profile page is the panel's: with [`AdminTheme::dark_mode`] off it shows no line
 /// about the light and dark switch.
 const VIEWS: &[(&str, &str)] = &[

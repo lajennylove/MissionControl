@@ -3,8 +3,8 @@
 //! linked to their screens), its "Activity" box (`wp_dashboard_recent_posts`: the five newest
 //! published posts with their dates) and its "Quick Draft" box (`wp_dashboard_quick_press`: a
 //! title and the content saved as a draft through the Posts screen's create), as Ignite's list
-//! and form widgets. The WordPress admin theme keeps its own dashboard view (its cards as
-//! WordPress's boxes and its Quick Draft form).
+//! and form widgets. The WordPress admin theme shows the same widgets in WordPress's dashboard
+//! boxes, without the stat cards.
 //!
 //! The flows run on MySQL or MariaDB only (see `admin_support`).
 
@@ -80,6 +80,15 @@ fn widget_rows(html: &str, title: &str) -> Vec<WidgetRow> {
             (label, link, value)
         })
         .collect()
+}
+
+/// The WordPress theme's dashboard box titled `title`: its markup, from its heading to the end
+/// of its content.
+fn wp_box<'h>(html: &'h str, title: &str) -> Option<&'h str> {
+    let heading = format!("<h2 class=\"hndle\">{title}</h2>");
+    let start = html.find(&heading)?;
+    let end = start + html[start..].find("</div>\n</div>")?;
+    Some(&html[start..end])
 }
 
 async fn count(db: &Database, sql: &str, binds: &[Sql]) -> i64 {
@@ -233,12 +242,61 @@ fn the_dashboard_has_wordpresss_cards() {
             .unwrap();
         assert_eq!(drafts.1, "2", "{dashboard}");
 
-        // The WordPress theme keeps its view: the cards as WordPress's boxes and Quick Draft.
+        // The WordPress theme shows the same widgets in WordPress's dashboard boxes: At a Glance
+        // and Activity in the first column, Quick Draft in the second, and no stat cards.
         choose_theme(&client, "wordpress").await;
         let (status, wordpress) = get(&client, "/mc-admin").await;
         assert_eq!(status, Status::Ok, "{wordpress}");
-        assert!(wordpress.contains("<h2>Posts</h2>"), "{wordpress}");
-        assert!(wordpress.contains("<h2>Quick Draft</h2>"), "{wordpress}");
+        let glance = wp_box(&wordpress, "At a Glance").expect("the At a Glance box");
+        assert!(
+            glance.contains("<li><a href=\"/mc-admin/post\">6 Posts</a></li>"),
+            "{glance}"
+        );
+        assert!(
+            glance.contains("<li><a href=\"/mc-admin/page\">1 Page</a></li>"),
+            "{glance}"
+        );
+        assert!(
+            glance.contains(&format!(
+                "<li><a href=\"/mc-admin/users\">{}</a></li>",
+                plural(users, "User", "Users")
+            )),
+            "{glance}"
+        );
+        let recent = wp_box(&wordpress, "Activity").expect("the Activity box");
+        let (title, link, date) = &activity[0];
+        assert!(
+            recent.contains(&format!(
+                "<li><span>{}</span> <a href=\"{}\">{title}</a></li>",
+                date.as_deref().unwrap(),
+                link.as_deref().unwrap()
+            )),
+            "{recent}"
+        );
+        assert_eq!(recent.matches("<li>").count(), 5, "{recent}");
+        let quick = wp_box(&wordpress, "Quick Draft").expect("the Quick Draft box");
+        for expected in [
+            "action=\"/mc-admin/post\"",
+            "name=\"_back\" value=\"/mc-admin\"",
+            "name=\"status\" value=\"draft\"",
+            "<input type=\"text\" name=\"title\" id=\"title\"",
+            "<textarea name=\"content\" id=\"content\" placeholder=\"What&#8217;s on your mind?\"",
+            "value=\"Save Draft\"",
+        ] {
+            assert!(quick.contains(expected), "`{expected}` in {quick}");
+        }
+        let first = wordpress.find("id=\"postbox-container-1\"").unwrap();
+        let second = wordpress.find("id=\"postbox-container-2\"").unwrap();
+        let at = |title: &str| wordpress.find(&format!(">{title}</h2>")).unwrap();
+        assert!(
+            first < at("At a Glance") && at("Activity") < second,
+            "{wordpress}"
+        );
+        assert!(second < at("Quick Draft"), "{wordpress}");
+        assert!(
+            !wordpress.contains("ig-tone-"),
+            "no stat cards: {wordpress}"
+        );
         choose_theme(&client, "").await;
         sign_out(&client).await;
 

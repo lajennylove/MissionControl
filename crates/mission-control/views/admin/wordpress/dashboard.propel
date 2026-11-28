@@ -1,4 +1,4 @@
-{{-- The WordPress admin theme's dashboard (`wp-admin/index.php`): the panel's dashboard with WordPress's boxes. Each card of the panel's widgets (At a Glance's counts, Activity's recently published posts) is a box with its title, its value and its description; then WordPress's "Quick Draft" box (`wp_dashboard_quick_press`), whose form saves a draft through the Posts screen's create, the normal post save path. --}}@extends('ignite::layouts.app')
+{{-- The WordPress admin theme's dashboard (`wp-admin/index.php`): Ignite's dashboard widgets, the same the default theme shows, in WordPress's dashboard boxes (`.postbox` with its `.postbox-header` heading). The list widgets (`ListWidget`: At a Glance, `wp_dashboard_right_now`, and Activity, `wp_dashboard_recent_posts`) fill the first column, each row as WordPress lists it (a value such as the date first, then the label or its link); the form widgets (`FormWidget`: Quick Draft, `wp_dashboard_quick_press`) fill the second, posting to their resource's create with their hidden values and the way back, as Ignite's widget does. The stat cards (`StatsOverviewWidget`) are not shown: WordPress has no such cards, and At a Glance gives the same counts. --}}@extends('ignite::layouts.app')
 
 @section('ignite_brand_name'){{ $brand.name }}@endsection
 
@@ -32,50 +32,65 @@
 
 @section('content')
 <style>
-#dashboard-widgets { display: grid; gap: 20px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); margin-top: 10px; }
-#dashboard-widgets .postbox { background: #fff; border: 1px solid #c3c4c7; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04); min-width: 0; }
-#dashboard-widgets .postbox h2 { border-bottom: 1px solid #c3c4c7; color: #1d2327; font-size: 14px; font-weight: 600; line-height: 1.4; margin: 0; padding: 8px 12px; }
-#dashboard-widgets .inside { margin: 0; padding: 0 12px 12px; }
-#dashboard-widgets .inside p { margin: 12px 0 0; }
-#dashboard-widgets .mc-count { color: #1d2327; font-size: 21px; overflow-wrap: anywhere; }
-#dashboard_quick_press { grid-column: 1 / -1; max-width: 640px; }
-#dashboard_quick_press label { display: block; margin: 12px 0 4px; }
-#dashboard_quick_press input[type="text"], #dashboard_quick_press textarea { border: 1px solid #8c8f94; border-radius: 4px; box-sizing: border-box; padding: 0 8px; width: 100%; }
-#dashboard_quick_press input[type="text"] { min-height: 30px; }
-#dashboard_quick_press textarea { padding: 6px 8px; }
-#dashboard_quick_press .submit { margin: 12px 0 0; }
-#dashboard_quick_press .button-primary { background: #2271b1; border: 1px solid #2271b1; border-radius: 3px; color: #fff; cursor: pointer; font-size: 13px; line-height: 2.15; min-height: 30px; padding: 0 10px; }
+#dashboard-widgets { align-items: start; display: grid; gap: 0 20px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); margin-top: 10px; }
+#dashboard-widgets .postbox-container { min-width: 0; }
+#dashboard-widgets .postbox { background: #fff; border: 1px solid #c3c4c7; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04); margin-bottom: 20px; min-width: 0; }
+#dashboard-widgets .postbox-header { align-items: center; border-bottom: 1px solid #c3c4c7; display: flex; justify-content: space-between; }
+#dashboard-widgets .postbox-header .hndle { color: #1d2327; font-size: 14px; font-weight: 600; line-height: 1.4; margin: 0; padding: 8px 12px; }
+#dashboard-widgets .inside { margin: 11px 0 0; padding: 0 12px 12px; }
+#dashboard-widgets .inside ul { list-style: none; margin: 0; padding: 0; }
+#dashboard-widgets .inside li { margin-bottom: 8px; overflow-wrap: anywhere; }
+#dashboard-widgets .inside li > span { color: #646970; display: inline-block; margin-right: 5px; min-width: 150px; }
+#dashboard-widgets .no-activity p { color: #646970; font-size: 16px; margin: 0; padding: 12px 0; text-align: center; }
+.mc-dashboard-form label { color: #646970; display: block; margin: 0 0 4px; }
+.mc-dashboard-form .input-text-wrap, .mc-dashboard-form .textarea-wrap { margin: 0 0 12px; }
+.mc-dashboard-form input[type="text"], .mc-dashboard-form textarea { border: 1px solid #8c8f94; border-radius: 4px; box-sizing: border-box; padding: 0 8px; width: 100%; }
+.mc-dashboard-form input[type="text"] { min-height: 30px; }
+.mc-dashboard-form textarea { padding: 6px 8px; resize: vertical; }
+.mc-dashboard-form .submit { margin: 0; padding: 0; }
+.mc-dashboard-form .button-primary { background: #2271b1; border: 1px solid #2271b1; border-radius: 3px; color: #fff; cursor: pointer; font-size: 13px; line-height: 2.15; min-height: 30px; padding: 0 10px; }
+.mc-dashboard-form .button-primary:hover { background: #135e96; border-color: #135e96; }
+#dashboard-widgets-wrap .widefat { background: #fff; border: 1px solid #c3c4c7; border-spacing: 0; width: 100%; }
+#dashboard-widgets-wrap .widefat th, #dashboard-widgets-wrap .widefat td { padding: 8px 10px; text-align: left; }
 </style>
 <h1>{{ $title }}</h1>
 <div id="dashboard-widgets-wrap">
 <div id="dashboard-widgets" class="metabox-holder">
-@forelse (card in cards)<div class="postbox">
-<h2>{{ $card.label }}</h2>
-<div class="inside"><p class="mc-count">{{ $card.value }}</p>@if (card.has_description)<p>{{ $card.description }}</p>@endif</div>
-</div>
-@empty<p>Nothing to show yet.</p>
-@endforelse<div id="dashboard_quick_press" class="postbox">
-<h2>Quick Draft</h2>
+<div id="postbox-container-1" class="postbox-container">
+@foreach (widget in widgets)@if (widget.is_list)<div id="{{ $widget.title_id }}" class="postbox mc-dashboard-list">
+<div class="postbox-header"><h2 class="hndle">{{ $widget.title }}</h2></div>
 <div class="inside">
-<form name="post" action="{{ $home_url }}/post" method="post" id="quick-press" class="initial-form">
-<input type="hidden" name="_token" value="{{ $csrf_token }}">
-<label for="title">Title</label>
-<input type="text" name="title" id="title" autocomplete="off">
-<label for="content">Content</label>
-<textarea name="content" id="content" placeholder="What&#8217;s on your mind?" class="mceEditor" rows="3" cols="15" autocomplete="off"></textarea>
-<p class="submit"><input type="submit" name="save" id="save-post" class="button button-primary" value="Save Draft"></p>
+@if (widget.has_rows)<div class="main"><ul>
+@foreach (row in widget.rows)<li>@if (row.has_value)<span>{{ $row.value }}</span> @endif@if (row.has_url)<a href="{{ $row.url }}">{{ $row.label }}</a>@else{{ $row.label }}@endif</li>
+@endforeach</ul></div>@else<div class="no-activity"><p>{{ $widget.empty_state }}</p></div>@endif
+</div>
+</div>
+@endif@endforeach</div>
+<div id="postbox-container-2" class="postbox-container">
+@foreach (widget in widgets)@if (widget.is_form)<div id="{{ $widget.title_id }}" class="postbox mc-dashboard-form">
+<div class="postbox-header"><h2 class="hndle">{{ $widget.title }}</h2></div>
+<div class="inside">
+<form method="post" action="{{ $widget.action }}" class="initial-form">
+<input type="hidden" name="_token" value="{{ $widget.csrf_token }}">
+<input type="hidden" name="_back" value="{{ $widget.back_url }}">
+@foreach (input in widget.hidden)<input type="hidden" name="{{ $input.name }}" value="{{ $input.value }}">
+@endforeach@foreach (field in widget.fields)@if (field.is_textarea)<div class="textarea-wrap"><label for="{{ $field.name }}">{{ $field.label }}</label><textarea name="{{ $field.name }}" id="{{ $field.name }}" placeholder="What&#8217;s on your mind?" class="mceEditor" rows="3" cols="15" autocomplete="off">{{ $field.value }}</textarea></div>
+@elseif (field.is.wysiwyg)<div class="textarea-wrap"><label for="{{ $field.name }}">{{ $field.label }}</label><textarea name="{{ $field.name }}" id="{{ $field.name }}" placeholder="What&#8217;s on your mind?" class="mceEditor" rows="3" cols="15" autocomplete="off">{{ $field.value }}</textarea></div>
+@else<div class="input-text-wrap"><label for="{{ $field.name }}">{{ $field.label }}</label><input type="text" name="{{ $field.name }}" id="{{ $field.name }}" value="{{ $field.value }}" autocomplete="off"></div>
+@endif@endforeach<p class="submit"><input type="submit" name="save" class="button button-primary" value="{{ $widget.submit_label }}"></p>
 </form>
 </div>
 </div>
-</div>
+@endif@endforeach</div>
 </div>
 @foreach (table in tables)
 <div class="postbox">
-<h2>{{ $table.title }}</h2>
+<div class="postbox-header"><h2 class="hndle">{{ $table.title }}</h2></div>
 <table class="widefat striped">
 <thead><tr>@foreach (head in table.headers)<th>{{ $head.label }}</th>@endforeach</tr></thead>
 <tbody>@forelse (row in table.rows)<tr>@foreach (cell in row.cells)<td>{{ $cell.text }}</td>@endforeach</tr>@empty<tr><td>No records yet.</td></tr>@endforelse</tbody>
 </table>
 </div>
 @endforeach
+</div>
 @endsection
