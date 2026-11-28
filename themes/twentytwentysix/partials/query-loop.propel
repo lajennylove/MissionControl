@@ -1,0 +1,24 @@
+{{-- Twenty Twenty-Five's pattern `template-query-loop`: each post's title (x-large, linked),
+     its full content (medium) and its date; "nothing found"; then the page links. --}}
+<div class="wp-block-query alignfull is-layout-flow wp-block-query-is-layout-flow">
+  @if ($posts)
+  <ul class="alignfull wp-block-post-template is-layout-flow wp-block-post-template-is-layout-flow">
+    @foreach (post in posts)
+    <li class="wp-block-post {{ $post.classes }}">
+      <div class="wp-block-group alignfull has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+        <h2 class="wp-block-post-title has-x-large-font-size"><a href="{{ $post.url }}" target="_self">{{ $post.title }}</a></h2>
+        <div class="entry-content alignfull wp-block-post-content has-medium-font-size has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+          {!! $post.content !!}
+        </div>
+        <div class="wp-block-post-date has-small-font-size" style="margin-top:var(--wp--preset--spacing--40)"><time datetime="{{ $post.datetime }}"><a href="{{ $post.url }}">{{ $post.date }}</a></time></div>
+      </div>
+    </li>
+    @endforeach
+  </ul>
+  @else
+  <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+    <p>Sorry, but nothing was found. Please try a search with different keywords.</p>
+  </div>
+  @endif
+  @include('partials.query-pagination')
+</div>

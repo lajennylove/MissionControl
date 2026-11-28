@@ -1,0 +1,14 @@
+@extends('layouts.app')
+
+{{-- Twenty Twenty-Five's `single` template: the title, "Written by", the content. The featured
+     image, the tags, the post navigation and "More posts" come with their context fields;
+     comments come in phase 2. --}}
+@section('content')
+<main class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" id="wp--skip-link--target" style="margin-top:var(--wp--preset--spacing--60)" data-template="single">
+  <article id="post-{{ $post.id }}" class="wp-block-group alignfull has-global-padding is-layout-constrained wp-block-group-is-layout-constrained {{ $post.classes }}" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+    <h1 class="wp-block-post-title">{{ $post.title }}</h1>
+    @include('partials.written-by')
+    @include('partials.post-content')
+  </article>
+</main>
+@endsection

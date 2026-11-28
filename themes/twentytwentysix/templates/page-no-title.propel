@@ -1,0 +1,12 @@
+{{-- Template Name: Page No Title --}}
+{{-- Template Post Type: page --}}
+@extends('layouts.app')
+
+{{-- Twenty Twenty-Five's `page-no-title` custom template: the content only. --}}
+@section('content')
+<main class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" id="wp--skip-link--target" style="margin-top:var(--wp--preset--spacing--60)" data-template="page-no-title">
+  <article id="post-{{ $post.id }}" class="wp-block-group alignfull has-global-padding is-layout-constrained wp-block-group-is-layout-constrained {{ $post.classes }}" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+    @include('partials.post-content')
+  </article>
+</main>
+@endsection

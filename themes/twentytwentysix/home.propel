@@ -1,0 +1,10 @@
+@extends('layouts.app')
+
+{{-- Twenty Twenty-Five's `home` template: the "Blog" heading (pattern `hidden-blog-heading`)
+     and the query loop. --}}
+@section('content')
+<main class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" id="wp--skip-link--target" style="margin-top:var(--wp--preset--spacing--60)" data-template="home">
+  <h1 class="wp-block-heading has-text-align-left">Blog</h1>
+  @include('partials.query-loop')
+</main>
+@endsection

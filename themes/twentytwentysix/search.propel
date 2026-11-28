@@ -1,0 +1,11 @@
+@extends('layouts.app')
+
+{{-- Twenty Twenty-Five's `search` template: the title, the search form and the query loop.
+     "More posts" comes with its context field. --}}
+@section('content')
+<main class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" id="wp--skip-link--target" style="margin-top:var(--wp--preset--spacing--60)" data-template="search">
+  <h1 class="wp-block-query-title">Search results for: “{{ $search_query }}”</h1>
+  @include('partials.search-form')
+  @include('partials.query-loop')
+</main>
+@endsection

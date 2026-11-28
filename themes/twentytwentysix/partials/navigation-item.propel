@@ -1,0 +1,8 @@
+{{-- A menu item's opening tag and link, for `item` (block `navigation-link`); the caller closes
+     the `<li>`. Empty attributes are left out, as WordPress leaves them out. --}}
+<li class="wp-block-navigation-item wp-block-navigation-link {{ $item.classes }}">
+@if ($item.url)
+<a class="wp-block-navigation-item__content" href="{{ $item.url }}"@if ($item.target) target="{{ $item.target }}"@endif@if ($item.rel) rel="{{ $item.rel }}"@endif@if ($item.attr_title) title="{{ $item.attr_title }}"@endif@if ($item.current) aria-current="{{ $item.aria_current }}"@endif><span class="wp-block-navigation-item__label">{{ $item.title }}</span></a>
+@else
+<a class="wp-block-navigation-item__content"><span class="wp-block-navigation-item__label">{{ $item.title }}</span></a>
+@endif

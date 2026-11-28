@@ -1,0 +1,28 @@
+{{--
+  The primary menu (block `navigation`), three levels deep. Propel partials cannot include
+  themselves, so each level is its own loop, and each binds `item` again.
+--}}
+<nav class="has-medium-font-size is-responsive items-justified-right wp-block-navigation is-content-justification-right is-layout-flex wp-block-navigation-is-layout-flex" aria-label="{{ $menus.primary.name }}">
+  <ul class="wp-block-navigation__container is-responsive items-justified-right wp-block-navigation">
+    @foreach (item in menus.primary.items)
+    @include('partials.navigation-item')
+    @if ($item.children)
+    <ul class="wp-block-navigation__submenu-container wp-block-navigation-submenu">
+      @foreach (item in item.children)
+      @include('partials.navigation-item')
+      @if ($item.children)
+      <ul class="wp-block-navigation__submenu-container wp-block-navigation-submenu">
+        @foreach (item in item.children)
+        @include('partials.navigation-item')
+        </li>
+        @endforeach
+      </ul>
+      @endif
+      </li>
+      @endforeach
+    </ul>
+    @endif
+    </li>
+    @endforeach
+  </ul>
+</nav>

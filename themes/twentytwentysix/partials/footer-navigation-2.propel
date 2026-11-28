@@ -1,0 +1,9 @@
+{{-- The second footer menu: one level, vertical, never an overlay. --}}
+<nav class="has-medium-font-size is-vertical wp-block-navigation is-layout-flex wp-block-navigation-is-layout-flex" aria-label="{{ $menus.footer_2.name }}">
+  <ul class="wp-block-navigation__container is-vertical wp-block-navigation">
+    @foreach (item in menus.footer_2.items)
+    @include('partials.navigation-item')
+    </li>
+    @endforeach
+  </ul>
+</nav>

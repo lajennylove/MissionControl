@@ -1,0 +1,6 @@
+/*
+ * Twenty Twenty-Six's own CSS, built by Vite. The design tokens are not here: Mission Control
+ * prints them from theme.json in the page's head (`global-styles-inline-css`), with WordPress's
+ * names (--wp--preset--*), and the block styles are in partials/styles.propel, so the theme
+ * looks right before it is built. Add site-specific styles here.
+ */

@@ -1,0 +1,14 @@
+{{-- Block `query-pagination`, with arrows: "Previous Page" goes to newer posts, "Next Page" to
+     older ones, as WordPress's query loop orders them. --}}
+@if ($pagination.has_pages)
+<div class="wp-block-group alignwide has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+  <nav class="alignwide wp-block-query-pagination is-content-justification-space-between is-layout-flex wp-block-query-pagination-is-layout-flex" aria-label="Pagination">
+    @if ($pagination.previous)
+    <a href="{{ $pagination.previous }}" class="wp-block-query-pagination-previous"><span class="wp-block-query-pagination-previous-arrow is-arrow-arrow" aria-hidden="true">←</span>Previous Page</a>
+    @endif
+    @if ($pagination.next)
+    <a href="{{ $pagination.next }}" class="wp-block-query-pagination-next">Next Page<span class="wp-block-query-pagination-next-arrow is-arrow-arrow" aria-hidden="true">→</span></a>
+    @endif
+  </nav>
+</div>
+@endif

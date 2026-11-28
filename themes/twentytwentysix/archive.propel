@@ -1,0 +1,13 @@
+@extends('layouts.app')
+
+{{-- Twenty Twenty-Five's `archive` template: the archive title, the term's description, and the
+     query loop. --}}
+@section('content')
+<main class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" id="wp--skip-link--target" style="margin-top:var(--wp--preset--spacing--60)" data-template="archive">
+  <h1 class="wp-block-query-title">{{ $archive.title }}</h1>
+  @if ($archive.description)
+  <div class="wp-block-term-description"><p>{{ $archive.description }}</p></div>
+  @endif
+  @include('partials.query-loop')
+</main>
+@endsection

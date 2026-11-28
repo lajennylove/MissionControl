@@ -1,0 +1,6 @@
+{{-- Twenty Twenty-Five's pattern `hidden-written-by`, for `post`. The author link and the
+     categories ("in News") come with the context's author URL and terms. --}}
+<div class="wp-block-group has-accent-4-color has-text-color has-link-color has-small-font-size is-layout-flex wp-block-group-is-layout-flex" style="margin-bottom:var(--wp--preset--spacing--60);gap:0.2em">
+  <p>Written by </p>
+  <div class="wp-block-post-author-name">{{ $post.author }}</div>
+</div>

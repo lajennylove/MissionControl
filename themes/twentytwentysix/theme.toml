@@ -1,0 +1,36 @@
+# Twenty Twenty-Six: Mission Control's default theme for 2026, in the role of WordPress's yearly
+# default theme. Its look and structure come from WordPress's Twenty Twenty-Five 1.5 (the
+# templates, the parts, the class names and theme.json), written as Propel templates.
+name = "Twenty Twenty-Six"
+author = "RocketBoost"
+author_uri = "https://rocketboost.rs"
+version = "1.5"
+description = "Mission Control's default theme for 2026, built from WordPress's Twenty Twenty-Five: simple, readable pages with the Manrope typeface, a 645px content column and a wide 1340px layout. Its design tokens are WordPress's presets (--wp--preset--*), so content brought from WordPress keeps its colours and sizes."
+license = "GPL-2.0-or-later"
+# Requires at least, and Tested up to: Mission Control versions.
+requires = "0.1"
+tested = "0.1"
+# custom-logo: the site logo in the footer. post-thumbnails: featured images. Twenty Twenty-Five
+# gets the rest from being a block theme; a Propel theme declares them.
+supports = [
+    "title-tag",
+    "menus",
+    "post-thumbnails",
+    "custom-logo",
+    "widgets",
+    "html5",
+    "responsive-embeds",
+    "automatic-feed-links",
+]
+
+# Menu locations (register_nav_menus): `menus.primary` in the header, and the two footer menus
+# Twenty Twenty-Five's footer shows, empty until the site owner assigns menus.
+[menus]
+primary = "Primary menu"
+footer_1 = "Footer menu 1"
+footer_2 = "Footer menu 2"
+
+# Image sizes (add_image_size). Twenty Twenty-Five registers none: its featured images use the
+# core sizes with a CSS aspect ratio (3:2). A theme adds its own as
+# `name = { width = 1200, height = 800, crop = true }`.
+[image_sizes]

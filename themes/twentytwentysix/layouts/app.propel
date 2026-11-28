@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="{{ $site.language }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ $document_title }}</title>
+    @if ($site.description)
+    <meta name="description" content="{{ $site.description }}">
+    @endif
+    {{-- wp_head: the robots tag, the global styles from theme.json (the --wp--preset--*
+         variables and the has-* classes), the fonts, and the built CSS and JavaScript. --}}
+    {!! $head !!}
+    @include('partials.styles')
+    @stack('head')
+  </head>
+  <body class="{{ $body_class }} wp-embed-responsive">
+    <a class="skip-link screen-reader-text" id="wp-skip-link" href="#wp--skip-link--target">Skip to content</a>
+    <div class="wp-site-blocks">
+      @include('partials.header')
+      @yield('content')
+      @include('partials.footer')
+    </div>
+  </body>
+</html>

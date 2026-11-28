@@ -1,0 +1,5 @@
+{{-- Block `post-content` for `post`: the content after the_content, output as the save path
+     filtered it. --}}
+<div class="entry-content alignfull wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+  {!! $post.content !!}
+</div>
