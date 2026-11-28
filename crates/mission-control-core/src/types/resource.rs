@@ -472,6 +472,15 @@ impl Access {
         }
     }
 
+    /// Forgets the capabilities read so far, so the next check reads the roles again: after a
+    /// change to the roles' capabilities, such as a new post type's granted to Administrator.
+    pub fn forget(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// The capabilities of the acting `user`, from their roles (reused for [`CAPS_TTL`]).
     ///
     /// # Errors
@@ -1226,6 +1235,11 @@ impl PostTypeResources {
         !self.registered().iter().any(|s| s == slug)
             && ignite_core::runtime_resource(slug).is_some()
             && self.post_types().iter().any(|def| def.slug == slug)
+    }
+
+    /// How the screens read the acting users' capabilities.
+    pub fn access(&self) -> &Access {
+        &self.access
     }
 
     /// The page templates of `page`'s Template select: the active theme's.

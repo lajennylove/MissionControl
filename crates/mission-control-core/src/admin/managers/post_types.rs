@@ -482,6 +482,8 @@ impl PostTypesData {
                 def.slug
             );
         }
+        // The screens read the roles again, so the grant applies from the next request.
+        self.managers.resources.access().forget();
         self.row(db, &def.slug).await?.ok_or_else(not_found).map(Ok)
     }
 }
