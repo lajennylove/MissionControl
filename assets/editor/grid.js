@@ -178,6 +178,10 @@
       img.alt = item.alt || '';
       details.appendChild(img);
     }
+    if (item.avatar) {
+      // A user's profile picture, which stays in the library with the other files.
+      details.appendChild(el('p', 'mc-avatar-label', 'Avatar'));
+    }
     var facts = el('dl', 'mc-grid-facts');
     var fact = function (label, value) {
       if (value === undefined || value === null || value === '') {

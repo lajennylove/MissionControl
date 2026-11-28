@@ -49,6 +49,7 @@ use mission_control_core::admin::media::{
 };
 use mission_control_core::media::{ImageSizes, Storage, validate};
 use mission_control_core::types::{Access, PostTypeResources};
+use mission_control_core::users::avatar::AVATAR_LABEL;
 use mission_control_core::users::{PostTypeCaps, UserCaps};
 use orbit_orm::Database;
 use rocket::fairing::{Fairing, Info, Kind};
@@ -1052,6 +1053,13 @@ fn details_markup(details: &AttachmentDetails) -> String {
         )
     };
     let mut facts = String::new();
+    if details.avatar {
+        // A user's picture (`mission_control_core::users::avatar`), labelled as such.
+        facts.push_str(&format!(
+            "<div class=\"mc-attachment-fact\"><span class=\"ig-badge ig-badge-primary \
+             mc-avatar-label\">{AVATAR_LABEL}</span></div>\n"
+        ));
+    }
     let mut fact = |label: &str, value: &str| {
         facts.push_str(&format!(
             "<div class=\"mc-attachment-fact\">{label} <strong>{}</strong></div>\n",
@@ -1171,6 +1179,12 @@ fn unescape(text: &str) -> String {
 /// WordPress's media list shows it (`alt=""`: the title is beside it). Only an address of the
 /// site (`/...`) or of the web (`http://`, `https://`) is shown; an empty cell stays empty.
 fn with_thumbnails(html: &str) -> String {
+    with_images(html, 60, "mc-list-thumb")
+}
+
+/// The list's table with each row's first cell, an image's address, shown as the image `size`
+/// pixels wide in a cell of class `class` (see [`with_thumbnails`]).
+pub(crate) fn with_images(html: &str, size: u32, class: &str) -> String {
     let Some(body) = html.find("<tbody>") else {
         return html.to_owned();
     };
@@ -1198,14 +1212,14 @@ fn with_thumbnails(html: &str) -> String {
             || url.starts_with("https://")
         {
             format!(
-                "<img src=\"{}\" alt=\"\" width=\"60\" height=\"60\" loading=\"lazy\">",
+                "<img src=\"{}\" alt=\"\" width=\"{size}\" height=\"{size}\" loading=\"lazy\">",
                 escape(&url)
             )
         } else {
             String::new()
         };
         out.push_str(&rest[..gap]);
-        out.push_str(&format!("<td class=\"mc-list-thumb\">{image}</td>"));
+        out.push_str(&format!("<td class=\"{class}\">{image}</td>"));
         rest = &trimmed[close + "</td>".len()..];
     }
     out.push_str(rest);

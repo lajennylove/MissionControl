@@ -178,12 +178,12 @@ pub fn attachment_resource(storage: Arc<dyn Storage>, access: Access) -> Runtime
         sortable,
         searchable,
     };
-    let mut resource = RuntimeResource::new(
+    let mut resource = super::stay_on_edit(RuntimeResource::new(
         ATTACHMENT,
         "Media",
         "Media",
         AttachmentData::new(storage, access),
-    );
+    ));
     resource.fields = vec![
         field(TITLE, "Title", FieldKindDef::Text),
         field(ALT_FIELD, "Alternative Text", FieldKindDef::Text),
@@ -807,6 +807,49 @@ pub fn thumbnail_url(base: &str, attachment: &Attachment) -> String {
     file_url(base, &attachment.file)
 }
 
+/// The thumbnails' addresses ([`thumbnail_url`]) of the attachments `ids` that are images, by
+/// id: a user's picture in the top bar and the Users list.
+///
+/// # Errors
+///
+/// The database's error.
+pub async fn thumbnail_urls(db: &Database, ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
+    let loaded = Loaded::load(db, ids).await?;
+    if loaded.posts.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let base = uploads_url(db).await?;
+    Ok(loaded
+        .posts
+        .iter()
+        .filter(|post| matches!(post.status, PostStatus::Inherit | PostStatus::Private))
+        .filter_map(|post| {
+            let url = thumbnail_url(&base, &loaded.attachment(post));
+            (!url.is_empty()).then_some((post.id, url))
+        })
+        .collect())
+}
+
+/// `items`, shaped by [`prepare_attachment_for_js`], with `"avatar": true` on each one that is a
+/// user's picture, which the media library labels "Avatar" (see [`crate::users::avatar`]).
+async fn with_avatar_marks(db: &Database, mut items: Vec<Value>) -> Result<Vec<Value>, Error> {
+    let ids: Vec<i64> = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_i64))
+        .collect();
+    let avatars = crate::users::avatar::avatar_attachments(db, &ids).await?;
+    for item in &mut items {
+        if item
+            .get("id")
+            .and_then(Value::as_i64)
+            .is_some_and(|id| avatars.contains(&id))
+        {
+            item["avatar"] = json!(true);
+        }
+    }
+    Ok(items)
+}
+
 /// WordPress's `size_format`: `bytes` in the largest unit (B, KB, MB, GB, TB, of 1024) it
 /// reaches, with `decimals` decimals, as `number_format_i18n` writes them in English (`1,024`).
 pub fn size_format(bytes: u64, decimals: usize) -> String {
@@ -1030,6 +1073,7 @@ pub async fn query_attachments(
             prepare_attachment_for_js(&base, post, &loaded.attachment(post), author)
         })
         .collect();
+    let items = with_avatar_marks(db, items).await?;
     Ok(AttachmentPage {
         items,
         total,
@@ -1052,12 +1096,8 @@ pub async fn attachment_for_js(db: &Database, id: i64) -> Result<Option<Value>, 
         .authors
         .get(&post.author_id)
         .map_or("", String::as_str);
-    Ok(Some(prepare_attachment_for_js(
-        &base,
-        post,
-        &loaded.attachment(post),
-        author,
-    )))
+    let item = prepare_attachment_for_js(&base, post, &loaded.attachment(post), author);
+    Ok(with_avatar_marks(db, vec![item]).await?.pop())
 }
 
 /// WordPress's `wp_ajax_get_attachment`: attachment `id` as [`prepare_attachment_for_js`] shapes
@@ -1118,6 +1158,8 @@ pub struct AttachmentDetails {
     pub uploaded_on: String,
     /// The name of the user who uploaded it.
     pub uploaded_by: String,
+    /// Whether it is a user's picture, which the screen labels "Avatar".
+    pub avatar: bool,
 }
 
 /// The file type `attachment_submitbox_metadata` shows: the extension of `file` in capitals,
@@ -1201,6 +1243,9 @@ pub async fn attachment_details(
             .get(&post.author_id)
             .cloned()
             .unwrap_or_default(),
+        avatar: crate::users::avatar::avatar_attachments(db, &[id])
+            .await?
+            .contains(&id),
     }))
 }
 

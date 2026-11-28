@@ -25,8 +25,9 @@
 //!   (`edit.php?trashed=1&ids=…`, `$bulk_messages['post']['trashed']`), in place of Ignite's
 //!   "Changes saved.", as WordPress's Move to Trash goes to the list.
 //! - Any other save of a post's edit form stays on the form, with WordPress's "Post updated."
-//!   ("Page updated." on a page): `post.php` answers a save with `post.php?action=edit&message=1`,
-//!   where Ignite's update goes to the list with "Changes saved.".
+//!   ("Page updated." on a page): `post.php` answers a save with `post.php?action=edit&message=1`.
+//!   Ignite's update comes back to the form itself (`RedirectAfter::Edit`), with its own
+//!   "Changes saved."; WordPress's message takes its place.
 //! - A date and time field (`datetime-local`) takes any minute: it gets `step="1"`, as the
 //!   browser's default step counts whole minutes from the stored value's seconds and refused a
 //!   whole minute for a date stored with seconds. A date left as it is keeps its seconds.
@@ -282,8 +283,8 @@ fn list_slug(path: &str) -> Option<String> {
     segments.next().is_none().then(|| slug.to_owned())
 }
 
-/// After a save of a post (`POST <slug>/<id>`), in place of Ignite's redirect to the list with
-/// "Changes saved.", as `post.php` answers a save: a save that moved the post to the trash goes
+/// After a save of a post (`POST <slug>/<id>`), in place of Ignite's redirect to the edit form
+/// with "Changes saved.", as `post.php` answers a save: a save that moved the post to the trash goes
 /// to the list with WordPress's notice (`edit.php?trashed=1&ids=<id>`); any other goes back to
 /// the post's edit form with WordPress's "Post updated." (`post.php?action=edit&message=1`),
 /// shown by the form ([`updated_message`]). Ignite's flash is dropped either way. Any other

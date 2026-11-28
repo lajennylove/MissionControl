@@ -292,10 +292,11 @@ async fn add_a_tag(client: &Client, db: &Database) {
     )
     .await;
     assert_eq!(status, Status::SeeOther, "{body}");
-    assert_eq!(to, "/mc-admin/post_tag");
     let tag = tag_by_slug(db, "rust-lang")
         .await
         .expect("the tag is saved");
+    // A new tag goes to its edit form, as Ignite's `RedirectAfter::Edit`.
+    assert_eq!(to, format!("/mc-admin/post_tag/{}/edit", tag.term_id));
     assert_eq!(tag.name, "Rust Lang");
     // The description passes through `wp_filter_kses`.
     assert!(!tag.description.contains("<script>"), "{}", tag.description);

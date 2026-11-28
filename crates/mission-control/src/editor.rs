@@ -22,7 +22,8 @@
 //! - `tinymce/`, the parts of TinyMCE 7.9.3 (GPL-2.0-or-later, see `NOTICE`) the toolbar uses,
 //!   in TinyMCE's own folder layout, since it loads its theme, model, icons, skins and plugins
 //!   from its base URL. Ignite, which is MIT, bundles none of it.
-//! - The admin's brand images, from `assets/brand/`: the Mission Control logo and mark (WebP) and
+//! - The admin's brand images, from `assets/brand/`: the Mission Control logo, its light-on-dark
+//!   variant for dark mode (`mission-control-logo-dark.webp`) and the mark (WebP), and
 //!   the favicons made from the mark, as WordPress serves its own logo under
 //!   `/wp-includes/images/`. The admin shows the logo and `favicon-32.png` through Ignite's brand
 //!   options; Ignite links one favicon, so the mark, `favicon.ico` and `apple-touch-icon.png` are
@@ -121,6 +122,7 @@ static BUNDLE: &[Asset] = bundle! {
     "js/tinymce/plugins/lists/plugin.min.js" => "tinymce/plugins/lists/plugin.min.js",
     // The admin's brand images, from `assets/brand/`.
     "images/mission-control-logo.webp" => "../brand/mission-control-logo.webp",
+    "images/mission-control-logo-dark.webp" => "../brand/mission-control-logo-dark.webp",
     "images/mission-control-mark.webp" => "../brand/mission-control-mark.webp",
     "images/favicon.ico" => "../brand/favicon.ico",
     "images/favicon-32.png" => "../brand/favicon-32.png",
@@ -175,6 +177,15 @@ pub(crate) fn media_grid_script_url() -> String {
 pub(crate) fn media_upload_script_url() -> String {
     format!(
         "{INCLUDES_PATH}/js/media-upload.js?ver={}",
+        editor_version()
+    )
+}
+
+/// The URL of the media library's picker of one image, `/mc-includes/js/featured-image.js?ver=...`:
+/// the post editor's featured image box, and the profile's picture.
+pub(crate) fn image_picker_script_url() -> String {
+    format!(
+        "{INCLUDES_PATH}/js/featured-image.js?ver={}",
         editor_version()
     )
 }

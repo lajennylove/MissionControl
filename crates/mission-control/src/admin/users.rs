@@ -5,7 +5,8 @@
 //!
 //! - **Users** in the Site group at WordPress's position (70), with its submenu as WordPress's:
 //!   All Users, Add New User, Your Profile (a link to the panel's profile page), then Roles.
-//! - **The list** (`users.php`): the columns Username, Name (the first and last name), Email,
+//! - **The list** (`users.php`): the user's picture (see the `avatars` submodule), then the
+//!   columns Username, Name (the first and last name), Email,
 //!   Role and Posts (the published posts, `count_many_users_posts`); a search on the username
 //!   and the email; one view per role with its count, after All ("Administrator (1)"), as
 //!   `WP_Users_List_Table::get_views`; and the row actions "Change role to ..." (WordPress's
@@ -46,8 +47,8 @@ use ignite_panel::ignite_core::{
 };
 use ignite_panel::role_label;
 use ignite_panel::screens::{USERS_SLUG, UsersData, roles_resource, users_resource};
-use mission_control_core::admin::ScreenCaps;
 use mission_control_core::admin::navigation;
+use mission_control_core::admin::{ScreenCaps, stay_on_edit};
 use mission_control_core::content::is_email;
 use mission_control_core::content::set_user_meta;
 use mission_control_core::users::profile::{INVALID_EMAIL, INVALID_USERNAME, validate_username};
@@ -84,6 +85,9 @@ const ROLE: &str = "role";
 const DISPLAY_NAME: &str = "display_name";
 /// The list's Posts column.
 const POSTS: &str = "posts";
+/// The list's picture: the address of the user's picture, shown as the image before the
+/// username, as `users.php` shows the avatar in the Username column.
+const AVATAR: &str = "avatar";
 
 /// The mark of the signed-in user's own row in the Users list.
 const CURRENT_USER: &str = "_mc_current_user";
@@ -135,7 +139,7 @@ fn role_names(row: &Row) -> Vec<String> {
 /// The Users screen: Ignite's, with WordPress's fields, columns, views and actions. See the
 /// [module](self).
 pub(crate) fn users_screen() -> RuntimeResource {
-    let mut resource = users_resource();
+    let mut resource = stay_on_edit(users_resource());
     resource.title = "Users".to_owned();
     resource.data = Arc::new(McUsersData);
     resource.fields = vec![
@@ -148,6 +152,7 @@ pub(crate) fn users_screen() -> RuntimeResource {
         field(ROLE, "Role", FieldKindDef::Lookup, false),
     ];
     resource.columns = vec![
+        column(AVATAR, "", false, false),
         column("name", "Username", true, true),
         column(DISPLAY_NAME, "Name", false, false),
         column("email", "Email", true, true),
@@ -239,7 +244,7 @@ async fn change_role(
 /// The Roles screen: Ignite's roles and their abilities, which are WordPress's capabilities
 /// here, under Users. Changing a role needs `promote_users`, as `users.php` asks for it.
 pub(crate) fn roles_screen() -> RuntimeResource {
-    let mut resource = roles_resource();
+    let mut resource = stay_on_edit(roles_resource());
     // The administrator role is never deleted, as WordPress's administrator role cannot be
     // removed from the admin; Ignite's `super-admin` neither (Ignite refuses it).
     resource.row_actions = resource
@@ -517,6 +522,7 @@ impl RuntimeData for McUsersData {
                 .collect();
             let meta = Self::meta(db, &ids).await?;
             let posts = Self::post_counts(db, &ids).await?;
+            let avatars = super::avatars::urls(db, &ids).await?;
             for row in &mut page.rows {
                 let Some(id) = row.get("id").and_then(Value::as_i64) else {
                     continue;
@@ -525,6 +531,10 @@ impl RuntimeData for McUsersData {
                 let name = format!("{} {}", get(FIRST_NAME), get(LAST_NAME));
                 row.insert(DISPLAY_NAME.into(), json!(name.trim()));
                 row.insert(POSTS.into(), json!(posts.get(&id).copied().unwrap_or(0)));
+                row.insert(
+                    AVATAR.into(),
+                    json!(avatars.get(&id).map_or("", String::as_str)),
+                );
             }
             Ok(page)
         })
@@ -742,7 +752,17 @@ impl Fairing for UserFormViews {
         {
             return;
         }
-        let base = format!("{ADMIN_PATH}/{USERS_SLUG}/");
+        let list = format!("{ADMIN_PATH}/{USERS_SLUG}");
+        if request.uri().path().as_str() == list {
+            // The pictures, 32 pixels wide, as `users.php` shows them.
+            let Ok(html) = response.body_mut().to_string().await else {
+                return;
+            };
+            let html = super::media::with_images(&html, 32, "mc-list-avatar");
+            response.set_sized_body(html.len(), Cursor::new(html));
+            return;
+        }
+        let base = format!("{list}/");
         let Some(rest) = request.uri().path().as_str().strip_prefix(&base) else {
             return;
         };

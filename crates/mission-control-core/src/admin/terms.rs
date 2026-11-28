@@ -182,7 +182,7 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
         FieldKindDef::Textarea,
         false,
     ));
-    let mut resource = RuntimeResource::new(
+    let mut resource = super::stay_on_edit(RuntimeResource::new(
         slug,
         title,
         singular,
@@ -190,7 +190,7 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
             taxonomy: taxonomy.clone(),
             kses,
         },
-    );
+    ));
     resource.fields = fields;
     resource.columns = vec![
         column(COL_NAME, "Name", true, true),

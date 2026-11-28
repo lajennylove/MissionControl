@@ -16,6 +16,13 @@
  *   field, which the form saves as before (the server refuses an id that is not an image's
  *   with WordPress's "Invalid featured media ID."); "Remove featured image" empties it.
  *
+ * The same box and frame are the profile's picture (the `mc_avatar` field, an image of the
+ * media library, see `mission_control_core::users::avatar`): "Choose a profile picture", and a
+ * frame "Profile Picture" with the tabs "Upload Files" (one file, sent to the media library's
+ * uploader, `/mc-admin/async-upload.php`, with the page's CSRF token; the uploaded image is then
+ * chosen) and "Media Library" (every image, with a search, 40 at a time with "Load more"), which
+ * opens first. "Remove profile picture" empties the field.
+ *
  * Nothing changes until the user does, so the panel's unsaved changes alert stays quiet on an
  * unchanged form. Without this script the field shows as Ignite renders it. Every value from
  * the server is set as text or as an attribute, never as HTML.
@@ -35,8 +42,42 @@
   /** How many items a page holds (WordPress's media modal asks for 40). */
   var PER_PAGE = 40;
 
-  /** The field's name: the REST API's `featured_media`. */
-  var FIELD = 'featured_media';
+  /**
+   * The fields this script turns into a box, and their words: the featured image (the REST
+   * API's `featured_media`) and the profile's picture (`mc_avatar`).
+   */
+  var KINDS = [
+    {
+      field: 'featured_media',
+      prefix: 'mc-featured',
+      title: 'Featured image',
+      set: 'Set featured image',
+      confirm: 'Set featured image',
+      remove: 'Remove featured image',
+      howto: 'Click the image to edit or update',
+      ids: { set: 'set-post-thumbnail', remove: 'remove-post-thumbnail' },
+      tabs: ['attached', 'library'],
+      first: 0
+    },
+    {
+      field: 'mc_avatar',
+      prefix: 'mc-avatar',
+      title: 'Profile Picture',
+      set: 'Choose a profile picture',
+      confirm: 'Use as profile picture',
+      remove: 'Remove profile picture',
+      howto: 'Click the picture to change it',
+      ids: { set: 'mc-avatar-choose', remove: 'mc-avatar-remove' },
+      tabs: ['upload', 'library'],
+      first: 1
+    }
+  ];
+
+  /** The CSRF token of the page's form (Ignite writes it as `_token`). */
+  function csrfToken() {
+    var input = document.querySelector('input[name="_token"]');
+    return input ? input.value : '';
+  }
 
   function el(tag, attributes, text) {
     var node = document.createElement(tag);
@@ -285,6 +326,58 @@
   };
 
   // -------------------------------------------------------------------------------------------
+  // The "Upload Files" tab: one file to the media library's uploader, then chosen.
+
+  function Uploader(frame, options) {
+    var self = this;
+    this.frame = frame;
+    this.panel = el('form', {
+      'class': 'mc-media-upload',
+      id: options.id,
+      role: 'tabpanel',
+      'aria-labelledby': options.tabId
+    });
+    var inputId = options.id + '-file';
+    this.panel.appendChild(el('label', { 'for': inputId }, 'Select a file to upload'));
+    this.input = el('input', { type: 'file', id: inputId, name: 'async-upload', accept: 'image/*' });
+    this.panel.appendChild(this.input);
+    var send = el('button', { type: 'submit', 'class': 'ig-btn ig-btn-outline' }, 'Upload');
+    this.panel.appendChild(send);
+    this.status = el('p', { 'class': 'mc-media-status', role: 'status', 'aria-live': 'polite' });
+    this.panel.appendChild(this.status);
+    this.panel.addEventListener('submit', function (event) {
+      event.preventDefault();
+      self.upload();
+    });
+  }
+
+  Uploader.prototype.start = function () {};
+
+  Uploader.prototype.upload = function () {
+    var self = this;
+    var file = this.input.files && this.input.files[0];
+    if (!file) {
+      this.status.textContent = 'Select a file to upload.';
+      return;
+    }
+    var body = new FormData();
+    body.append('async-upload', file, file.name);
+    this.status.textContent = 'Uploading…';
+    window.fetch(ADMIN + '/async-upload.php', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-CSRF-TOKEN': csrfToken(), Accept: 'application/json' },
+      body: body
+    }).then(readJson).then(function (answer) {
+      self.status.textContent = file.name + ' was uploaded.';
+      self.input.value = '';
+      self.frame.uploaded(answer.data);
+    }).catch(function (error) {
+      self.status.textContent = file.name + ' has failed to upload. ' + error.message;
+    });
+  };
+
+  // -------------------------------------------------------------------------------------------
   // The modal: WordPress's featured image frame.
 
   function Frame(box) {
@@ -295,12 +388,14 @@
 
   Frame.prototype.build = function () {
     var self = this;
+    var kind = this.box.kind;
+    var titleId = kind.prefix + '-title';
     var dialog = el('dialog', {
       'class': 'mc-media-dialog mc-featured-dialog',
-      'aria-labelledby': 'mc-featured-title'
+      'aria-labelledby': titleId
     });
     var header = el('div', { 'class': 'mc-media-header' });
-    header.appendChild(el('h2', { id: 'mc-featured-title' }, 'Featured image'));
+    header.appendChild(el('h2', { id: titleId }, kind.title));
     var close = el('button', {
       type: 'button', 'class': 'mc-media-close', 'aria-label': 'Close dialog'
     }, '×');
@@ -311,33 +406,36 @@
     dialog.appendChild(header);
 
     var post = editedPost();
-    this.browsers = [
-      new Browser(this, {
-        id: 'mc-featured-attached',
-        tabId: 'mc-featured-tab-attached',
-        label: 'Uploaded to this post',
-        uploadedTo: post,
-        onlyAttached: true,
-        searchable: false
-      }),
-      new Browser(this, {
-        id: 'mc-featured-library',
-        tabId: 'mc-featured-tab-library',
-        label: 'Media Library',
-        searchable: true
-      })
-    ];
-    var tabs = el('div', { 'class': 'mc-media-tabs', role: 'tablist', 'aria-label': 'Featured image' });
-    this.tabs = [
-      el('button', {
-        type: 'button', role: 'tab', id: 'mc-featured-tab-attached',
-        'aria-controls': 'mc-featured-attached'
-      }, 'Uploaded to this post'),
-      el('button', {
-        type: 'button', role: 'tab', id: 'mc-featured-tab-library',
-        'aria-controls': 'mc-featured-library'
-      }, 'Media Library')
-    ];
+    var labels = {
+      attached: 'Uploaded to this post',
+      upload: 'Upload Files',
+      library: 'Media Library'
+    };
+    this.browsers = kind.tabs.map(function (tab) {
+      var options = {
+        id: kind.prefix + '-' + tab,
+        tabId: kind.prefix + '-tab-' + tab,
+        label: labels[tab]
+      };
+      if (tab === 'upload') {
+        return new Uploader(self, options);
+      }
+      if (tab === 'attached') {
+        options.uploadedTo = post;
+        options.onlyAttached = true;
+      } else {
+        options.searchable = true;
+      }
+      return new Browser(self, options);
+    });
+    this.library = this.browsers[kind.tabs.indexOf('library')] || null;
+    var tabs = el('div', { 'class': 'mc-media-tabs', role: 'tablist', 'aria-label': kind.title });
+    this.tabs = kind.tabs.map(function (tab) {
+      return el('button', {
+        type: 'button', role: 'tab', id: kind.prefix + '-tab-' + tab,
+        'aria-controls': kind.prefix + '-' + tab
+      }, labels[tab]);
+    });
     this.tabs.forEach(function (tab, index) {
       tab.addEventListener('click', function () {
         self.show(index);
@@ -366,7 +464,7 @@
     dialog.appendChild(body);
 
     var toolbar = el('div', { 'class': 'mc-featured-toolbar' });
-    this.button = el('button', { type: 'button', 'class': 'ig-btn ig-btn-primary' }, 'Set featured image');
+    this.button = el('button', { type: 'button', 'class': 'ig-btn ig-btn-primary' }, kind.confirm);
     this.button.disabled = true;
     this.button.addEventListener('click', function () {
       self.confirm();
@@ -382,7 +480,15 @@
     this.renderDetails();
   };
 
-  /** Shows tab `index` ("Uploaded to this post" is 0, "Media Library" 1). */
+  /** An image uploaded in the "Upload Files" tab: listed in the library, and chosen. */
+  Frame.prototype.uploaded = function (item) {
+    if (this.library && this.library.started) {
+      this.library.reload();
+    }
+    this.select(item);
+  };
+
+  /** Shows tab `index` of the frame's tabs (`kind.tabs`). */
   Frame.prototype.show = function (index) {
     var self = this;
     this.tabs.forEach(function (tab, i) {
@@ -394,10 +500,11 @@
   };
 
   Frame.prototype.open = function () {
+    var first = this.box.kind.first || 0;
     document.body.appendChild(this.dialog);
     this.dialog.showModal();
-    this.show(0);
-    this.tabs[0].focus();
+    this.show(first);
+    this.tabs[first].focus();
   };
 
   Frame.prototype.select = function (item) {
@@ -434,6 +541,9 @@
       facts.appendChild(el('dt', {}, label));
       facts.appendChild(el('dd', {}, value));
     };
+    if (item.avatar) {
+      details.appendChild(el('p', { 'class': 'mc-avatar-label' }, 'Avatar'));
+    }
     fact('File name', item.filename);
     fact('File type', item.mime);
     fact('Uploaded on', item.dateFormatted);
@@ -454,10 +564,11 @@
   };
 
   // -------------------------------------------------------------------------------------------
-  // The box on the sidebar.
+  // The box on the sidebar (or the profile's picture row).
 
-  function Box(field, input) {
+  function Box(field, input, kind) {
     var self = this;
+    this.kind = kind;
     this.field = field;
     this.input = input;
     this.current = null;
@@ -469,10 +580,10 @@
         child.hidden = true;
       }
     });
-    var label = field.querySelector('label[for="' + FIELD + '"]');
+    var label = field.querySelector('label[for="' + kind.field + '"]');
     this.box = el('div', { 'class': 'mc-featured', role: 'group' });
     if (label) {
-      label.id = label.id || 'mc-featured-label';
+      label.id = label.id || kind.prefix + '-label';
       label.removeAttribute('for');
       this.box.setAttribute('aria-labelledby', label.id);
     }
@@ -498,13 +609,14 @@
 
   Box.prototype.render = function () {
     var self = this;
+    var kind = this.kind;
     var box = this.box;
     box.textContent = '';
     var item = this.current;
     if (!item) {
       var set = el('button', {
-        type: 'button', id: 'set-post-thumbnail', 'class': 'ig-btn ig-btn-outline'
-      }, 'Set featured image');
+        type: 'button', id: kind.ids.set, 'class': 'ig-btn ig-btn-outline'
+      }, kind.set);
       set.addEventListener('click', function () {
         self.open();
       });
@@ -516,9 +628,9 @@
     }
     var image = el('button', {
       type: 'button',
-      id: 'set-post-thumbnail',
+      id: kind.ids.set,
       'class': 'mc-featured-image',
-      'aria-describedby': 'set-post-thumbnail-desc'
+      'aria-describedby': kind.ids.set + '-desc'
     });
     var src = imageUrl(item, 'medium');
     if (src) {
@@ -531,7 +643,7 @@
     if ((src || !item.type) && !item.alt) {
       // The button's name, when the image has no alternative text.
       image.appendChild(el('span', { 'class': 'mc-visually-hidden' },
-        item.title || 'Featured image'));
+        item.title || kind.title));
     }
     image.addEventListener('click', function () {
       self.open();
@@ -539,10 +651,9 @@
     var first = el('p');
     first.appendChild(image);
     box.appendChild(first);
-    box.appendChild(el('p', { id: 'set-post-thumbnail-desc', 'class': 'mc-featured-howto' },
-      'Click the image to edit or update'));
-    var remove = el('a', { href: '#', id: 'remove-post-thumbnail', role: 'button' },
-      'Remove featured image');
+    box.appendChild(el('p', { id: kind.ids.set + '-desc', 'class': 'mc-featured-howto' },
+      kind.howto));
+    var remove = el('a', { href: '#', id: kind.ids.remove, role: 'button' }, kind.remove);
     remove.addEventListener('click', function (event) {
       event.preventDefault();
       self.set(null);
@@ -576,11 +687,18 @@
   };
 
   function start() {
-    var field = document.querySelector('[data-ignite-field="' + FIELD + '"]');
-    var input = field && field.querySelector('input[name="' + FIELD + '"]');
-    if (input && !field.querySelector('.mc-featured')) {
-      api.featuredBox = new Box(field, input);
-    }
+    KINDS.forEach(function (kind) {
+      var field = document.querySelector('[data-ignite-field="' + kind.field + '"]');
+      var input = field && field.querySelector('input[name="' + kind.field + '"]');
+      if (input && !field.querySelector('.mc-featured')) {
+        var box = new Box(field, input, kind);
+        if (kind.field === 'featured_media') {
+          api.featuredBox = box;
+        } else {
+          api.avatarBox = box;
+        }
+      }
+    });
   }
 
   if (document.readyState === 'loading') {

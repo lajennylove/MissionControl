@@ -207,7 +207,7 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
         sortable,
         searchable,
     };
-    let mut resource = RuntimeResource::new(
+    let mut resource = super::stay_on_edit(RuntimeResource::new(
         NAV_MENUS,
         "Menus",
         "Menu",
@@ -216,7 +216,7 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
             locations,
             types: types.into_iter().map(|(t, _)| t).collect(),
         },
-    );
+    ));
     resource.fields = fields;
     // WordPress's edit column (`nav-menus.php`): the Menu Name over the Menu Structure, then
     // the Menu Settings (auto add pages, display locations). The menu builder's script puts the

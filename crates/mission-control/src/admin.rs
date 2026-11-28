@@ -15,8 +15,9 @@
 //! - Ignite's panel ([`Ignite`]), with its sign-in, dashboard and profile. Its signing key is
 //!   `IGNITE_SECRET_KEY`, which Ignite also reads from the environment. Its brand is Mission
 //!   Control's, through Ignite's brand options (as Filament's panel `brandName`, `brandLogo`,
-//!   `brandLogoHeight` and `favicon`): the logo shows in place of the name, which is its
-//!   alternative text, and the favicon replaces Ignite's; the images are served under
+//!   `brandLogoHeight`, `darkModeBrandLogo` and `favicon`): the logo shows in place of the name,
+//!   which is its alternative text, with its light-on-dark variant in dark mode, and the favicon
+//!   replaces Ignite's; the images are served under
 //!   `/mc-includes/images/` (see [`crate::editor`]). The options are compiled into Ignite's
 //!   views, so they hold in a release build too.
 //! - The sidebar in WordPress's admin menu order: the dashboard, then the
@@ -50,9 +51,10 @@
 //!   WordPress's `post-new.php` creates an `auto-draft` with an id when the screen opens).
 //!   `GET /mc-admin/<post type>/new` is Ignite's create form, with no record, and creates
 //!   nothing. It posts to `POST /mc-admin/<post type>` (Ignite's create), whose save creates the
-//!   post; the same fairing then sends the browser (303) to the new post's edit form,
-//!   `/mc-admin/<post type>/<id>/edit`, as WordPress does after the first save, where Ignite's
-//!   create would go to the list. Auto-drafts made by the earlier New screen are deleted after
+//!   post; Ignite then sends the browser (303) to the new post's edit form,
+//!   `/mc-admin/<post type>/<id>/edit`, as WordPress does after the first save (every screen
+//!   sets Ignite's `RedirectAfter::Edit`, see `mission_control_core::admin::stay_on_edit`).
+//!   Auto-drafts made by the earlier New screen are deleted after
 //!   7 days by a daily scheduler event (Ruling R125).
 //!
 //! - The classic editor for the rich text fields (Task 6.3): the editor script at
@@ -89,9 +91,11 @@
 //!   form widgets, in every admin theme. Quick Draft keeps its answer in its box ("Draft
 //!   saved.", or the refusal with the values typed) and lists "Your Recent Drafts" (the
 //!   `quick_draft` submodule).
-//! - The pages' chrome (the `chrome` submodule): the top bar shows the user's display name, a
-//!   refused profile picture's message is an error notice, and an address under the admin that
-//!   nothing answers is a 404 page in the admin's look with a link to the dashboard.
+//! - The pages' chrome (the `chrome` submodule): the top bar shows the user's display name, and
+//!   a refused profile picture's message is an error notice.
+//! - An address under the admin that nothing answers is Ignite's 404 page ([`NotFound`]) in the
+//!   panel's layout of the user's admin theme (the menu and the top bar for a signed-in user),
+//!   with "The page you are looking for could not be found." and a link to the dashboard.
 //!
 //! # Roles and capabilities
 //!
@@ -115,7 +119,7 @@
 use std::sync::{Arc, OnceLock};
 
 use ignite_panel::authz::{self, AuthzError};
-use ignite_panel::{AdminUser, Ignite, NavigationItem, Role, ignite_core};
+use ignite_panel::{AdminUser, Ignite, NavigationItem, NotFound, Role, ignite_core};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
@@ -138,11 +142,12 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::response::Redirect;
 use rocket::response::content::RawHtml;
 use rocket::route::{self, Handler, Route};
-use rocket::{Build, Data, Request, Response, Rocket};
+use rocket::{Build, Data, Request, Rocket};
 
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
+mod avatars;
 mod chrome;
 mod forms;
 mod locks;
@@ -161,6 +166,10 @@ pub(crate) const BRAND_NAME: &str = "RocketBoost Mission Control";
 
 /// The admin's logo, served from `assets/brand/` (see [`crate::editor`]).
 pub(crate) const BRAND_LOGO: &str = "/mc-includes/images/mission-control-logo.webp";
+
+/// The logo's light-on-dark variant, which the panel shows in dark mode (Ignite's
+/// `dark_mode_brand_logo`, as Filament's `darkModeBrandLogo`), served beside the logo.
+pub(crate) const BRAND_LOGO_DARK: &str = "/mc-includes/images/mission-control-logo-dark.webp";
 
 /// The logo's height. The logo is 661x571 px; 4.3rem (69px) shows it about 80px wide, half the
 /// 160 x 138 px the sidebar showed before, as the owner asked for the sign-in and the sidebar.
@@ -280,14 +289,40 @@ pub(crate) async fn mount_panel(
 ) -> Rocket<Build> {
     // The WordPress theme is registered before the panel is built, so a user can choose it.
     wordpress_theme::register();
+    // Users' pictures are images of the media library (the `avatars` submodule).
+    let user_roles = rocket.state::<AuthSettings>().map_or_else(
+        || Arc::new(mission_control_core::users::IgniteUserRoles) as Arc<_>,
+        |auth| Arc::clone(&auth.user_roles),
+    );
+    match (
+        rocket.state::<Arc<dyn mission_control_core::media::Storage>>(),
+        rocket.state::<Arc<ImageSizes>>(),
+        rocket.state::<crate::rest::media::UploadSettings>(),
+    ) {
+        (Some(storage), Some(sizes), Some(uploads)) => avatars::install(avatars::AvatarStore {
+            storage: Arc::clone(storage),
+            sizes: Arc::clone(sizes),
+            max_bytes: uploads.max_bytes,
+            user_roles: Arc::clone(&user_roles),
+        }),
+        _ => log::error!("Users' pictures are off: the uploads' storage is missing"),
+    }
     // Ignite first: it reserves its own pages' slugs (`login`, `profile`, ...) before a post type
     // can take one; such a type is then refused below instead of stopping the panel.
     let mut panel = Ignite::new()
         .mount(ADMIN_PATH)
         .brand_name(BRAND_NAME)
         .brand_logo(BRAND_LOGO)
+        .dark_mode_brand_logo(BRAND_LOGO_DARK)
         .brand_logo_height(BRAND_LOGO_HEIGHT)
         .favicon(FAVICON)
+        // The admin's 404 page, in the panel's layout in each admin theme (Laravel's
+        // `errors/404.blade.php`), for an address under the admin that nothing answers.
+        .not_found(
+            NotFound::make()
+                .message(chrome::NOT_FOUND_MESSAGE)
+                .link_label(chrome::NOT_FOUND_LINK),
+        )
         .navigation_groups(navigation::GROUPS)
         // WordPress's Settings menu: a label-only entry in Site, after Menus, that opens its
         // first screen (General) and lists the seven settings screens under it.
@@ -301,6 +336,10 @@ pub(crate) async fn mount_panel(
         .list_widget(dashboard::at_a_glance_widget(ADMIN_PATH))
         .list_widget(dashboard::activity_widget(ADMIN_PATH))
         .form_widget(dashboard::quick_draft_widget())
+        // WordPress's profile fields (Task 8.5), kept in the user's meta as `profile.php` keeps
+        // them, and the picture, an image of the media library.
+        .profile_fields(profile::profile_fields())
+        .profile_picture(avatars::profile_picture())
         // WordPress's Users screens and the Roles screen, in Site.
         .runtime_resource(users::users_screen())
         .runtime_resource(users::profile_entry())
@@ -336,13 +375,7 @@ pub(crate) async fn mount_panel(
     }
     // The post type screens read the acting user's capabilities as the REST API does: the app's
     // roles provider and kses limiter (Task A1).
-    let access = Access::new(
-        rocket.state::<AuthSettings>().map_or_else(
-            || Arc::new(mission_control_core::users::IgniteUserRoles) as Arc<_>,
-            |auth| Arc::clone(&auth.user_roles),
-        ),
-        kses.clone().unwrap_or_default(),
-    );
+    let access = Access::new(Arc::clone(&user_roles), kses.clone().unwrap_or_default());
     // The Categories and Tags screens, before the post types, so a post type cannot take their
     // slugs.
     let (terms, refused_terms) = register_term_resources(&access);
@@ -404,13 +437,13 @@ pub(crate) async fn mount_panel(
         .attach(forms::FormViews)
         .attach(users::UserFormViews)
         .attach(profile::ProfileView)
+        .attach(profile::IgniteProfileView)
         .attach(chrome::ChromeViews)
         .manage(profile::ProfileNotices::default())
         .register(
             format!("{ADMIN_PATH}/profile"),
             rocket::catchers![picture_too_large],
         )
-        .register(ADMIN_PATH, rocket::catchers![chrome::not_found])
         .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, menus::routes())
         .mount("/", menus::include_routes())
@@ -574,8 +607,8 @@ enum AdminRefusal {
 #[derive(Default)]
 struct PendingRefusal(OnceLock<AdminRefusal>);
 
-/// Authorizes the post type screens before Ignite's routes run (Ruling R115), and sends the New
-/// screen's first save to the new post's edit form; see the [module](self).
+/// Authorizes the post type screens before Ignite's routes run (Ruling R115); see the
+/// [module](self).
 struct AdminAuthFairing;
 
 #[rocket::async_trait]
@@ -583,41 +616,7 @@ impl Fairing for AdminAuthFairing {
     fn info(&self) -> Info {
         Info {
             name: "Mission Control admin authorization",
-            kind: Kind::Request | Kind::Response,
-        }
-    }
-
-    /// Ignite's create answers a saved record with a redirect (303) to the list. On a post type,
-    /// the browser is sent to the new post's edit form instead, as WordPress does after the New
-    /// screen's first save.
-    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
-        if request.method() != Method::Post || response.status() != Status::SeeOther {
-            return;
-        }
-        let mut segments = request.uri().path().segments();
-        let (Some(ADMIN_SEGMENT), Some(slug), None) =
-            (segments.next(), segments.next(), segments.next())
-        else {
-            return;
-        };
-        let Some(resources) = request.rocket().state::<Arc<PostTypeResources>>() else {
-            return;
-        };
-        if resources.post_type(slug).is_none() {
-            return;
-        }
-        let Outcome::Success(user) = request.guard::<AdminUser>().await else {
-            return;
-        };
-        // A dashboard form (Quick Draft) comes back to the dashboard, as WordPress's does.
-        let to_dashboard = response
-            .headers()
-            .get_one("Location")
-            .is_some_and(|to| to.trim_end_matches('/') == ADMIN_PATH);
-        if let Some(id) = resources.take_created(user.user_id(), slug)
-            && !to_dashboard
-        {
-            response.set_raw_header("Location", format!("{ADMIN_PATH}/{slug}/{id}/edit"));
+            kind: Kind::Request,
         }
     }
 

@@ -12,7 +12,8 @@
 //! - G. "Your Profile" opens the profile page of the user's admin theme.
 //! - H. The top bar and the posts list's Author column show the display name.
 //! - I. A refused profile picture's message is an error notice.
-//! - J. An address nothing answers is a 404 page in the admin's look, with a link back.
+//! - J. An address nothing answers is Ignite's 404 page in the panel's layout of each admin
+//!   theme, with a link back.
 //! - K. No Delete on the user's own row, nor on the administrator role.
 //! - L. Settings > Reading shows no homepage while "Your latest posts" is chosen.
 //! - M. A category counts its published posts only.
@@ -222,6 +223,37 @@ async fn posts_dates_saves_authors_and_counts(client: &Client, db: &Database) {
     assert_eq!(status, Status::SeeOther, "{body}");
     assert_eq!(to, format!("{edit}?message=1"));
     assert!(get(client, &to).await.1.contains("Page updated."));
+
+    // D. The other screens' saves stay on their edit form too (Ignite's `RedirectAfter::Edit`),
+    // with the panel's message: a category, as `term.php`, and General Settings.
+    let term = Term::create(db, &Taxonomy::CATEGORY, NewTerm::new("Stays"))
+        .await
+        .unwrap();
+    let edit = format!("/mc-admin/category/{}/edit", term.term_id);
+    let (status, to, body) = submit(
+        client,
+        &edit,
+        &format!("/mc-admin/category/{}", term.term_id),
+        &[],
+    )
+    .await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+    assert_eq!(to, edit);
+    assert!(get(client, &to).await.1.contains("Changes saved."));
+    let edit = "/mc-admin/options-general/1/edit";
+    let (status, to, body) = submit(
+        client,
+        edit,
+        "/mc-admin/options-general/1",
+        &[
+            ("siteurl", "http://example.test"),
+            ("home", "http://example.test"),
+            ("admin_email", "ada@example.test"),
+        ],
+    )
+    .await;
+    assert_eq!(status, Status::SeeOther, "{body}");
+    assert_eq!(to, edit);
 
     // H. The Author column and the top bar show the display name.
     set_user_meta(db, ada, "display_name", &json!("Ada Lovelace"))
@@ -528,7 +560,7 @@ async fn quick_draft_and_your_profile(client: &Client, db: &Database) {
     assert!(profile.contains("id=\"your-profile\""), "{profile}");
     choose_theme(client, "ignite").await;
     let (_, profile) = get(client, "/mc-admin/profile").await;
-    assert!(profile.contains(">Save details</button>"), "{profile}");
+    assert!(profile.contains(">Update Profile</button>"), "{profile}");
 }
 
 /// Uploads `bytes` as the profile picture.
@@ -577,20 +609,49 @@ async fn refused_picture_and_not_found(client: &Client, db: &Database) {
         "{profile}"
     );
 
-    // J. Unknown addresses: 404, in the admin's look, with the way back.
-    for path in [
-        "/mc-admin/no-such-screen",
-        "/mc-admin/post/999999/edit",
-        "/mc-admin/a/b/c/d/e",
-    ] {
-        let (status, html) = get(client, path).await;
-        assert_eq!(status, Status::NotFound, "{path}");
-        assert!(html.contains("<h1>Page not found</h1>"), "{path}: {html}");
-        assert!(
-            html.contains("<a href=\"/mc-admin\">Go to the Dashboard</a>"),
-            "{html}"
-        );
-        assert!(html.contains("background: #f0f0f1"), "{html}");
+    // J. Unknown addresses: Ignite's 404 page, in the panel's layout of each admin theme (the
+    // menu and the top bar), with the way back.
+    let response = client
+        .get("/mc-includes/images/mission-control-logo-dark.webp")
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(response.content_type(), Some(ContentType::WEBP));
+    drop(response);
+    for theme in ["wordpress", "ignite"] {
+        choose_theme(client, theme).await;
+        for path in [
+            "/mc-admin/no-such-screen",
+            "/mc-admin/post/999999/edit",
+            "/mc-admin/a/b/c/d/e",
+        ] {
+            let (status, html) = get(client, path).await;
+            assert_eq!(status, Status::NotFound, "{path}");
+            assert!(html.contains("data-ignite-not-found"), "{path}: {html}");
+            assert!(
+                html.contains("The page you are looking for could not be found."),
+                "{html}"
+            );
+            assert!(
+                html.contains("href=\"/mc-admin\">Go to the dashboard</a>"),
+                "{html}"
+            );
+            // The layout: the menu with its Posts entry, and the theme's chrome.
+            assert!(
+                html.contains("href=\"/mc-admin/post\""),
+                "{theme} {path}: {html}"
+            );
+            if theme == "wordpress" {
+                assert!(html.contains("id=\"wpadminbar\""), "{html}");
+            } else {
+                assert!(!html.contains("id=\"wpadminbar\""), "{html}");
+                // The Ignite theme's dark mode shows the logo's light-on-dark variant.
+                assert!(
+                    html.contains("/mc-includes/images/mission-control-logo-dark.webp"),
+                    "{html}"
+                );
+            }
+        }
     }
 }
 

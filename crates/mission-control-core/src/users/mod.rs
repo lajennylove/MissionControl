@@ -4,7 +4,7 @@
 //! passwords ([`app_password`]); a signed-in user's roles come from a [`UserRoles`] provider
 //! ([`user_roles`]), such as [`IgniteUserRoles`], which reads Ignite's role tables
 //! ([`ignite_roles`]). A user's own profile, as WordPress's `profile.php` keeps it, is
-//! [`profile`].
+//! [`profile`], and their picture, an image of the media library, is [`avatar`].
 //!
 //! ```
 //! use std::collections::BTreeMap;
@@ -17,6 +17,7 @@
 //! ```
 
 pub mod app_password;
+pub mod avatar;
 pub mod capabilities;
 pub mod ignite_roles;
 pub mod meta_cap;

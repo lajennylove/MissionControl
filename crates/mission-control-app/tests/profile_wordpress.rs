@@ -115,7 +115,7 @@ fn every_field_is_saved_and_shown_again() {
             "<label for=\"url\">Website</label>",
             "<h2>About Yourself</h2>",
             "<label for=\"description\">Biographical Info</label>",
-            "<th>Profile Picture</th>",
+            "<th><label for=\"mc_avatar\">Profile Picture</label></th>",
             "<h2>Account Management</h2>",
             ">Set New Password</button>",
             ">Generate Password</button>",
@@ -564,16 +564,17 @@ fn the_password_sessions_and_application_passwords_work() {
 }
 
 #[test]
-fn the_ignite_theme_keeps_ignites_profile_page() {
+fn the_ignite_theme_keeps_ignites_profile_page_with_wordpresss_fields() {
     run("profile_wordpress_themes", |client, db| async move {
         let (id, email) = user(&db, "alan", "administrator").await;
         sign_in(&client, &email).await;
 
-        // The Ignite theme: Ignite's page and its save.
+        // The Ignite theme: Ignite's page, with WordPress's fields (see `profile_both_themes`),
+        // and its save.
         let html = page(&client).await;
         assert!(!html.contains("id=\"your-profile\""), "{html}");
         assert!(!html.contains("mc-wordpress-profile"), "{html}");
-        assert!(html.contains(">Save details</button>"), "{html}");
+        assert!(html.contains(">Update Profile</button>"), "{html}");
         let csrf = token_in(&html);
         let response = post(
             &client,
@@ -594,7 +595,7 @@ fn the_ignite_theme_keeps_ignites_profile_page() {
             html.contains("<form id=\"your-profile\" action=\"/mc-admin/profile\" method=\"post\""),
             "{html}"
         );
-        assert!(!html.contains(">Save details</button>"), "{html}");
+        assert!(!html.contains(">Update Profile</button>"), "{html}");
         assert!(!html.contains("<!-- mc-wordpress-profile -->"), "{html}");
         // "Your Profile" under Users leads here.
         let response = client.get("/mc-admin/your-profile").dispatch().await;
@@ -607,7 +608,7 @@ fn the_ignite_theme_keeps_ignites_profile_page() {
         fields.push(("admin_theme", "ignite"));
         save(&client, &fields).await;
         let html = page(&client).await;
-        assert!(html.contains(">Save details</button>"), "{html}");
+        assert!(html.contains(">Update Profile</button>"), "{html}");
         let _ = id;
     });
 }

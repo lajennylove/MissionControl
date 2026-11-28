@@ -704,12 +704,12 @@ const MANAGE_OPTIONS: &str = "manage_options";
 /// The Ignite runtime resource of `screen`: its fields in [`settings_layout`]'s two columns,
 /// and [`SettingsData`] over `options`.
 pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> RuntimeResource {
-    let mut resource = RuntimeResource::new(
+    let mut resource = super::stay_on_edit(RuntimeResource::new(
         screen.slug(),
         screen.title(),
         screen.title(),
         SettingsData { screen, services },
-    );
+    ));
     resource.fields = settings_fields(screen);
     resource.form_layout = settings_layout(screen);
     resource.columns = vec![ColumnDef {

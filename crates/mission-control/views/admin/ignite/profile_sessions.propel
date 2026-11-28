@@ -1,0 +1,10 @@
+{{-- WordPress's Sessions row (`user-edit.php`) under the Ignite theme's Account Management card: "Log Out Everywhere Else" while the user is signed in elsewhere, or the line saying they are not. --}}<div class="mt-6 grid gap-3" id="sessions">
+  <h3 class="m-0 text-base font-semibold text-heading">Sessions</h3>@if (has_other_sessions)
+  <form method="post" action="{{ $destroy_sessions_action }}">
+    <input type="hidden" name="_token" value="{{ $csrf_token }}">
+    <button type="submit" class="ig-btn ig-btn-outline" id="destroy-sessions">Log Out Everywhere Else</button>
+  </form>
+  <p class="m-0 text-sm">Did you lose your phone or leave your account logged in at a public computer? You can log out everywhere else, and stay logged in here.</p>@else
+  <div><button type="button" class="ig-btn ig-btn-outline" disabled>Log Out Everywhere Else</button></div>
+  <p class="m-0 text-sm">You are only logged in at this location.</p>@endif
+</div>

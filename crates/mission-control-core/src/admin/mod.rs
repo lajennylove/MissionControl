@@ -7,7 +7,7 @@
 //! `mission-control` crate mounts Ignite's panel at `/mc-admin` and applies them before Ignite's
 //! routes run.
 
-use ignite_core::{ResourceAction, RuntimeResource};
+use ignite_core::{RedirectAfter, ResourceAction, RuntimeResource};
 
 pub mod dashboard;
 pub mod locks;
@@ -40,6 +40,17 @@ pub use terms::{
     CATEGORY_SCREEN, POST_TAG_SCREEN, TERM_SCREENS, TermsData, TermsPolicy, authorize_term_screen,
     register_term_resources, term_screen_taxonomy, terms_resource,
 };
+
+/// `resource` with its saves staying on the edit page, as WordPress's screens do: a create goes
+/// to the new record's edit form (`post-new.php` to `post.php?action=edit`), and an update comes
+/// back to the same form with its message (`post.php?message=1`, `term.php?message=3`,
+/// `options.php` back to its screen), as Filament's default `getRedirectUrl()` (Ignite's
+/// [`RedirectAfter::Edit`]) where Ignite's own default is the list.
+pub fn stay_on_edit(resource: RuntimeResource) -> RuntimeResource {
+    resource
+        .redirect_after_create(RedirectAfter::Edit)
+        .redirect_after_update(RedirectAfter::Edit)
+}
 
 /// The WordPress capabilities a screen's Ignite abilities are: the list (`viewAny`, and `view`),
 /// the New screen and its save (`create`), the edit form and its save (`update`) and Delete

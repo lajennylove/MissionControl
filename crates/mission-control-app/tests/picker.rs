@@ -395,11 +395,15 @@ async fn flow(scratch: &ScratchDatabase) {
     ] {
         assert!(script.contains(text), "{text}");
     }
-    let attached = script
-        .find("}, 'Uploaded to this post')")
-        .expect("the first tab");
-    let library = script.find("}, 'Media Library')").expect("the second tab");
-    assert!(attached < library, "Uploaded to this post comes first");
+    // The featured image's tabs, in this order; the profile picture's are Upload Files and the
+    // Media Library.
+    assert!(
+        script.contains("tabs: ['attached', 'library']"),
+        "Uploaded to this post comes first"
+    );
+    assert!(script.contains("attached: 'Uploaded to this post'"));
+    assert!(script.contains("library: 'Media Library'"));
+    assert!(script.contains("tabs: ['upload', 'library']"));
 
     // Picking stores the id in the field the editor already saves (`_thumbnail_id`).
     let save = |id: String| {

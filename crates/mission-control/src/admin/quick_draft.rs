@@ -7,7 +7,8 @@
 //!
 //! - **A refused draft** comes back to the dashboard (303), with the refusal ("Title is
 //!   required.") in the box and the title and content typed, as Laravel's
-//!   `back()->withErrors()->withInput()` flashes them, in place of Ignite's New Post page (422).
+//!   `back()->withErrors()->withInput()` flashes them, in place of Ignite's dashboard shown again
+//!   with the messages under the widget's fields (422).
 //! - **A saved draft** comes back with "Draft saved." in the box, in place of Ignite's "Record
 //!   created.".
 //! - **Your Recent Drafts** is listed under the form (`wp_dashboard_recent_drafts`, see

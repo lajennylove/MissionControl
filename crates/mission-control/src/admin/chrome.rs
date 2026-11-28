@@ -1,4 +1,4 @@
-//! What the admin's pages show around their content, where Ignite 0.6.7 renders otherwise:
+//! What the admin's pages show around their content, where Ignite renders otherwise:
 //!
 //! - **The user's name** ([`ChromeViews`]): the top bar ("Howdy, ..." and the user menu in the
 //!   WordPress admin theme, the name beside the picture in the Ignite theme) and the Ignite
@@ -9,12 +9,9 @@
 //!   keep ([`PICTURE_REFUSED`]) is flashed as any other message, in the success notice; it is
 //!   shown as an error instead (WordPress's `notice-error` in the WordPress theme, Ignite's error
 //!   style in the Ignite theme), with the same words.
-//! - **Page not found** ([`not_found`]): an address under the admin that no screen answers, or a
-//!   record that does not exist, answers 404 with a page in the admin's look (the brand, the
-//!   current admin theme's colours) with a short message and a link to the dashboard, in place
-//!   of Rocket's bare page; a GET under the admin that no route takes ([`routes`]) is answered
-//!   so, not by the public site. Ignite 0.6.7 has no way for an app to render a page in its layout
-//!   (its menu and top bar), so the page is the admin's own, as the refusals' pages are.
+//! - **Page not found** ([`routes`]): a GET under the admin that no route takes answers 404,
+//!   not the public site, so Ignite's 404 page ([`NOT_FOUND_MESSAGE`], set with
+//!   `Ignite::not_found`) shows it in the panel's layout.
 
 use std::io::Cursor;
 
@@ -24,11 +21,9 @@ use orbit_orm::Database;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{ContentType, Method, Status};
 use rocket::request::Outcome;
-use rocket::response::content::RawHtml;
 use rocket::{Request, Response};
 
-use super::wordpress_theme::NAME as WORDPRESS;
-use super::{ADMIN_PATH, ADMIN_SEGMENT, BRAND_LOGO, BRAND_NAME, FAVICON, PICTURE_REFUSED};
+use super::{ADMIN_PATH, ADMIN_SEGMENT, PICTURE_REFUSED};
 
 /// Text escaped as the admin's views escape it (Propel's `{{ }}`).
 fn escape(text: &str) -> String {
@@ -145,15 +140,11 @@ fn with_picture_error(html: &str) -> String {
     html
 }
 
-/// The heading of the admin's page for an address nothing answers.
-pub(crate) const NOT_FOUND_TITLE: &str = "Page not found";
+/// What the admin's 404 page says (Ignite's [`NotFound`](ignite_panel::NotFound)).
+pub(crate) const NOT_FOUND_MESSAGE: &str = "The page you are looking for could not be found.";
 
-/// What the page says.
-pub(crate) const NOT_FOUND_MESSAGE: &str =
-    "Sorry, the page you are looking for does not exist or is no longer here.";
-
-/// The link back.
-pub(crate) const NOT_FOUND_BACK: &str = "Go to the Dashboard";
+/// The 404 page's link to the dashboard.
+pub(crate) const NOT_FOUND_LINK: &str = "Go to the dashboard";
 
 /// The rank of [`routes`]' catch-all: after every admin route (Ignite's and Mission Control's
 /// have negative or small ranks), before the public site's catch-all (`FRONT_RANK`, 20), so the
@@ -161,7 +152,7 @@ pub(crate) const NOT_FOUND_BACK: &str = "Go to the Dashboard";
 const NOT_FOUND_RANK: isize = 19;
 
 /// The admin's catch-all: any GET under the admin path that no screen answers is not found, and
-/// [`not_found`] answers it.
+/// Ignite's 404 page (its catcher at the admin path) answers it.
 pub(crate) fn routes() -> Vec<rocket::Route> {
     let mut routes = rocket::routes![unknown_admin_path];
     for route in &mut routes {
@@ -173,65 +164,6 @@ pub(crate) fn routes() -> Vec<rocket::Route> {
 #[rocket::get("/<_..>")]
 fn unknown_admin_path() -> Status {
     Status::NotFound
-}
-
-/// Answers 404 under the admin path with the admin's page; see the [module](self).
-#[rocket::catch(404)]
-pub(crate) async fn not_found(request: &Request<'_>) -> (Status, RawHtml<String>) {
-    let theme = match request.guard::<AdminUser>().await {
-        Outcome::Success(user) => user.admin_theme().to_owned(),
-        _ => ignite_panel::active_admin_theme(),
-    };
-    (Status::NotFound, not_found_page(theme == WORDPRESS))
-}
-
-/// The admin's 404 page: WordPress's error page look (`wp_die`) in the WordPress theme, the
-/// Ignite theme's colours otherwise.
-pub(crate) fn not_found_page(wordpress: bool) -> RawHtml<String> {
-    let (page, text, heading, link, card, border) = if wordpress {
-        (
-            "#f0f0f1", "#3c434a", "#1d2327", "#2271b1", "#fff", "#c3c4c7",
-        )
-    } else {
-        (
-            "#f4f7fb", "#5a6a85", "#2a3547", "#5d87ff", "#fff", "#e5eaef",
-        )
-    };
-    let font = if wordpress {
-        "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Oxygen-Sans, Ubuntu, \
-         Cantarell, \"Helvetica Neue\", sans-serif"
-    } else {
-        "\"Plus Jakarta Sans\", system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif"
-    };
-    let body_class = if wordpress { "wp-admin wp-core-ui" } else { "" };
-    RawHtml(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>{NOT_FOUND_TITLE} &lsaquo; {BRAND_NAME}</title>
-<link rel="icon" href="{FAVICON}">
-<style>
-body {{ background: {page}; color: {text}; font-family: {font}; font-size: 14px; line-height: 1.5; margin: 0; }}
-#error-page {{ background: {card}; border: 1px solid {border}; border-radius: 6px; box-sizing: border-box; margin: 64px auto; max-width: 560px; padding: 32px; }}
-#error-page .brand {{ display: block; height: 3rem; margin: 0 auto 24px; width: auto; }}
-#error-page h1 {{ color: {heading}; font-size: 22px; font-weight: 600; margin: 0 0 12px; }}
-#error-page p {{ margin: 0 0 16px; }}
-#error-page a {{ color: {link}; }}
-</style>
-</head>
-<body class="{body_class}">
-<main id="error-page">
-<img class="brand" src="{BRAND_LOGO}" alt="{BRAND_NAME}">
-<h1>{NOT_FOUND_TITLE}</h1>
-<p>{NOT_FOUND_MESSAGE}</p>
-<p><a href="{ADMIN_PATH}">{NOT_FOUND_BACK}</a></p>
-</main>
-</body>
-</html>"#
-    ))
 }
 
 #[cfg(test)]
@@ -269,13 +201,5 @@ mod tests {
         );
         let saved = format!("{}Picture saved.</p>", IGNITE_NOTICE.0);
         assert_eq!(with_picture_error(&saved), saved);
-    }
-
-    #[test]
-    fn the_not_found_page_links_to_the_dashboard() {
-        let page = not_found_page(true).0;
-        assert!(page.contains("<a href=\"/mc-admin\">Go to the Dashboard</a>"));
-        assert!(page.contains("background: #f0f0f1"));
-        assert!(not_found_page(false).0.contains(NOT_FOUND_TITLE));
     }
 }

@@ -633,3 +633,16 @@
   line-height: 1;
   cursor: pointer;
 }
+
+/* The "Avatar" label of a user's profile picture in the media library's details. */
+.mc-avatar-label {
+  background: #f0f6fc;
+  border-radius: 999px;
+  color: #2271b1;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+  margin: 0 0 8px;
+  padding: 0 10px;
+}

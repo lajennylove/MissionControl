@@ -441,10 +441,6 @@ pub struct Access {
     /// Capabilities read in the last [`CAPS_TTL`], by user: Ignite asks the policy for each row
     /// of a list and for each post type on every admin page, and each ask reads the roles.
     cache: Arc<Mutex<HashMap<i64, (Instant, UserCaps)>>>,
-    /// The post each user's last New screen save created, by user and post type, until the
-    /// admin takes it to send the browser to the post's edit form
-    /// ([`PostTypeResources::take_created`]).
-    created: Arc<Mutex<HashMap<(i64, String), i64>>>,
 }
 
 /// How long a user's capabilities are reused: a role change reaches the admin's screens within
@@ -473,26 +469,7 @@ impl Access {
             user_roles,
             kses,
             cache: Arc::default(),
-            created: Arc::default(),
         }
-    }
-
-    /// Records that `user`'s New screen save created post `id` of `post_type`.
-    fn record_created(&self, user: i64, post_type: &str, id: i64) {
-        let mut created = self.created.lock().unwrap_or_else(PoisonError::into_inner);
-        // Bounded: an entry the admin never takes (a save outside its routes) is dropped.
-        if created.len() >= CAPS_CACHED {
-            created.clear();
-        }
-        created.insert((user, post_type.to_owned()), id);
-    }
-
-    /// The post `user`'s last New screen save of `post_type` created, taken once.
-    fn take_created(&self, user: i64, post_type: &str) -> Option<i64> {
-        self.created
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&(user, post_type.to_owned()))
     }
 
     /// The capabilities of the acting `user`, from their roles (reused for [`CAPS_TTL`]).
@@ -841,6 +818,7 @@ pub fn post_type_resource_with_access(
         // The New screen in the type's menu group, as WordPress's Posts > Add New Post.
         .navigation_create_item(true)
         .navigation_create_label(crate::admin::navigation::CREATE_LABEL);
+    resource = crate::admin::stay_on_edit(resource);
     status_tabs::add_status_tabs(&mut resource);
     resource.fields = fields;
     resource.columns = columns;
@@ -1248,15 +1226,6 @@ impl PostTypeResources {
         !self.registered().iter().any(|s| s == slug)
             && ignite_core::runtime_resource(slug).is_some()
             && self.post_types().iter().any(|def| def.slug == slug)
-    }
-
-    /// The id of the post that `user`'s last save of the New screen of `post_type` created, once:
-    /// a second call returns `None`. Ignite's create answers with a redirect to the list; the
-    /// admin uses this to send the browser to the new post's edit form instead, as WordPress
-    /// does after the first save. When the same user saves two New screens of one type at the
-    /// same moment, one of the two saves may be sent to the other's post, or to the list.
-    pub fn take_created(&self, user: i64, post_type: &str) -> Option<i64> {
-        self.access.take_created(user, post_type)
     }
 
     /// The post types whose resource this value has registered, in order.
@@ -3029,7 +2998,8 @@ impl RuntimeData for PostTypeData {
     /// The New screen's first save for `user`: the post gets its id now, with `user` as its
     /// author unless the form names another they may choose, and the save's rules for them (see
     /// the [module](self)'s Trust section). The policy has checked the type's `edit_posts`.
-    /// Records the new post for [`PostTypeResources::take_created`].
+    /// Ignite then goes to the new post's edit form ([`crate::admin::stay_on_edit`]), as
+    /// WordPress does after the first save.
     fn create_for<'a>(
         &'a self,
         db: &'a Database,
@@ -3038,11 +3008,7 @@ impl RuntimeData for PostTypeData {
     ) -> RuntimeFuture<'a, Row> {
         Box::pin(async move {
             let actor = self.actor(db, user).await?;
-            let row = self.create_post(db, input, Some(&actor)).await?;
-            if let Some(id) = row.get("id").and_then(id_of) {
-                self.access.record_created(actor.id, &self.post_type, id);
-            }
-            Ok(row)
+            self.create_post(db, input, Some(&actor)).await
         })
     }
 

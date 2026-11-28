@@ -1,4 +1,4 @@
-{{-- WordPress's profile form (`wp-admin/user-edit.php` for the current user, `profile.php`), in WordPress's order and words: Personal Options, Name, Contact Info, About Yourself (with the Profile Picture), Account Management (New Password, Sessions) and Application Passwords, then "Update Profile". The picture, the sessions and the application passwords post their own forms, which sit after the profile form; their inputs join them with the `form` attribute, so the profile form does not send them. --}}<style>
+{{-- WordPress's profile form (`wp-admin/user-edit.php` for the current user, `profile.php`), in WordPress's order and words: Personal Options, Name, Contact Info, About Yourself (with the Profile Picture), Account Management (New Password, Sessions) and Application Passwords, then "Update Profile". The picture is an image of the media library, chosen with its picker (`featured-image.js`) and saved with the profile. The sessions and the application passwords post their own forms, which sit after the profile form; their inputs join them with the `form` attribute, so the profile form does not send them. --}}<style>
 #profile-page .form-table { border-collapse: collapse; margin-top: 0.5em; width: 100%; clear: both; }
 #profile-page .form-table th { color: #1d2327; font-weight: 600; line-height: 1.3; padding: 20px 10px 20px 0; text-align: left; vertical-align: top; width: 200px; }
 #profile-page .form-table td { line-height: 1.3; margin-bottom: 9px; padding: 15px 10px; vertical-align: middle; }
@@ -120,10 +120,11 @@
 <p class="description">Share a little biographical information to fill out your profile. This may be shown publicly.</p></td>
 </tr>
 <tr class="user-profile-picture">
-<th>Profile Picture</th>
+<th><label for="mc_avatar">Profile Picture</label></th>
 <td>@if (has_avatar)<img src="{{ $avatar_url }}" alt="" class="avatar avatar-96 photo" height="96" width="96">@else<span class="avatar avatar-96 avatar-initials" aria-hidden="true">{{ $user_initials }}</span>@endif
-<p class="description">You can change your profile picture here: a PNG, JPEG or WebP picture of up to 1 MB. Without one, your initials show.</p>
-<p><input type="file" name="avatar" accept="image/png,image/jpeg,image/webp" form="mc-avatar-form" aria-label="Profile Picture"> <button type="submit" class="button" form="mc-avatar-form">Upload</button>@if (has_avatar) <button type="submit" class="button" form="mc-remove-avatar-form">Remove picture</button>@endif</p></td>
+<input type="hidden" name="mc_avatar_shown" value="1"><div data-ignite-field="mc_avatar"><input class="ig-input" id="mc_avatar" name="mc_avatar" type="number" min="1" step="1" value="{{ $avatar_id }}" data-ignite-media="image" @if (has_mc_avatar_error) aria-invalid="true" aria-describedby="mc_avatar-error"@endif>@if (has_mc_avatar_error)
+<p class="description mc-field-error text-error-emphasis" id="mc_avatar-error">{{ $mc_avatar_error }}</p>@endif</div>
+<p class="description">Choose an image from the media library, or upload one. Without one, your initials show. The picture is saved with "Update Profile".</p></td>
 </tr>
 </table>
 
@@ -180,13 +181,13 @@
 
 <p class="submit"><input type="submit" name="submit" id="submit" class="button button-primary" value="Update Profile"></p>
 </form>
-<form id="mc-avatar-form" method="post" action="{{ $avatar_action }}" enctype="multipart/form-data" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
-<form id="mc-remove-avatar-form" method="post" action="{{ $remove_avatar_action }}" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
 <form id="mc-destroy-sessions-form" method="post" action="{{ $destroy_sessions_action }}" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
 <form id="mc-app-password-form" method="post" action="{{ $app_password_action }}" hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
 <form id="mc-revoke-all-form" method="post" action="{{ $revoke_all_action }}" data-mc-confirm="Are you sure you want to revoke all passwords? This action cannot be undone." hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"></form>
 @foreach (item in app_passwords)<form id="{{ $item.form_id }}" method="post" action="{{ $revoke_action }}" data-mc-confirm="Are you sure you want to revoke this password? This action cannot be undone." hidden><input type="hidden" name="_token" value="{{ $csrf_token }}"><input type="hidden" name="uuid" value="{{ $item.uuid }}"></form>
-@endforeach<script>
+@endforeach<link rel="stylesheet" href="{{ $picker_stylesheet }}">
+<script src="{{ $picker_script }}" defer></script>
+<script>
 (function () {
   var page = document.getElementById('profile-page');
   if (!page) return;

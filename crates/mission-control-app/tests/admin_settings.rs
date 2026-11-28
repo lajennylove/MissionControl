@@ -177,12 +177,10 @@ async fn save_screen(client: &Client, slug: &str, fields: &[(&str, &str)]) {
     let to = location(&response);
     let body = response.into_string().await.unwrap_or_default();
     assert_eq!(status, Status::SeeOther, "saves {slug}: {body}");
-    assert_eq!(to, format!("/mc-admin/{slug}"));
-    let response = client.get(to).dispatch().await;
-    assert_eq!(response.status(), Status::SeeOther);
-    let edit = location(&response);
-    assert_eq!(edit, format!("/mc-admin/{slug}/1/edit"));
-    let (status, html) = get(client, &edit).await;
+    // The save stays on the screen's form (Ignite's `RedirectAfter::Edit`), as `options.php`
+    // goes back to its screen.
+    assert_eq!(to, format!("/mc-admin/{slug}/1/edit"));
+    let (status, html) = get(client, &to).await;
     assert_eq!(status, Status::Ok);
     assert!(html.contains("Changes saved."), "{html}");
 }
