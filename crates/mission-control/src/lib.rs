@@ -99,7 +99,7 @@ use mission_control_core::rest::settings::Settings;
 use mission_control_core::rest::terms::Taxonomies;
 use mission_control_core::rest::{KsesLimiter, RestRoutes};
 use mission_control_core::scheduler::Scheduler;
-use mission_control_core::types::Registry;
+use mission_control_core::types::{Definition, Origin, Registry};
 use mission_control_core::users::{IgniteUserRoles, UserRoles};
 use orbit_orm::Database;
 use rocket::fairing::AdHoc;
@@ -164,6 +164,12 @@ pub struct AppOptions {
     /// How many kses filters the REST API runs at once, each on a blocking thread. `None` is
     /// [`KsesLimiter::DEFAULT_CONCURRENCY`].
     pub kses_concurrency: Option<usize>,
+    /// Post types, taxonomies and field groups defined in the site's code, as Poet and ACF
+    /// Composer define them in a theme (design 5.3): made with the builders of
+    /// `mission_control_core::types::code`, whose `build` marks them [`Origin::Code`]. They are
+    /// registered at every start, after the admin's stored ones, which they override (ACF's
+    /// local JSON rule), and the admin's managers list them locked, as "Defined in code".
+    pub definitions: Vec<Definition>,
 }
 
 /// The Mission Control app for `config`. The database at `config.database_url` is opened at
@@ -191,6 +197,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         database: db,
         user_roles,
         kses_concurrency,
+        definitions,
     } = options;
     // Design 5.7: theme templates are capped in size and render work. Propel's defaults: a
     // template of at most 1 MiB, and a budget of 100,000 loop iterations and template entries
@@ -235,6 +242,7 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
     let types = Types {
         registry: Arc::clone(&registry),
         rest_routes: Arc::clone(&rest_routes),
+        code: definitions,
     };
     rocket::custom(figment())
         .manage(Arc::clone(&hooks))
@@ -270,10 +278,12 @@ pub fn rocket_with_options(config: Config, options: AppOptions) -> Rocket<Build>
         }))
 }
 
-/// The type registry and the route registry it registers the stored types' routes on.
+/// The type registry, the route registry it registers the stored types' routes on, and the
+/// definitions of the site's code.
 struct Types {
     registry: Arc<Registry>,
     rest_routes: Arc<RestRoutes>,
+    code: Vec<Definition>,
 }
 
 impl Types {
@@ -292,6 +302,27 @@ impl Types {
             }
         }
         self.register_routes();
+    }
+
+    /// Registers the definitions of the site's code ([`AppOptions::definitions`]); one the
+    /// registry refuses (invalid, or not marked [`Origin::Code`]) is logged and left out.
+    fn register_code(&self) {
+        for def in &self.code {
+            if !matches!(def.origin(), Origin::Code) {
+                log::error!(
+                    "The definition `{}` given in the site's code is not marked as code (build it \
+                     with `mission_control_core::types::code`): it was not registered",
+                    def.key()
+                );
+                continue;
+            }
+            if let Err(e) = self.registry.register(def.clone()) {
+                log::error!(
+                    "The definition `{}` of the site's code was not registered: {e}",
+                    def.key()
+                );
+            }
+        }
     }
 
     /// Lists the routes of every registered post type and taxonomy in discovery: after the
@@ -332,6 +363,9 @@ async fn ignite(
         },
     };
     types.load(&db).await;
+    // The site's own definitions, after the stored ones, which they override.
+    types.register_code();
+    types.register_routes();
     let plugins = match Plugins::new(
         Arc::clone(&hooks),
         Arc::clone(&db),

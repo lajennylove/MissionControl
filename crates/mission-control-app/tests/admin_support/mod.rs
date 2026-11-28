@@ -54,6 +54,15 @@ where
     F: FnOnce(Client, Arc<Database>) -> Fut,
     Fut: Future<Output = ()>,
 {
+    run_with(label, AppOptions::default(), flow);
+}
+
+/// [`run`], with the app built with `options` (its database is the scratch one).
+pub fn run_with<F, Fut>(label: &str, options: AppOptions, flow: F)
+where
+    F: FnOnce(Client, Arc<Database>) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let _lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(_) = mysql_test_url() else {
         eprintln!(
@@ -78,7 +87,7 @@ where
             config(&url),
             AppOptions {
                 database: Some(Arc::clone(&db)),
-                ..AppOptions::default()
+                ..options
             },
         ))
         .await
