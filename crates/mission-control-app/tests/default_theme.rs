@@ -3,6 +3,10 @@
 //! visibility rules the router gives, and the theme confinement and escaping checks of Task 2.2,
 //! run against a copy of the default theme.
 //!
+//! The `default` theme is no longer the front end's default (Twenty Twenty-Six is, the owner's
+//! rule, as WordPress's `WP_DEFAULT_THEME` is its yearly theme), so each site here makes it the
+//! active theme with the `stylesheet` option; `front_theme.rs` checks Twenty Twenty-Six.
+//!
 //! They run on the database in `MC_TEST_DATABASE_URL`, or on a fresh SQLite file when it is unset.
 
 use std::path::{Path, PathBuf};
@@ -59,6 +63,8 @@ impl Site {
             .await;
         site.option("permalink_structure", json!("/%postname%/"))
             .await;
+        // The theme under test is active by name: the front end's default is Twenty Twenty-Six.
+        site.option("stylesheet", json!("default")).await;
         site
     }
 
@@ -536,6 +542,9 @@ async fn templates_render_without_a_vite_build_and_load_it_when_present() {
     assert_eq!(css, "body{margin:0}");
 }
 
+/// A missing active theme falls back to the front end's default theme, Twenty Twenty-Six (the
+/// owner's rule: it replaced `default` as `WP_DEFAULT_THEME`'s counterpart), as WordPress's
+/// `validate_current_theme` falls back to `WP_DEFAULT_THEME`.
 #[rocket::async_test]
 async fn a_missing_active_theme_falls_back_to_the_default_theme() {
     let site = Site::new().await;
@@ -546,6 +555,8 @@ async fn a_missing_active_theme_falls_back_to_the_default_theme() {
     let (status, body) = get(&client, "/").await;
     assert_eq!(status, Status::Ok, "{body}");
     assert!(body.contains(&marker("home")), "{body}");
+    // Twenty Twenty-Six's layout (Twenty Twenty-Five's `wp-site-blocks` wrapper).
+    assert!(body.contains("<div class=\"wp-site-blocks\">"), "{body}");
 }
 
 #[rocket::async_test]

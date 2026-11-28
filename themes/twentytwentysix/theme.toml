@@ -4,7 +4,8 @@
 name = "Twenty Twenty-Six"
 author = "RocketBoost"
 author_uri = "https://rocketboost.rs"
-version = "1.5"
+# 0.1.0 until the team has checked the theme against WordPress's theme standards.
+version = "0.1.0"
 description = "Mission Control's default theme for 2026, built from WordPress's Twenty Twenty-Five: simple, readable pages with the Manrope typeface, a 645px content column and a wide 1340px layout. Its design tokens are WordPress's presets (--wp--preset--*), so content brought from WordPress keeps its colours and sizes."
 license = "GPL-2.0-or-later"
 # Requires at least, and Tested up to: Mission Control versions.

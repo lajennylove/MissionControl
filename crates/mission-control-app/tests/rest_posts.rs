@@ -2167,7 +2167,10 @@ async fn the_site_starts_when_the_type_tables_cannot_be_read() {
 #[rocket::async_test]
 async fn a_template_is_one_the_theme_declares_for_pages() {
     let themes = tempfile::tempdir().unwrap();
-    let theme = themes.path().join("default");
+    // In the folder of the front end's default theme, so it is the active one.
+    let theme = themes
+        .path()
+        .join(mission_control_core::front::DEFAULT_THEME);
     std::fs::create_dir_all(theme.join("templates")).unwrap();
     std::fs::write(theme.join("index.propel"), "index").unwrap();
     std::fs::write(

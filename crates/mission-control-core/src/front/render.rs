@@ -72,8 +72,11 @@ use crate::theme::{
     global_stylesheet, load_theme, templates_for, theme_json, theme_menus, theme_sidebars,
 };
 
-/// The theme used when the active theme cannot be loaded, as WordPress's `WP_DEFAULT_THEME`.
-pub const DEFAULT_THEME: &str = "default";
+/// The front-end theme used when no theme is active or the active one cannot be loaded, as
+/// WordPress's `WP_DEFAULT_THEME` (`twentytwentyfive` in WordPress 6.8): Twenty Twenty-Six, the
+/// yearly default theme. The admin's themes (Ignite's and the WordPress admin theme) are not
+/// front-end themes and are chosen elsewhere.
+pub const DEFAULT_THEME: &str = "twentytwentysix";
 
 /// The Vite entries the front end loads for the active theme (and its parent first), when the
 /// theme's build has them: the family's `resources/css/app.css` and `resources/js/app.js`.

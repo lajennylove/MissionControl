@@ -12,7 +12,7 @@ use chrono::NaiveDate;
 use mission_control::rocket_with_database;
 use mission_control_core::config::{Config, Environment, TrustedProxies};
 use mission_control_core::content::{
-    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, set_option, set_post_meta,
+    NewPost, NewTerm, Post, PostStatus, Taxonomy, Term, delete_option, set_option, set_post_meta,
 };
 use mission_control_core::front::{Archive, Resolved};
 use mission_control_core::migrations::migrator;
@@ -230,6 +230,24 @@ async fn front_home_lists_posts_in_the_query_loop() {
         "{body}"
     );
     assert!(body.contains(">March 7, 2026</a></time>"), "{body}");
+}
+
+/// Twenty Twenty-Six is the front end's default theme: a site with no active theme (no
+/// `stylesheet` option, as before the first theme switch) renders with it, as WordPress renders
+/// its yearly theme, `WP_DEFAULT_THEME`. The owner chose it over the older `default` theme.
+#[rocket::async_test]
+async fn front_default_theme_is_twenty_twenty_six() {
+    assert_eq!(mission_control_core::front::DEFAULT_THEME, SLUG);
+    let site = Site::new().await;
+    delete_option(site.db(), "stylesheet")
+        .await
+        .expect("deletes the option");
+    let client = site.client().await;
+
+    let (status, body) = get(&client, "/").await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(body.contains("<div class=\"wp-site-blocks\">"), "{body}");
+    assert!(body.contains("Sorry, but nothing was found."), "{body}");
 }
 
 #[rocket::async_test]
@@ -605,7 +623,8 @@ fn front_theme_manifest_parses() {
     let theme = theme();
     let manifest = theme.manifest();
     assert_eq!(manifest.name, "Twenty Twenty-Six");
-    assert_eq!(manifest.version.as_deref(), Some("1.5"));
+    // 0.1.0 until the team has checked it against WordPress's theme standards (the owner's rule).
+    assert_eq!(manifest.version.as_deref(), Some("0.1.0"));
     assert_eq!(manifest.requires.as_deref(), Some("0.1"));
     assert_eq!(manifest.tested.as_deref(), Some("0.1"));
     assert_eq!(manifest.license.as_deref(), Some("GPL-2.0-or-later"));

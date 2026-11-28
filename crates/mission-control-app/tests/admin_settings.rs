@@ -220,6 +220,10 @@ async fn flows(scratch: &ScratchDatabase) {
         .await
         .unwrap();
     set_option(&db, "home", &json!(HOME)).await.unwrap();
+    // The `default` theme, by name: the front end's default is Twenty Twenty-Six.
+    set_option(&db, "stylesheet", &json!("default"))
+        .await
+        .unwrap();
     set_option(&db, "siteurl", &json!(HOME)).await.unwrap();
     set_option(&db, "admin_email", &json!("owner@example.com"))
         .await

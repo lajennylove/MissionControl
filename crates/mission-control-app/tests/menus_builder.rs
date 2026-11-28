@@ -218,6 +218,8 @@ async fn flow(scratch: &ScratchDatabase) {
         ("home", json!(HOME)),
         ("siteurl", json!(HOME)),
         ("permalink_structure", json!("/%postname%/")),
+        // The `default` theme, by name: the front end's default is Twenty Twenty-Six.
+        ("stylesheet", json!("default")),
     ] {
         set_option(&db, name, &value).await.unwrap();
     }

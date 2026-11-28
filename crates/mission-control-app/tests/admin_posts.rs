@@ -63,7 +63,9 @@ fn themes_with_a_page_template() -> tempfile::TempDir {
         }
     }
     let dir = tempfile::tempdir().unwrap();
-    let theme = dir.path().join("default");
+    // The shipped `default` theme with a page template, in the folder of the front end's default
+    // theme (Twenty Twenty-Six's slug since it became the default), so it is the active theme.
+    let theme = dir.path().join(mission_control_core::front::DEFAULT_THEME);
     copy(&shipped_themes().join("default"), &theme);
     std::fs::create_dir_all(theme.join("templates")).unwrap();
     std::fs::write(
