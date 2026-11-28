@@ -79,15 +79,27 @@
 //!   `delete_term`, so the default category is never deleted. A term slug another registration
 //!   holds answers 503 (fail closed).
 //!
-//! At start the five WordPress roles are made sure to exist as Ignite roles, and each post type
-//! resource's five abilities are registered and granted to `administrator`, `editor` and the
-//! roles whose defaults hold the type's `edit_posts` (Ruling R121, Task A1), so Ignite's coarse
-//! checks let them reach the type's policy; the media library's go to `administrator` and
-//! `editor`. The settings screens' `viewAny`,
-//! `view` and `update` and the Menus screen's five abilities are granted to `administrator`
-//! only (Ruling R132). The Categories and Tags screens' five abilities go to the roles whose
-//! defaults hold `manage_categories` (`administrator` and `editor`). Errors are logged, and the
-//! site starts anyway.
+//! - The Users screens (`users.php`, `user-new.php`, `user-edit.php`) and the Roles screen, in
+//!   the Site group (see the `users` submodule), built on Ignite's.
+//! - The dashboard's widgets (see `mission_control_core::admin::dashboard`): the At a Glance
+//!   cards, then WordPress's At a Glance, Activity and Quick Draft boxes as Ignite's list and
+//!   form widgets, in every admin theme.
+//!
+//! # Roles and capabilities
+//!
+//! WordPress's capabilities are Ignite abilities, and its five roles Ignite roles
+//! (`Ignite::abilities` and `Ignite::role`, as `populate_roles` adds them, once, with
+//! `mission_control_core::users`' capability lists): a role keeps the capabilities the Roles
+//! screen gives it, and a user's capabilities are read from the stored roles on each request
+//! (`IgniteUserRoles`). Each screen's Ignite abilities are the capabilities WordPress checks for
+//! it (`ScreenCaps`): a post type's `edit_posts` and `delete_posts`, the media library's
+//! `upload_files`, the Categories and Tags screens' `manage_categories`, the Menus screen's
+//! `edit_theme_options`, the settings screens' `manage_options`, the Users screens' `list_users`,
+//! `create_users`, `edit_users` and `delete_users`, and the Roles screen's `promote_users`. A user
+//! without one sees neither the sidebar entry nor the screen (403); the fairing and each screen's
+//! policy then check the finer capabilities (`edit_others_posts`, `edit_post`, ...). A role made
+//! before its capabilities were stored (by the installer, or an earlier version) is given
+//! WordPress's defaults at start. Errors are logged, and the site starts anyway.
 //!
 //! The post types are read once, at start: a post type, taxonomy or field group saved or removed
 //! later (by the admin or a plugin) reaches the admin's screens at the next start.
@@ -95,7 +107,7 @@
 use std::sync::{Arc, OnceLock};
 
 use ignite_panel::authz::{self, AuthzError};
-use ignite_panel::{AdminUser, Ignite, NavigationItem, ignite_core};
+use ignite_panel::{AdminUser, Ignite, NavigationItem, Role, ignite_core};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
@@ -109,9 +121,7 @@ use mission_control_core::media::ImageSizes;
 use mission_control_core::rest::KsesLimiter;
 use mission_control_core::theme::Theme;
 use mission_control_core::types::{Access, PostTypeResources, Registry};
-use mission_control_core::users::{
-    ADMINISTRATOR, EDITOR, IGNITE_SUPER_ADMIN, WORDPRESS_ROLES, ignite_roles_with_cap,
-};
+use mission_control_core::users::{all_capabilities, default_roles, is_capability_name};
 use orbit_orm::{Database, Driver};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::uri::Origin;
@@ -129,6 +139,7 @@ mod forms;
 mod locks;
 mod media;
 mod menus;
+mod users;
 mod wordpress_theme;
 
 /// Where the admin is mounted (Ruling R120).
@@ -166,21 +177,6 @@ const SETTINGS_RANK: isize = -20;
 /// The rank of the routes that answer under the admin path when the panel is not mounted:
 /// before the public site's catch-all.
 const UNAVAILABLE_RANK: isize = -20;
-
-/// The roles granted every ability of the post type resources, so Ignite's coarse check lets
-/// them in; the fine checks are [`authorize_post_screen`]'s.
-const GRANTED_ROLES: [&str; 2] = [ADMINISTRATOR, EDITOR];
-
-/// The suffixes of a resource's five Ignite abilities (`post.viewAny`, ...).
-const ABILITIES: [&str; 5] = ["viewAny", "view", "create", "update", "delete"];
-
-/// The capability the Categories and Tags screens' roles hold: both taxonomies' `manage_terms`
-/// map to it.
-const TERMS_CAP: &str = "manage_categories";
-
-/// The abilities of a settings screen granted to `administrator`: no create or delete, as a
-/// screen has one record (Ruling R132).
-const SETTINGS_ABILITIES: [&str; 3] = ["viewAny", "view", "update"];
 
 /// The settings screens and the Menus screen this app registered with Ignite, so the fairing
 /// refuses (fails closed) those another registration holds.
@@ -275,7 +271,7 @@ pub(crate) async fn mount_panel(
     wordpress_theme::register();
     // Ignite first: it reserves its own pages' slugs (`login`, `profile`, ...) before a post type
     // can take one; such a type is then refused below instead of stopping the panel.
-    let panel = Ignite::new()
+    let mut panel = Ignite::new()
         .mount(ADMIN_PATH)
         .brand_name(BRAND_NAME)
         .brand_logo(BRAND_LOGO)
@@ -288,11 +284,28 @@ pub(crate) async fn mount_panel(
             .group(navigation::SITE)
             .sort(navigation::SETTINGS)
             .icon(navigation::SETTINGS_ICON)])
-        // WordPress's dashboard: At a Glance, then Activity's recently published posts.
+        // WordPress's dashboard: the At a Glance cards, then its At a Glance, Activity and
+        // Quick Draft boxes.
         .widget(dashboard::AtAGlance)
-        .widget(dashboard::Activity)
+        .list_widget(dashboard::at_a_glance_widget(ADMIN_PATH))
+        .list_widget(dashboard::activity_widget(ADMIN_PATH))
+        .form_widget(dashboard::quick_draft_widget())
+        // WordPress's Users screens and the Roles screen, in Site.
+        .runtime_resource(users::users_screen())
+        .runtime_resource(users::profile_entry())
+        .runtime_resource(users::roles_screen())
+        // WordPress's capabilities as abilities, and its five roles with their capabilities.
+        .abilities(all_capabilities())
         // Ask before a changed form is left unsaved (posts, pages, settings, menus).
         .unsaved_changes_alerts();
+    for role in default_roles() {
+        let caps: Vec<String> = role.granted().map(str::to_owned).collect();
+        panel = panel.role(
+            Role::make(role.name.as_str())
+                .label(role.display_name.as_str())
+                .abilities(caps),
+        );
+    }
     ignite_core::register_editor(editor_script_url());
     if let Err(e) = ignite_core::reserve_slugs(&[INSTALL_SLUG]) {
         log::error!("The admin could not reserve `{INSTALL_SLUG}`: {e}");
@@ -359,41 +372,24 @@ pub(crate) async fn mount_panel(
     // The media library (Task 6.4): its screen, upload page and endpoints, and Ignite's media
     // fields' library.
     let (rocket, media_screen) = media::mount_media(rocket);
-    // Each post type's abilities go to the roles that hold its `edit_posts` (authors and
-    // contributors for `post`), and its policy decides each action (Task A1); the media
-    // library's go to administrators and editors, whose screen the fairing checks.
-    let mut slugs: Vec<(String, Vec<&'static str>)> = resources
-        .registered()
-        .into_iter()
-        .map(|slug| {
-            let roles = resources
-                .post_type(&slug)
-                .map(|def| post_type_roles(&def.caps().edit_posts))
-                .unwrap_or_else(|| GRANTED_ROLES.to_vec());
-            (slug, roles)
-        })
-        .collect();
+    // Each screen's abilities are WordPress capabilities (a custom post type's `edit_books`,
+    // ...): registered as permissions, so the Roles screen offers them.
+    let mut slugs: Vec<String> = resources.registered();
     if media_screen.registered {
-        slugs.push((media::ATTACHMENT.to_owned(), GRANTED_ROLES.to_vec()));
+        slugs.push(media::ATTACHMENT.to_owned());
     }
-    // The term screens' abilities go to the roles that hold `manage_categories`, which both
-    // taxonomies' capabilities map to; their policy decides each action.
-    for slug in &terms {
-        slugs.push(((*slug).to_owned(), post_type_roles(TERMS_CAP)));
-    }
-    let mut administrator_only: Vec<(String, &[&str])> = settings
-        .iter()
-        .map(|slug| ((*slug).to_owned(), &SETTINGS_ABILITIES[..]))
-        .collect();
+    slugs.extend(terms.iter().map(|slug| (*slug).to_owned()));
+    slugs.extend(settings.iter().map(|slug| (*slug).to_owned()));
     if menus {
-        administrator_only.push((NAV_MENUS.to_owned(), &ABILITIES[..]));
+        slugs.push(NAV_MENUS.to_owned());
     }
-    provision(db, &slugs, &administrator_only).await;
+    provision(db, &slugs).await;
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
         .attach(menus::MenuBuilderViews)
         .attach(forms::FormViews)
+        .attach(users::UserFormViews)
         .register(
             format!("{ADMIN_PATH}/profile"),
             rocket::catchers![picture_too_large],
@@ -403,6 +399,7 @@ pub(crate) async fn mount_panel(
         .mount("/", menus::include_routes())
         .manage(menu_sources)
         .mount(ADMIN_PATH, settings_routes())
+        .mount(ADMIN_PATH, users::routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))
         .manage(AdminScreens {
@@ -461,53 +458,32 @@ pub(crate) fn unavailable_routes(reason: Unavailable) -> Vec<Route> {
     .collect()
 }
 
-/// The WordPress roles granted a post type resource's abilities: `administrator`, `editor`, and
-/// every role whose default capabilities include the type's `edit_posts` (Task A1). Ignite's
-/// `super-admin` passes every check without a grant.
-fn post_type_roles(edit_posts: &str) -> Vec<&'static str> {
-    let mut roles = GRANTED_ROLES.to_vec();
-    for role in ignite_roles_with_cap(edit_posts) {
-        if role != IGNITE_SUPER_ADMIN && !roles.contains(&role) {
-            roles.push(role);
-        }
+/// WordPress's capabilities registered as Ignite permissions, the five roles made before their
+/// capabilities were stored given WordPress's defaults (a role Ignite has not made yet is made
+/// by `Ignite::role` when the panel starts, with them), and each screen of `slugs` given its
+/// abilities as permissions. Logs what fails.
+async fn provision(db: &Database, slugs: &[String]) {
+    if let Err(e) = ignite_panel::register_abilities(db, all_capabilities()).await {
+        log::error!("The admin could not register WordPress's capabilities: {e}");
     }
-    roles
-}
-
-/// Ruling R121: the five WordPress roles as Ignite roles, and each resource of `slugs` given its
-/// five abilities, granted to its roles; Ruling R132: the `administrator_only` resources'
-/// abilities registered and the ones listed granted to `administrator` only. Logs what fails.
-async fn provision(
-    db: &Database,
-    slugs: &[(String, Vec<&'static str>)],
-    administrator_only: &[(String, &[&str])],
-) {
-    for role in WORDPRESS_ROLES {
-        match authz::create_role(db, role).await {
-            Ok(()) | Err(AuthzError::Exists(_)) => {}
-            Err(e) => log::error!("The admin could not create the role `{role}`: {e}"),
-        }
-    }
-    let grants = slugs
-        .iter()
-        .map(|(slug, roles)| (slug.as_str(), &roles[..], &ABILITIES[..]))
-        .chain(
-            administrator_only
-                .iter()
-                .map(|(slug, abilities)| (slug.as_str(), &[ADMINISTRATOR][..], *abilities)),
-        );
-    for (slug, roles, abilities) in grants {
-        if let Err(e) = ignite_panel::register_runtime_permissions(db, slug).await {
-            log::error!("The admin could not register the permissions of `{slug}`: {e}");
-            continue;
-        }
-        for role in roles {
-            for ability in abilities {
-                let permission = format!("{slug}.{ability}");
-                if let Err(e) = authz::grant_permission(db, role, &permission).await {
-                    log::error!("The admin could not grant `{permission}` to `{role}`: {e}");
+    for role in default_roles() {
+        match authz::role_permissions(db, &role.name).await {
+            Ok(stored) if !stored.iter().any(|name| is_capability_name(name)) => {
+                let caps: Vec<String> = role.granted().map(str::to_owned).collect();
+                if let Err(e) = authz::sync_role_permissions(db, &role.name, &caps).await {
+                    log::error!(
+                        "The admin could not give the role `{}` its capabilities: {e}",
+                        role.name
+                    );
                 }
             }
+            Ok(_) | Err(AuthzError::NotFound(_)) => {}
+            Err(e) => log::error!("The admin could not read the role `{}`: {e}", role.name),
+        }
+    }
+    for slug in slugs {
+        if let Err(e) = ignite_panel::register_runtime_permissions(db, slug).await {
+            log::error!("The admin could not register the permissions of `{slug}`: {e}");
         }
     }
 }
@@ -614,7 +590,14 @@ impl Fairing for AdminAuthFairing {
         let Outcome::Success(user) = request.guard::<AdminUser>().await else {
             return;
         };
-        if let Some(id) = resources.take_created(user.user_id(), slug) {
+        // A dashboard form (Quick Draft) comes back to the dashboard, as WordPress's does.
+        let to_dashboard = response
+            .headers()
+            .get_one("Location")
+            .is_some_and(|to| to.trim_end_matches('/') == ADMIN_PATH);
+        if let Some(id) = resources.take_created(user.user_id(), slug)
+            && !to_dashboard
+        {
             response.set_raw_header("Location", format!("{ADMIN_PATH}/{slug}/{id}/edit"));
         }
     }

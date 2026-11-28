@@ -195,7 +195,18 @@ pub fn attachment_resource(storage: Arc<dyn Storage>) -> RuntimeResource {
     // The upload page in the menu's group, as WordPress's Media > Add New Media File.
     resource.navigation_create_item = true;
     resource.navigation_create_label = Some(super::navigation::CREATE_LABEL.to_owned());
-    resource
+    // `upload.php` and `media-new.php` need `upload_files`; editing and deleting a file are the
+    // post's `edit_post` and `delete_post`, which the admin's fairing checks. The library's data
+    // is not user-aware, so its screens also need the whole post capability set (Ruling R115):
+    // `edit_others_posts` keeps the entry from a user the fairing would refuse.
+    super::ScreenCaps {
+        view: "upload_files",
+        create: "upload_files",
+        update: "edit_posts",
+        delete: "delete_posts",
+    }
+    .apply(resource)
+    .access_ability("edit_others_posts")
 }
 
 /// Registers [`attachment_resource`] on Ignite's runtime registry.

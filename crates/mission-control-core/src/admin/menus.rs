@@ -191,67 +191,14 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
             false,
         ));
     }
-    // A text field, not a select: a stored item of a type the screen no longer offers (a custom
-    // type registered without `show_in_nav_menus`, or removed) must still save unchanged, as
-    // WordPress keeps such items. The data layer checks the value (see `item_inputs`).
-    let type_label = format!(
-        "Type: {}",
-        types
-            .iter()
-            .map(|(t, label)| format!("{} ({label})", t.value()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    fields.push(field(
-        ITEMS,
-        ITEMS_LABEL,
-        FieldKindDef::Repeater(vec![
-            field(
-                "id",
-                "Item ID (blank for a new item)",
-                FieldKindDef::Number,
-                false,
-            ),
-            field("title", "Navigation Label", FieldKindDef::Text, false),
-            field("type", &type_label, FieldKindDef::Text, true),
-            field(
-                "object_id",
-                "Post or term ID (not for a custom link)",
-                FieldKindDef::Number,
-                false,
-            ),
-            field("url", "URL (custom link)", FieldKindDef::Text, false),
-            field(
-                "parent",
-                "Parent item ID, or row number for a new item (0 for none)",
-                FieldKindDef::Number,
-                false,
-            ),
-            // The menu builder names a parent that is a new item (no id yet) by its row.
-            field(
-                "parent_row",
-                "Parent row number, for a parent that is a new item (optional)",
-                FieldKindDef::Number,
-                false,
-            ),
-            field(
-                "classes",
-                "CSS Classes (optional)",
-                FieldKindDef::Text,
-                false,
-            ),
-            field(
-                "new_tab",
-                "Open link in a new tab",
-                FieldKindDef::Checkbox,
-                false,
-            ),
-            field("attr_title", "Title Attribute", FieldKindDef::Text, false),
-            field("xfn", "Link Relationship (XFN)", FieldKindDef::Text, false),
-            field("description", "Description", FieldKindDef::Textarea, false),
-        ]),
-        false,
-    ));
+    // The items as a JSON list of rows (`id`, `title`, `type`, `object_id`, `url`, `parent`,
+    // `parent_row`, `classes`, `new_tab`, `attr_title`, `xfn`, `description`) in a textarea,
+    // which the menu builder edits as WordPress's Menu Structure (Ignite 0.6.7 edits a
+    // repeater as rows, which the builder does not read). A row's `type` is text, not a
+    // choice: a stored item of a type the screen no longer offers (a custom type registered
+    // without `show_in_nav_menus`, or removed) must still save unchanged, as WordPress keeps
+    // such items. The data layer checks each row (see `item_inputs`).
+    fields.push(field(ITEMS, ITEMS_LABEL, FieldKindDef::Textarea, false));
     let column = |key: &str, label: &str, sortable: bool, searchable: bool| ColumnDef {
         key: key.to_owned(),
         label: label.to_owned(),
@@ -297,7 +244,8 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
         super::navigation::APPEARANCE,
         super::navigation::APPEARANCE_ICON,
     );
-    resource
+    // `nav-menus.php` needs `edit_theme_options` for everything.
+    super::ScreenCaps::all("edit_theme_options").apply(resource)
 }
 
 /// Registers the Menus screen with Ignite; see [`nav_menus_resource`].

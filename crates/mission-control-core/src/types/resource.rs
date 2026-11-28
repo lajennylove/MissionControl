@@ -821,7 +821,23 @@ pub fn post_type_resource_with_access(
     let layout = editor_layout(&data, group_sections);
     let has_title = data.title;
     let actions = trash_actions(&data);
-    let mut resource = RuntimeResource::new(def.slug.clone(), title, singular, data)
+    // `edit.php`, `post-new.php` and `post.php` need the type's `edit_posts` (its `create_posts`
+    // is `edit_posts`), and deleting its `delete_posts`; the type's policy then checks each
+    // post (`edit_post`, `delete_post`, and so `edit_others_posts` on another's post).
+    let caps = def.caps();
+    let screen_caps = crate::admin::ScreenCaps {
+        view: &caps.edit_posts,
+        create: &caps.edit_posts,
+        update: &caps.edit_posts,
+        delete: &caps.delete_posts,
+    };
+    let mut resource = screen_caps
+        .apply(RuntimeResource::new(
+            def.slug.clone(),
+            title,
+            singular,
+            data,
+        ))
         // The New screen in the type's menu group, as WordPress's Posts > Add New Post.
         .navigation_create_item(true)
         .navigation_create_label(crate::admin::navigation::CREATE_LABEL);

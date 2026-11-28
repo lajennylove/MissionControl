@@ -689,6 +689,9 @@ pub fn settings_layout(screen: SettingsScreen) -> FormLayout {
     ])
 }
 
+/// The capability every settings screen's Ignite abilities are.
+const MANAGE_OPTIONS: &str = "manage_options";
+
 /// The Ignite runtime resource of `screen`: its fields in [`settings_layout`]'s two columns,
 /// and [`SettingsData`] over `options`.
 pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> RuntimeResource {
@@ -722,7 +725,9 @@ pub fn settings_resource(screen: SettingsScreen, services: SettingsServices) -> 
     resource.navigation_parent_item = Some(super::navigation::SETTINGS_PARENT.to_owned());
     // A screen has one record and no New screen.
     resource.navigation_create_item = false;
-    resource
+    // `options-general.php` and the others need `manage_options` (Privacy's
+    // `manage_privacy_options` maps to it on a single site).
+    super::ScreenCaps::all(MANAGE_OPTIONS).apply(resource)
 }
 
 /// Registers every settings screen with Ignite. Returns the slugs registered, and the

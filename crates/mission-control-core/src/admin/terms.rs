@@ -56,7 +56,7 @@ use crate::content::{
 use crate::front::escape_like;
 use crate::rest::{KsesLimiter, id_of};
 use crate::types::Access;
-use crate::users::{Object, TaxonomyCaps, TermContext, UserCaps, can};
+use crate::users::{Object, TaxonomyCaps, TermContext, UserCaps, can, map_meta_cap};
 
 /// The slug of the Categories screen: the taxonomy's name, as `edit-tags.php?taxonomy=category`.
 pub const CATEGORY_SCREEN: &str = "category";
@@ -206,7 +206,29 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
     // Categories and Tags are in Posts' submenu (WordPress's `edit.php`), in the Content group
     // with it.
     resource.navigation_parent_item = Some(navigation::POSTS_PARENT.to_owned());
-    resource
+    // `edit-tags.php` needs the taxonomy's `manage_terms`, a new term and an edit its
+    // `edit_terms`, and Delete its `delete_terms`, each as `map_meta_cap` maps it to a
+    // primitive capability (`manage_categories` for categories and tags).
+    let caps = TaxonomyCaps::for_taxonomy(&taxonomy.name);
+    let nobody = UserCaps::from_roles(0, &[], &Default::default());
+    let primitive = |cap: &str| {
+        map_meta_cap(cap, &nobody, None)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| cap.to_owned())
+    };
+    let (manage, edit, delete) = (
+        primitive(&caps.manage_terms),
+        primitive(&caps.edit_terms),
+        primitive(&caps.delete_terms),
+    );
+    super::ScreenCaps {
+        view: &manage,
+        create: &edit,
+        update: &edit,
+        delete: &delete,
+    }
+    .apply(resource)
 }
 
 /// Registers the Categories and Tags screens with Ignite, each with its [`TermsPolicy`] reading

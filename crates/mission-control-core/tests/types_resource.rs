@@ -25,7 +25,7 @@ use mission_control_core::types::{
     PostTypeDef, PostTypeResources, Registry, Support, TaxonomyDef, builtin_post_types,
     create_auto_draft, get_field, post_type_resource, post_type_resource_with_templates,
 };
-use mission_control_core::users::{ADMINISTRATOR, IgniteUserRoles, UserCaps, UserRoles};
+use mission_control_core::users::{ADMINISTRATOR, IgniteUserRoles, UserCaps, UserRoles, has_cap};
 use mission_control_testing::{create_users_table, database, unique_email};
 use orbit_orm::{Database, Model, raw, schema};
 use serde_json::{Value, json};
@@ -42,8 +42,8 @@ async fn setup(db: &Database) -> i64 {
     add_user(db, "ann").await
 }
 
-/// Creates Ignite's `roles` and `role_user` tables, as its migration does, unless they exist:
-/// the author choices read them (Ruling R121).
+/// Creates Ignite's `roles`, `role_user`, `permissions` and `role_permission` tables, as its
+/// migration does, unless they exist: the author choices read them (Ruling R121).
 async fn create_role_tables(db: &Database) {
     let roles = schema::create_if_not_exists("roles", |t| {
         t.id();
@@ -55,7 +55,17 @@ async fn create_role_tables(db: &Database) {
         t.big_integer("role_id");
         t.primary(["user_id", "role_id"]);
     });
-    for table in [roles, role_user] {
+    let permissions = schema::create_if_not_exists("permissions", |t| {
+        t.id();
+        t.string("name");
+        t.unique(["name"]).name("permissions_name_unique");
+    });
+    let role_permission = schema::create_if_not_exists("role_permission", |t| {
+        t.big_integer("role_id");
+        t.big_integer("permission_id");
+        t.primary(["role_id", "permission_id"]);
+    });
+    for table in [roles, role_user, permissions, role_permission] {
         for sql in table.to_sql(db.driver()) {
             raw::execute(db, &sql, &[])
                 .await
@@ -1253,8 +1263,12 @@ async fn ignite_roles_are_read_as_wordpress_roles() {
     let ann = setup(db).await;
     grant(db, ann, "super-admin").await;
     grant(db, ann, "not-a-wordpress-role").await;
+    // Ignite's super-admin is an administrator; a role of the site's own (as `add_role` adds
+    // one) counts, with the capabilities it was given: none here.
     let assignment = IgniteUserRoles.roles(db, ann).await.unwrap();
-    assert_eq!(assignment.roles, [ADMINISTRATOR]);
+    assert_eq!(assignment.roles, ["not-a-wordpress-role", ADMINISTRATOR]);
+    let caps = assignment.user_caps(ann);
+    assert!(has_cap(&caps, "manage_options"));
     let nobody = add_user(db, "nobody").await;
     assert!(
         IgniteUserRoles

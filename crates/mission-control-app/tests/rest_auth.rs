@@ -300,7 +300,8 @@ async fn with_no_provider_the_roles_are_the_users_ignite_roles() {
     let (password, _) = app_password::create(&db, user_id, "Laptop", None)
         .await
         .expect("creates the application password");
-    // An editor, and a role Mission Control does not know, which grants nothing.
+    // An editor (made without its capabilities, so it has WordPress's), and a role of the
+    // site's own, which counts as `add_role`'s and grants nothing.
     for role in ["editor", "billing"] {
         raw::execute(&*db, "INSERT INTO roles (name) VALUES (?)", &[role.into()])
             .await
@@ -329,7 +330,7 @@ async fn with_no_provider_the_roles_are_the_users_ignite_roles() {
     assert_eq!(status, Status::Ok);
     assert_eq!(
         json,
-        json!({"id": user_id, "roles": ["editor"], "edit_others_posts": true})
+        json!({"id": user_id, "roles": ["billing", "editor"], "edit_others_posts": true})
     );
     drop(client);
     db.close().await;

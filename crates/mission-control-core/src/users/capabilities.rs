@@ -4,10 +4,12 @@
 //! capabilities `populate_roles` gives them (WordPress 1.6 to 3.0, which later versions keep),
 //! including the legacy `level_0` to `level_10` capabilities, which old plugins still check.
 //!
-//! **Where roles will be stored.** Nothing is stored yet. Roles become Ignite roles and
-//! capabilities Ignite permissions (Spatie's shape, design section 5.6) once Ignite's tables run
-//! on every database (Task 8.2b, after Ignite 3a.3). Then the stored roles are read into
-//! [`Role`] values and a user's capabilities are built with [`UserCaps::from_roles`], as here.
+//! **Where roles are stored.** The roles are Ignite roles and the capabilities Ignite
+//! permissions (Spatie's shape, design section 5.6), as WordPress keeps them in its
+//! `wp_user_roles` option: the admin declares the five roles with the capabilities here
+//! (`Ignite::role`, as `populate_roles` adds them, once), the Roles screen changes them, and
+//! [`IgniteUserRoles`](super::IgniteUserRoles) reads the stored roles into [`Role`] values, from
+//! which a user's capabilities are built with [`UserCaps::from_roles`].
 //!
 //! A user with only the `subscriber` role holds `read` and `level_0`: none of the capabilities
 //! the content screens need (`edit_posts`, `edit_pages`, `upload_files`, ...), so they cannot
@@ -171,6 +173,27 @@ pub struct Role {
 }
 
 impl Role {
+    /// A role named `name`, shown as `display_name`, granting each capability of `caps`.
+    pub fn new<I, S>(name: &str, display_name: &str, caps: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            name: name.to_owned(),
+            display_name: display_name.to_owned(),
+            capabilities: caps.into_iter().map(|cap| (cap.into(), true)).collect(),
+        }
+    }
+
+    /// The capabilities the role grants, by name.
+    pub fn granted(&self) -> impl Iterator<Item = &str> {
+        self.capabilities
+            .iter()
+            .filter(|(_, granted)| **granted)
+            .map(|(cap, _)| cap.as_str())
+    }
+
     /// A role named `name`, shown as `display_name`, granting every capability in `granted`.
     fn granting(name: &str, display_name: &str, granted: &[&[&str]]) -> Self {
         Self {
@@ -207,6 +230,35 @@ pub fn default_roles() -> Vec<Role> {
         Role::granting(CONTRIBUTOR, "Contributor", &[CONTRIBUTOR_CAPS]),
         Role::granting(SUBSCRIBER, "Subscriber", &[SUBSCRIBER_CAPS]),
     ]
+}
+
+/// Every capability the default roles grant, each once, in the order `populate_roles` adds
+/// them to the administrator (who holds them all): the abilities the admin registers with
+/// Ignite, so the Roles screen offers each one.
+pub fn all_capabilities() -> Vec<&'static str> {
+    let mut caps: Vec<&'static str> = Vec::new();
+    for list in [
+        ADMINISTRATOR_160,
+        ADMINISTRATOR_AND_EDITOR_210,
+        ADMINISTRATOR_210_TO_300,
+        EDITOR_160,
+        AUTHOR_CAPS,
+        CONTRIBUTOR_CAPS,
+        SUBSCRIBER_CAPS,
+    ] {
+        for cap in list {
+            if !caps.contains(cap) {
+                caps.push(cap);
+            }
+        }
+    }
+    caps
+}
+
+/// Whether `name` is a WordPress capability as the roles store it, not an Ignite resource
+/// ability such as `post.viewAny`: WordPress's capabilities have no `.`.
+pub fn is_capability_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('.')
 }
 
 /// The default role named `name`, or `None` when it is not one of the five.
