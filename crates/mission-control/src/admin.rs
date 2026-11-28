@@ -131,9 +131,9 @@ use mission_control_core::admin::managers::{CapabilityGrants, Managers};
 use mission_control_core::admin::menus::{MenuObjectType, default_menu_object_types};
 use mission_control_core::admin::{
     NAV_MENUS, PostScreen, Refusal, SETTINGS_RECORD, SettingsScreen, SettingsServices,
-    TERM_SCREENS, attachment_post_type, authorize_menus_screen, authorize_post_screen,
-    authorize_settings_screen, authorize_term_screen, may_upload, register_nav_menus_resource,
-    register_settings_resources, register_term_resources,
+    TERM_SCREENS, TaxonomyScreens, attachment_post_type, authorize_menus_screen,
+    authorize_post_screen, authorize_settings_screen, authorize_term_screen, may_upload,
+    register_nav_menus_resource, register_settings_resources, register_term_resources,
 };
 use mission_control_core::admin::{dashboard, navigation};
 use mission_control_core::config::Config;
@@ -397,9 +397,11 @@ pub(crate) async fn mount_panel(
     );
     // The managers of post types, taxonomies and field groups (Task 5.7), before the post
     // types, so a post type cannot take their slugs. A save there registers the screens again.
+    let term_screens = Arc::new(TaxonomyScreens::new(Arc::clone(&registry), access.clone()));
     let managers = Managers {
         registry: Arc::clone(&registry),
         resources: Arc::clone(&resources),
+        term_screens: Arc::clone(&term_screens),
         grants: Arc::new(IgniteGrants),
     };
     let (manager_screens, refused_managers) = managers.register();
@@ -418,6 +420,11 @@ pub(crate) async fn mount_panel(
     let refused = resources.sync();
     for refused in &refused {
         log::warn!("{refused}");
+    }
+    // The term screens of the custom taxonomies (Task 5.7), after the post types: a post type
+    // keeps its address when a taxonomy has the same name.
+    for refused in term_screens.sync() {
+        log::warn!("A taxonomy has no term screen: {refused}");
     }
     // Fail closed: without `post` and `page` of its own, this app serves no post type screens.
     // The fairing then refuses the slugs another registration holds.
@@ -446,6 +453,7 @@ pub(crate) async fn mount_panel(
     slugs.extend(terms.iter().map(|slug| (*slug).to_owned()));
     slugs.extend(settings.iter().map(|slug| (*slug).to_owned()));
     slugs.extend(manager_screens.iter().map(|slug| (*slug).to_owned()));
+    slugs.extend(term_screens.registered());
     if menus {
         slugs.push(NAV_MENUS.to_owned());
     }

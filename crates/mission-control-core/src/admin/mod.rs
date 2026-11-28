@@ -38,8 +38,9 @@ pub use settings::{
     save_settings, settings_choices, settings_fields, settings_resource, timezone_choices,
 };
 pub use terms::{
-    CATEGORY_SCREEN, POST_TAG_SCREEN, TERM_SCREENS, TermsData, TermsPolicy, authorize_term_screen,
-    register_term_resources, term_screen_taxonomy, terms_resource,
+    CATEGORY_SCREEN, POST_TAG_SCREEN, TERM_SCREENS, TaxonomyScreens, TermsData, TermsPolicy,
+    authorize_term_screen, custom_terms_resource, register_term_resources, term_screen_taxonomy,
+    terms_resource,
 };
 
 /// `resource` with its saves staying on the edit page, as WordPress's screens do: a create goes

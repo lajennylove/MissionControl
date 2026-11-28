@@ -35,9 +35,14 @@
 //!   `delete_term`, mapped as `map_meta_cap` maps them. With WordPress's roles, administrators
 //!   and editors hold `manage_categories`.
 //!
+//! - The custom taxonomies in use (stored in the Taxonomies manager, or registered in code or by
+//!   a plugin) get the same screen at `/mc-admin/<taxonomy>`, under Posts after Categories and
+//!   Tags, with their labels and capabilities ([`TaxonomyScreens`], Task 5.7).
+//!
 //! Not served yet, because Ignite 0.6.3 has no list bulk actions: WordPress's bulk Delete.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ignite_core::{
     ActingUser, ColumnDef, Direction, FieldDef, FieldKindDef, ListFilter, ListQuery, Page, Policy,
@@ -55,7 +60,7 @@ use crate::content::{
 };
 use crate::front::escape_like;
 use crate::rest::{KsesLimiter, id_of};
-use crate::types::Access;
+use crate::types::{Access, Registry, TaxonomyDef};
 use crate::users::{Object, TaxonomyCaps, TermContext, UserCaps, can, map_meta_cap};
 
 /// The slug of the Categories screen: the taxonomy's name, as `edit-tags.php?taxonomy=category`.
@@ -143,9 +148,77 @@ pub async fn authorize_term_screen(
         .then_some(Refusal::DefaultCategory))
 }
 
-/// The screen of `taxonomy` as an Ignite runtime resource, its description filtered under
-/// `kses`.
+/// The screen of `taxonomy` (categories or tags) as an Ignite runtime resource, its
+/// description filtered under `kses`.
 pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource {
+    let category = taxonomy.name == Taxonomy::CATEGORY.name;
+    let screen = if category {
+        TermScreen {
+            slug: CATEGORY_SCREEN.to_owned(),
+            title: "Categories".to_owned(),
+            singular: "Category".to_owned(),
+            parent_label: "Parent Category".to_owned(),
+            sort: CATEGORIES_SORT,
+            caps: TaxonomyCaps::for_taxonomy(&taxonomy.name),
+        }
+    } else {
+        TermScreen {
+            slug: POST_TAG_SCREEN.to_owned(),
+            title: "Tags".to_owned(),
+            singular: "Tag".to_owned(),
+            parent_label: String::new(),
+            sort: TAGS_SORT,
+            caps: TaxonomyCaps::for_taxonomy(&taxonomy.name),
+        }
+    };
+    screen_resource(taxonomy, screen, kses)
+}
+
+/// What a term screen shows besides its taxonomy: its slug, its names, its place in the
+/// sidebar and its taxonomy's capabilities.
+#[derive(Debug, Clone)]
+struct TermScreen {
+    slug: String,
+    title: String,
+    singular: String,
+    /// The Parent field's label, for a hierarchical taxonomy.
+    parent_label: String,
+    sort: i32,
+    caps: TaxonomyCaps,
+}
+
+/// The term screen of a stored or registered custom taxonomy `def` (Task 5.7, design gap M5),
+/// as `edit-tags.php?taxonomy=genre`: at `/mc-admin/<taxonomy>`, under Posts after Categories
+/// and Tags (at `sort`), with the taxonomy's labels and capabilities.
+pub fn custom_terms_resource(def: &TaxonomyDef, kses: KsesLimiter, sort: i32) -> RuntimeResource {
+    let title = if def.labels.name.is_empty() {
+        def.slug.clone()
+    } else {
+        def.labels.name.clone()
+    };
+    let singular = if def.labels.singular_name.is_empty() {
+        title.clone()
+    } else {
+        def.labels.singular_name.clone()
+    };
+    let parent_label = def
+        .labels
+        .parent_item
+        .clone()
+        .unwrap_or_else(|| format!("Parent {singular}"));
+    let screen = TermScreen {
+        slug: def.slug.clone(),
+        title,
+        singular,
+        parent_label,
+        sort,
+        caps: def.caps(),
+    };
+    screen_resource(&def.to_taxonomy(), screen, kses)
+}
+
+/// The term screen `screen` of `taxonomy`.
+fn screen_resource(taxonomy: &Taxonomy, screen: TermScreen, kses: KsesLimiter) -> RuntimeResource {
     let field = |name: &str, label: &str, kind: FieldKindDef, required: bool| FieldDef {
         name: name.to_owned(),
         label: label.to_owned(),
@@ -158,12 +231,6 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
         sortable,
         searchable,
     };
-    let category = taxonomy.name == Taxonomy::CATEGORY.name;
-    let (slug, title, singular, sort) = if category {
-        (CATEGORY_SCREEN, "Categories", "Category", CATEGORIES_SORT)
-    } else {
-        (POST_TAG_SCREEN, "Tags", "Tag", TAGS_SORT)
-    };
     let mut fields = vec![
         field(NAME, "Name", FieldKindDef::Text, true),
         field(SLUG, "Slug", FieldKindDef::Text, false),
@@ -171,7 +238,7 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
     if taxonomy.hierarchical {
         fields.push(field(
             PARENT,
-            "Parent Category",
+            &screen.parent_label,
             FieldKindDef::Lookup,
             false,
         ));
@@ -183,11 +250,12 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
         false,
     ));
     let mut resource = super::stay_on_edit(RuntimeResource::new(
-        slug,
-        title,
-        singular,
+        screen.slug.clone(),
+        screen.title.clone(),
+        screen.singular.clone(),
         TermsData {
             taxonomy: taxonomy.clone(),
+            screen: screen.slug.clone(),
             kses,
         },
     ));
@@ -202,14 +270,14 @@ pub fn terms_resource(taxonomy: &Taxonomy, kses: KsesLimiter) -> RuntimeResource
     // layer runs, whoever asks: the policy alone does not stop a super-admin.
     resource.hide_default_delete_when =
         Some(ListFilter::new().where_eq(DEFAULT_TERM_KEY, Value::Bool(true)));
-    navigation::place(&mut resource, sort, navigation::POST_ICON);
-    // Categories and Tags are in Posts' submenu (WordPress's `edit.php`), in the Content group
-    // with it.
+    navigation::place(&mut resource, screen.sort, navigation::POST_ICON);
+    // Categories, Tags and the custom taxonomies are in Posts' submenu (WordPress's
+    // `edit.php`), in the Content group with it.
     resource.navigation_parent_item = Some(navigation::POSTS_PARENT.to_owned());
     // `edit-tags.php` needs the taxonomy's `manage_terms`, a new term and an edit its
     // `edit_terms`, and Delete its `delete_terms`, each as `map_meta_cap` maps it to a
     // primitive capability (`manage_categories` for categories and tags).
-    let caps = TaxonomyCaps::for_taxonomy(&taxonomy.name);
+    let caps = &screen.caps;
     let nobody = UserCaps::from_roles(0, &[], &Default::default());
     let primitive = |cap: &str| {
         map_meta_cap(cap, &nobody, None)
@@ -253,11 +321,101 @@ pub fn register_term_resources(access: &Access) -> (Vec<&'static str>, Vec<Runti
     (registered, refused)
 }
 
+/// The term screens of the custom taxonomies in use (Task 5.7, design gap M5): each one of the
+/// [`Registry`] whose `show_ui` is on gets its screen at `/mc-admin/<taxonomy>`, under Posts
+/// after Categories and Tags, with its [`TermsPolicy`]. Call [`sync`](Self::sync) at start and
+/// after every change to a taxonomy; it registers them again, as
+/// [`PostTypeResources::sync`](crate::types::PostTypeResources::sync) does the post types'.
+///
+/// WordPress lists a taxonomy's screen under each post type it is attached to; the owner's rule
+/// for Task 5.7 lists them under Posts, as Categories and Tags are.
+pub struct TaxonomyScreens {
+    registry: Arc<Registry>,
+    access: Access,
+    /// The slugs this value registered. Held only by synchronous code.
+    registered: Mutex<Vec<String>>,
+}
+
+impl std::fmt::Debug for TaxonomyScreens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaxonomyScreens")
+            .field("registered", &self.registered())
+            .finish_non_exhaustive()
+    }
+}
+
+impl TaxonomyScreens {
+    /// The screens of the custom taxonomies of `registry`, their users' capabilities read
+    /// through `access`; nothing is registered until [`sync`](Self::sync).
+    pub fn new(registry: Arc<Registry>, access: Access) -> Self {
+        Self {
+            registry,
+            access,
+            registered: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Registers the screen of every custom taxonomy in use whose `show_ui` is on, replacing
+    /// those this value registered before, and unregisters the screens of the taxonomies that
+    /// went. Returns Ignite's refusals (a slug another screen holds, such as a post type's).
+    pub fn sync(&self) -> Vec<RuntimeError> {
+        let mut registered = self
+            .registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for slug in registered.iter() {
+            let _ = ignite_core::unregister_runtime(slug);
+            ignite_core::unregister_policy(slug);
+        }
+        registered.clear();
+        let mut refused = Vec::new();
+        let taxonomies = self
+            .registry
+            .all_taxonomies()
+            .into_iter()
+            .filter(TaxonomyDef::effective_show_ui);
+        for (sort, def) in (TAGS_SORT + 1..).zip(taxonomies) {
+            if ignite_core::runtime_resource(&def.slug).is_some()
+                || ignite_core::policy(&def.slug).is_some()
+            {
+                refused.push(RuntimeError::SlugTaken(def.slug.clone()));
+                continue;
+            }
+            ignite_core::register_policy(
+                def.slug.clone(),
+                TermsPolicy::with_caps(def.to_taxonomy(), def.caps(), self.access.clone()),
+            );
+            match ignite_core::register_runtime(custom_terms_resource(
+                &def,
+                self.access.kses.clone(),
+                sort,
+            )) {
+                Ok(()) => registered.push(def.slug.clone()),
+                Err(e) => {
+                    ignite_core::unregister_policy(&def.slug);
+                    refused.push(e);
+                }
+            }
+        }
+        refused
+    }
+
+    /// The taxonomies whose screen this value has registered, in order.
+    pub fn registered(&self) -> Vec<String> {
+        self.registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// Where a term screen's records live: the terms of one taxonomy, by `term_id`. See the
 /// [module](self).
 #[derive(Clone)]
 pub struct TermsData {
     taxonomy: Taxonomy,
+    /// The screen's slug: the taxonomy's name.
+    screen: String,
     kses: KsesLimiter,
 }
 
@@ -280,12 +438,8 @@ fn text(input: &Row, key: &str) -> Option<String> {
 
 impl TermsData {
     /// The screen's slug.
-    fn screen(&self) -> &'static str {
-        if self.taxonomy.name == Taxonomy::CATEGORY.name {
-            CATEGORY_SCREEN
-        } else {
-            POST_TAG_SCREEN
-        }
+    fn screen(&self) -> &str {
+        &self.screen
     }
 
     /// The Ignite error for a refusal of the terms API: the name or slug taken show on the form;
@@ -670,6 +824,12 @@ impl TermsPolicy {
     /// The policy of `taxonomy`'s screen, reading users' capabilities through `access`.
     pub fn new(taxonomy: Taxonomy, access: Access) -> Self {
         let caps = TaxonomyCaps::for_taxonomy(&taxonomy.name);
+        Self::with_caps(taxonomy, caps, access)
+    }
+
+    /// The policy of a custom taxonomy's screen, whose capabilities are `caps` (its
+    /// definition's, [`TaxonomyDef::caps`]).
+    pub fn with_caps(taxonomy: Taxonomy, caps: TaxonomyCaps, access: Access) -> Self {
         Self {
             taxonomy,
             caps,

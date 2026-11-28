@@ -126,6 +126,11 @@ const SHOW_IN_MENU_CHOICES: [(&str, &str); 2] = [("1", "Yes"), ("0", "No")];
 /// The refusal of a key another post type has, on the key field.
 pub const KEY_TAKEN: &str = "This post type key is already in use by another post type.";
 
+/// The refusal of a key another admin screen has (a taxonomy's term screen): the type's
+/// screens would be at the same address.
+pub const KEY_SCREEN_TAKEN: &str =
+    "This post type key is already in use by a taxonomy or another admin screen.";
+
 /// The Post Types manager as an Ignite runtime resource. See the [module](self).
 pub fn post_types_resource(managers: Managers) -> RuntimeResource {
     let field = |name: &str, label: &str, kind: FieldKindDef, required: bool| FieldDef {
@@ -671,6 +676,14 @@ impl PostTypesData {
             || stored(db, &key).await?;
         if taken {
             return Ok(Err(ValidationError::with_messages([(KEY, KEY_TAKEN)])));
+        }
+        // The type's screens are at `/mc-admin/<key>`: another screen's address (a taxonomy's
+        // term screen, the media library) cannot be taken.
+        if ignite_core::runtime_resource(&key).is_some() {
+            return Ok(Err(ValidationError::with_messages([(
+                KEY,
+                KEY_SCREEN_TAKEN,
+            )])));
         }
         let plural = text(&input, PLURAL).unwrap_or_default();
         let singular = text(&input, SINGULAR).unwrap_or_default();

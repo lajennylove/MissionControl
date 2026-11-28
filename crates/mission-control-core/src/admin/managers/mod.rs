@@ -43,14 +43,17 @@ use ignite_core::{RuntimeError, RuntimeFuture};
 use orbit_orm::{Database, Error};
 use serde_json::Value;
 
+use super::terms::TaxonomyScreens;
 use crate::types::{DefinitionError, Origin, PostTypeResources, Registry, RegistryError};
 
 pub mod post_types;
+pub mod taxonomies;
 
 pub use post_types::{POST_TYPES, PostTypesData, post_types_resource};
+pub use taxonomies::{TAXONOMIES, TaxonomiesData, taxonomies_resource};
 
 /// The slugs of the managers, in the sidebar's order.
-pub const MANAGERS: [&str; 1] = [POST_TYPES];
+pub const MANAGERS: [&str; 2] = [POST_TYPES, TAXONOMIES];
 
 /// The capability the managers need, as ACF's admin and the settings screens.
 pub const MANAGE_OPTIONS: &str = "manage_options";
@@ -89,6 +92,8 @@ pub struct Managers {
     pub registry: Arc<Registry>,
     /// The post types' screens, registered again after each save.
     pub resources: Arc<PostTypeResources>,
+    /// The stored taxonomies' term screens, registered again after each save.
+    pub term_screens: Arc<TaxonomyScreens>,
     /// Who grants a new post type's capabilities.
     pub grants: Arc<dyn CapabilityGrants>,
 }
@@ -106,6 +111,9 @@ impl Managers {
         for refused in self.resources.sync() {
             log::warn!("{refused}");
         }
+        for refused in self.term_screens.sync() {
+            log::warn!("A taxonomy has no term screen: {refused}");
+        }
     }
 
     /// Registers the three managers with Ignite. Returns the slugs registered, and Ignite's
@@ -113,9 +121,10 @@ impl Managers {
     pub fn register(&self) -> (Vec<&'static str>, Vec<RuntimeError>) {
         let mut registered = Vec::new();
         let mut refused = Vec::new();
-        // The Taxonomies and Field Groups managers join it.
-        #[allow(clippy::single_element_loop)]
-        for (slug, resource) in [(POST_TYPES, post_types_resource(self.clone()))] {
+        for (slug, resource) in [
+            (POST_TYPES, post_types_resource(self.clone())),
+            (TAXONOMIES, taxonomies_resource(self.clone())),
+        ] {
             match ignite_core::register_runtime(resource) {
                 Ok(()) => registered.push(slug),
                 Err(e) => refused.push(e),
