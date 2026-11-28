@@ -29,12 +29,17 @@
 //!   computes it from the zone on every read; here a daylight saving change is followed when the
 //!   screen is saved again). The date and time formats are WordPress's choices or a custom
 //!   format (`date_format_custom`).
+//! - General's "New User Default Role" (`default_role`, Subscriber by default) is the role a user
+//!   added without one gets, and the role Add New User's Role select starts at (see the admin's
+//!   Users screens); it must be a role the site has.
 //! - Writing: the Default Post Category is required and must be a category; a blank one is
 //!   refused on the field ("Default Post Category is required."), so the default the Categories
 //!   screen protects is never unset by the form.
 //! - Reading: a static homepage needs a page, and the posts page cannot be the same page
 //!   (WordPress's "these pages should not be the same!"); "Blog pages show at most" below 1 is
-//!   refused on the field (WordPress's `sanitize_option` would store 1 silently).
+//!   refused on the field (WordPress's `sanitize_option` would store 1 silently). With "Your
+//!   latest posts" chosen, the Homepage and Posts page dropdowns show no page (a page id left
+//!   stored from an earlier static homepage is not shown as chosen).
 //! - Reading: "Discourage search engines" stores `blog_public` 0, as WordPress inverts it; the
 //!   front end's pages then carry WordPress's `noindex, nofollow` robots meta tag (see
 //!   `crate::front`). The feed options (`posts_per_rss`, `rss_use_excerpt`) are stored with no
@@ -52,7 +57,7 @@
 //! # Left out (phase 1)
 //!
 //! Options of features Mission Control does not have yet are not on the screens: General's
-//! Membership (`users_can_register`, `default_role`) and Site Language (`WPLANG`; no language
+//! Membership (`users_can_register`; no registration) and Site Language (`WPLANG`; no language
 //! packs); Writing's Default Post Format (no post formats), Post via email (`mailserver_*`,
 //! `default_email_category`) and Update Services (`ping_sites`); Reading's page for a static
 //! front page shows the pages, but no "Add New Page" link; Discussion's avatar previews (the
@@ -81,7 +86,7 @@ use crate::hooks::Owner;
 use crate::media::ImageSizes;
 use crate::rest::KsesLimiter;
 use crate::types::MAX_OPTIONS;
-use crate::users::{UserCaps, can};
+use crate::users::{SUBSCRIBER, UserCaps, can, role_choices};
 
 /// The id of the one record a settings screen edits: `<mount>/<screen>/1/edit`.
 pub const SETTINGS_RECORD: i64 = 1;
@@ -182,6 +187,7 @@ impl SettingsScreen {
                 "siteurl",
                 "home",
                 "admin_email",
+                "default_role",
                 "timezone_string",
                 "gmt_offset",
                 "date_format",
@@ -371,6 +377,8 @@ pub fn settings_fields(screen: SettingsScreen) -> Vec<FieldDef> {
             field("siteurl", "Mission Control Address (URL)", Url, true),
             field("home", "Site Address (URL)", Url, true),
             field("admin_email", "Administration Email Address", Email, true),
+            // Not required: a save without it leaves the option as it is, as `options.php` does.
+            field("default_role", "New User Default Role", Lookup, false),
             field("timezone_string", "Timezone", Lookup, true),
             field(
                 "date_format",
@@ -584,6 +592,7 @@ pub fn settings_layout(screen: SettingsScreen) -> FormLayout {
                     "siteurl",
                     "home",
                     "admin_email",
+                    "default_role",
                 ],
             )],
             vec![section(
@@ -857,6 +866,10 @@ pub async fn read_settings(db: &Database, screen: SettingsScreen) -> Result<Row,
                 };
                 row.insert(name.into(), json!(value));
             }
+            row.insert(
+                "default_role".into(),
+                text("default_role", SUBSCRIBER).await?,
+            );
             row.insert("timezone_string".into(), json!(timezone_choice(db).await?));
             for (name, presets, default) in [
                 ("date_format", &DATE_FORMATS[..], "F j, Y"),
@@ -893,13 +906,15 @@ pub async fn read_settings(db: &Database, screen: SettingsScreen) -> Result<Row,
             row.insert("default_category".into(), json!(shown));
         }
         SettingsScreen::Reading => {
-            row.insert(
-                "show_on_front".into(),
-                text("show_on_front", "posts").await?,
-            );
+            let show_on_front = text("show_on_front", "posts").await?;
+            // The homepage and posts page choose pages only for "A static page": with "Your
+            // latest posts" (`show_on_front` `posts`) the dropdowns show no page, whatever page
+            // ids are left stored, so the screen shows what the site does.
+            let static_front = show_on_front == json!("page");
+            row.insert("show_on_front".into(), show_on_front);
             for name in ["page_on_front", "page_for_posts"] {
                 let id = int_of(&number(name, 0).await?).unwrap_or(0);
-                row.insert(name.into(), page_value(id));
+                row.insert(name.into(), page_value(if static_front { id } else { 0 }));
             }
             row.insert("posts_per_page".into(), number("posts_per_page", 10).await?);
             row.insert("posts_per_rss".into(), number("posts_per_rss", 10).await?);
@@ -1124,6 +1139,9 @@ pub async fn settings_choices(
             let zone = (is_timezone(&zone) || utc_offset(&zone).is_some()).then_some(zone);
             with_current(timezone_choices(), zone)
         }
+        // `wp_dropdown_roles`: the stored roles, WordPress's five first.
+        // The stored role stays offered, as the other dropdowns keep their stored value.
+        (SettingsScreen::General, "default_role") => default_role_choices(db).await?,
         // Only the categories: a stored id that is no category is not offered, so the default
         // saved is always a category (see `read_settings`).
         (SettingsScreen::Writing, "default_category") => {
@@ -1205,6 +1223,9 @@ fn writes_of(screen: SettingsScreen, input: &Row) -> Vec<(&'static str, &'static
                 "admin_email",
             ] {
                 text(&mut writes, name);
+            }
+            if let Some(role) = input_text(input, "default_role").filter(|r| !r.is_empty()) {
+                writes.push(("default_role", "default_role", Value::String(role)));
             }
             if let Some(zone) = input_text(input, "timezone_string") {
                 // `options.php`: a `UTC+N` choice is an offset, and no time zone.
@@ -1420,6 +1441,17 @@ async fn screen_errors(
 ) -> Result<SettingsErrors, Error> {
     let mut errors = SettingsErrors::new();
     match screen {
+        SettingsScreen::General => {
+            // `sanitize_option`: the default role must be a role the site has.
+            if let Some(role) = input_text(input, "default_role").filter(|r| !r.is_empty())
+                && !default_role_choices(db)
+                    .await?
+                    .iter()
+                    .any(|(name, _)| *name == role)
+            {
+                errors.insert("default_role".to_owned(), DEFAULT_ROLE_INVALID.to_owned());
+            }
+        }
         SettingsScreen::Writing => {
             if let Some(value) = input.get("default_category") {
                 let id = text_of(value);
@@ -1468,6 +1500,18 @@ async fn screen_errors(
     }
     Ok(errors)
 }
+
+/// The New User Default Role's choices: the site's roles, and the stored role (Subscriber when
+/// unset) when it is none of them.
+async fn default_role_choices(db: &Database) -> Result<Vec<(String, String)>, Error> {
+    let current = stored(db, "default_role")
+        .await?
+        .map_or_else(|| SUBSCRIBER.to_owned(), |v| text_of(&v));
+    Ok(with_current(role_choices(db).await?, Some(current)))
+}
+
+/// The message of a New User Default Role that is no role of the site.
+pub const DEFAULT_ROLE_INVALID: &str = "Sorry, you are not allowed to give users that role.";
 
 /// The message of a custom permalink structure without a structure tag, an empty one included.
 pub const STRUCTURE_TAG_REQUIRED: &str =

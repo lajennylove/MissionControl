@@ -86,7 +86,12 @@
 //!   submodule); the Ignite theme keeps Ignite's.
 //! - The dashboard's widgets (see `mission_control_core::admin::dashboard`): the At a Glance
 //!   cards, then WordPress's At a Glance, Activity and Quick Draft boxes as Ignite's list and
-//!   form widgets, in every admin theme.
+//!   form widgets, in every admin theme. Quick Draft keeps its answer in its box ("Draft
+//!   saved.", or the refusal with the values typed) and lists "Your Recent Drafts" (the
+//!   `quick_draft` submodule).
+//! - The pages' chrome (the `chrome` submodule): the top bar shows the user's display name, a
+//!   refused profile picture's message is an error notice, and an address under the admin that
+//!   nothing answers is a 404 page in the admin's look with a link to the dashboard.
 //!
 //! # Roles and capabilities
 //!
@@ -138,11 +143,13 @@ use rocket::{Build, Data, Request, Response, Rocket};
 use crate::editor::editor_script_url;
 use crate::rest::auth::AuthSettings;
 
+mod chrome;
 mod forms;
 mod locks;
 mod media;
 mod menus;
 mod profile;
+mod quick_draft;
 mod users;
 mod wordpress_theme;
 
@@ -391,15 +398,19 @@ pub(crate) async fn mount_panel(
     rocket
         .attach(panel.fairing())
         .attach(AdminAuthFairing)
+        .attach(quick_draft::QuickDraft)
+        .manage(quick_draft::QuickDraftNotices::default())
         .attach(menus::MenuBuilderViews)
         .attach(forms::FormViews)
         .attach(users::UserFormViews)
         .attach(profile::ProfileView)
+        .attach(chrome::ChromeViews)
         .manage(profile::ProfileNotices::default())
         .register(
             format!("{ADMIN_PATH}/profile"),
             rocket::catchers![picture_too_large],
         )
+        .register(ADMIN_PATH, rocket::catchers![chrome::not_found])
         .mount(ADMIN_PATH, locks::routes())
         .mount(ADMIN_PATH, menus::routes())
         .mount("/", menus::include_routes())
@@ -407,6 +418,7 @@ pub(crate) async fn mount_panel(
         .mount(ADMIN_PATH, settings_routes())
         .mount(ADMIN_PATH, users::routes())
         .mount(ADMIN_PATH, profile::routes())
+        .mount(ADMIN_PATH, chrome::routes())
         .mount("/", refused_routes())
         .manage(Arc::new(resources))
         .manage(AdminScreens {

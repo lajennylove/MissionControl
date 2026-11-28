@@ -12,10 +12,17 @@
 //!   bulk `promote` action, one per role) and Delete.
 //! - **Add New User** (`user-new.php`): Username, Email, First Name, Last Name, Website,
 //!   Password (with WordPress's "Generate password" button) and Role, the new user's role
-//!   chosen in a select (`wp_dropdown_roles`, Subscriber first chosen as `default_role`). A
-//!   username already taken is refused with WordPress's "Sorry, that username already exists!".
+//!   chosen in a select (`wp_dropdown_roles`) that starts at the site's New User Default Role
+//!   (the `default_role` option of Settings > General, Subscriber by default); a user added
+//!   without a role gets that role, as `wp_insert_user` gives it. A username already taken is
+//!   refused with WordPress's "Sorry, that username already exists!", and one `validate_username`
+//!   refuses (only letters, digits, spaces, `_`, `.`, `-` and `@`) with its "This username is
+//!   invalid because it uses illegal characters. ..."; an email `is_email` refuses gets
+//!   `edit_user`'s "The email address is not correct." (on Edit User too).
 //! - **Edit User** (`user-edit.php`): the same fields; the username is shown, not changed
 //!   ("Usernames cannot be changed."), and a blank password keeps the stored one.
+//! - The list offers no Delete on the signed-in user's own row, and the Roles screen none on the
+//!   administrator role, as WordPress offers neither.
 //!
 //! The capabilities are WordPress's: the list needs `list_users`, Add New User `create_users`,
 //! the edit form `edit_users`, Delete `delete_users`, and changing a role `promote_users`
@@ -41,8 +48,12 @@ use ignite_panel::role_label;
 use ignite_panel::screens::{USERS_SLUG, UsersData, roles_resource, users_resource};
 use mission_control_core::admin::ScreenCaps;
 use mission_control_core::admin::navigation;
+use mission_control_core::content::is_email;
 use mission_control_core::content::set_user_meta;
-use mission_control_core::users::{IGNITE_SUPER_ADMIN, WORDPRESS_ROLES, default_role};
+use mission_control_core::users::profile::{INVALID_EMAIL, INVALID_USERNAME, validate_username};
+use mission_control_core::users::{
+    ADMINISTRATOR, IGNITE_SUPER_ADMIN, WORDPRESS_ROLES, default_role, new_user_default_role,
+};
 use orbit_orm::{Database, Error, Value as Sql, raw};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{ContentType, Method, Status};
@@ -73,6 +84,9 @@ const ROLE: &str = "role";
 const DISPLAY_NAME: &str = "display_name";
 /// The list's Posts column.
 const POSTS: &str = "posts";
+
+/// The mark of the signed-in user's own row in the Users list.
+const CURRENT_USER: &str = "_mc_current_user";
 
 /// WordPress's refusal of a username another user has (`register_new_user`, `edit_user`).
 pub(crate) const USERNAME_TAKEN: &str = "Sorry, that username already exists!";
@@ -140,12 +154,14 @@ pub(crate) fn users_screen() -> RuntimeResource {
         column("roles", "Role", false, false),
         column(POSTS, "Posts", false, false),
     ];
-    // WordPress's row actions: Delete stays Ignite's (it refuses the user's own account);
+    // WordPress's row actions: Delete stays Ignite's (it refuses the user's own account), and is
+    // not offered on the signed-in user's own row, as `WP_Users_List_Table` leaves it out there;
     // Disable and Enable are not WordPress's.
     let delete: Vec<RowAction> = resource
         .row_actions
         .drain(..)
         .filter(|action| action.name() == "delete")
+        .map(|action| action.hidden(|row| row.get(CURRENT_USER) == Some(&json!(true))))
         .collect();
     resource.row_actions = WORDPRESS_ROLES
         .into_iter()
@@ -223,7 +239,23 @@ async fn change_role(
 /// The Roles screen: Ignite's roles and their abilities, which are WordPress's capabilities
 /// here, under Users. Changing a role needs `promote_users`, as `users.php` asks for it.
 pub(crate) fn roles_screen() -> RuntimeResource {
-    let resource = roles_resource()
+    let mut resource = roles_resource();
+    // The administrator role is never deleted, as WordPress's administrator role cannot be
+    // removed from the admin; Ignite's `super-admin` neither (Ignite refuses it).
+    resource.row_actions = resource
+        .row_actions
+        .drain(..)
+        .map(|action| {
+            if action.name() == "delete" {
+                action.hidden(|row| {
+                    matches!(text_of(row, "name"), ADMINISTRATOR | IGNITE_SUPER_ADMIN)
+                })
+            } else {
+                action
+            }
+        })
+        .collect();
+    let resource = resource
         .navigation_group(navigation::SITE)
         .navigation_parent_item(USERS_SLUG)
         .navigation_sort(2)
@@ -407,17 +439,24 @@ impl McUsersData {
     }
 
     /// The form's `role` as Ignite's `roles`: the chosen role, and `super-admin` when the user
-    /// `target` holds it (it is not a WordPress role, so the select does not offer it).
+    /// `target` holds it (it is not a WordPress role, so the select does not offer it). A new
+    /// user (`target` `None`) sent without a role gets the site's New User Default Role, as
+    /// `wp_insert_user` gives `get_option( 'default_role' )`.
     async fn roles_input(db: &Database, input: &mut Row, target: Option<i64>) -> Result<(), Error> {
-        let Some(role) = input.remove(ROLE) else {
-            return Ok(());
-        };
-        let mut roles: Vec<String> = role
-            .as_str()
+        let role = input.remove(ROLE);
+        let chosen = role
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(str::trim)
             .filter(|role| !role.is_empty())
-            .map(str::to_owned)
-            .into_iter()
-            .collect();
+            .map(str::to_owned);
+        let mut roles: Vec<String> = match (chosen, target) {
+            (Some(role), _) => vec![role],
+            (None, None) => new_user_default_role(db).await?.into_iter().collect(),
+            // An existing user's form without the field leaves the roles alone.
+            (None, Some(_)) if role.is_none() => return Ok(()),
+            (None, Some(_)) => Vec::new(),
+        };
         if let Some(id) = target {
             let current = authz::roles_of(db, id).await.map_err(database_error)?;
             if current.iter().any(|r| r == IGNITE_SUPER_ADMIN) {
@@ -426,6 +465,21 @@ impl McUsersData {
         }
         input.insert("roles".into(), json!(roles));
         Ok(())
+    }
+
+    /// WordPress's checks of Add New User and Edit User that Ignite's form does not make
+    /// (`edit_user`): a username `validate_username` refuses (on Add New User only, as a username
+    /// is not changed) and an email `is_email` refuses, each with WordPress's message.
+    fn refused_fields(input: &Row, new_user: bool) -> Option<ValidationError> {
+        let mut refused: Vec<(&str, &str)> = Vec::new();
+        if new_user && !validate_username(text_of(input, "name")) {
+            refused.push(("name", INVALID_USERNAME));
+        }
+        let email = text_of(input, "email").trim();
+        if !email.is_empty() && !is_email(email) {
+            refused.push(("email", INVALID_EMAIL));
+        }
+        (!refused.is_empty()).then(|| ValidationError::with_messages(refused))
     }
 
     /// The roles the Role select offers: WordPress's five in their order, then the others, but
@@ -471,6 +525,25 @@ impl RuntimeData for McUsersData {
                 let name = format!("{} {}", get(FIRST_NAME), get(LAST_NAME));
                 row.insert(DISPLAY_NAME.into(), json!(name.trim()));
                 row.insert(POSTS.into(), json!(posts.get(&id).copied().unwrap_or(0)));
+            }
+            Ok(page)
+        })
+    }
+
+    /// The list, with the signed-in user's own row marked ([`CURRENT_USER`]), so its Delete is
+    /// not offered.
+    fn list_for<'a>(
+        &'a self,
+        db: &'a Database,
+        user: &'a ActingUser,
+        query: &'a ListQuery,
+    ) -> RuntimeFuture<'a, Page<Row>> {
+        Box::pin(async move {
+            let mut page = self.list(db, query).await?;
+            for row in &mut page.rows {
+                if row.get("id").and_then(Value::as_i64) == Some(user.id()) {
+                    row.insert(CURRENT_USER.into(), json!(true));
+                }
             }
             Ok(page)
         })
@@ -543,6 +616,9 @@ impl RuntimeData for McUsersData {
         mut input: Row,
     ) -> RuntimeFuture<'a, Result<Row, ValidationError>> {
         Box::pin(async move {
+            if let Some(refused) = Self::refused_fields(&input, true) {
+                return Ok(Err(refused));
+            }
             if Self::username_taken(db, text_of(&input, "name"), 0).await? {
                 return Ok(Err(ValidationError::with_messages([(
                     "name",
@@ -570,6 +646,9 @@ impl RuntimeData for McUsersData {
         Box::pin(async move {
             // The username is not changed (the field is disabled on the edit form).
             input.remove("name");
+            if let Some(refused) = Self::refused_fields(&input, false) {
+                return Ok(Err(refused));
+            }
             Self::roles_input(db, &mut input, Some(id)).await?;
             let row = match UsersData
                 .try_update_for(db, user, id, input.clone())
@@ -635,6 +714,18 @@ fn with_generate_password(html: &str) -> Option<String> {
     ))
 }
 
+/// Add New User's form with the Role select at `default` and without its blank placeholder.
+fn with_default_role(html: &str, default: Option<&str>) -> String {
+    super::forms::edit_select(html, ROLE, |options| {
+        options.retain(|o| !o.value.is_empty());
+        if !options.iter().any(|o| o.selected) {
+            for option in options.iter_mut() {
+                option.selected = Some(option.value.as_str()) == default;
+            }
+        }
+    })
+}
+
 #[rocket::async_trait]
 impl Fairing for UserFormViews {
     fn info(&self) -> Info {
@@ -655,7 +746,8 @@ impl Fairing for UserFormViews {
         let Some(rest) = request.uri().path().as_str().strip_prefix(&base) else {
             return;
         };
-        let form = rest == "new"
+        let new = rest == "new";
+        let form = new
             || rest
                 .strip_suffix("/edit")
                 .is_some_and(|id| id.parse::<i64>().is_ok());
@@ -665,7 +757,15 @@ impl Fairing for UserFormViews {
         let Ok(html) = response.body_mut().to_string().await else {
             return;
         };
-        let html = with_generate_password(&html).unwrap_or(html);
+        let mut html = with_generate_password(&html).unwrap_or(html);
+        // Add New User's Role starts at the site's New User Default Role, as `user-new.php`
+        // selects `get_option( 'default_role' )`, and offers no blank choice.
+        if new && let Some(db) = request.rocket().state::<Arc<Database>>() {
+            match new_user_default_role(db).await {
+                Ok(default) => html = with_default_role(&html, default.as_deref()),
+                Err(e) => log::error!("Could not read the New User Default Role: {e}"),
+            }
+        }
         response.set_sized_body(html.len(), Cursor::new(html));
     }
 }

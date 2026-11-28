@@ -20,6 +20,13 @@
 //!   and the content, saved as a draft by "Save Draft" through the Posts screen's create, the
 //!   normal post save path. Ignite shows it only to a user who may create posts (`edit_posts`).
 //!
+//! - [`recent_drafts`], the "Your Recent Drafts" list under Quick Draft
+//!   (`wp_dashboard_recent_drafts`): the user's own newest drafts of posts, newest first by their
+//!   last change, each with its title and its date in WordPress's `F j, Y` ("November 27,
+//!   2026"), the first [`DRAFT_WORDS`] words of its content, and "View all drafts" when there are
+//!   more than [`RECENT_DRAFTS`]. The admin puts it in the Quick Draft box, with Quick Draft's
+//!   "Draft saved." and its refusals (see the admin's `quick_draft` module).
+//!
 //! The time is written in WordPress's default time format (`g:i a`), not the site's
 //! `time_format` option.
 
@@ -48,6 +55,117 @@ pub const QUICK_DRAFT: &str = "Quick Draft";
 
 /// The Quick Draft button's text.
 pub const SAVE_DRAFT: &str = "Save Draft";
+
+/// How many drafts "Your Recent Drafts" lists (`wp_dashboard_recent_drafts` shows 3 of the 4 it
+/// reads, and "View all drafts" when there is a fourth).
+pub const RECENT_DRAFTS: usize = 3;
+
+/// How many words of a draft's content the list shows (`wp_dashboard_recent_drafts`'s
+/// `$draft_length`).
+pub const DRAFT_WORDS: usize = 10;
+
+/// The heading of the drafts list.
+pub const YOUR_RECENT_DRAFTS: &str = "Your Recent Drafts";
+
+/// Quick Draft's message after a save.
+pub const DRAFT_SAVED: &str = "Draft saved.";
+
+/// One draft of "Your Recent Drafts".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentDraft {
+    /// The post's id.
+    pub id: i64,
+    /// The title, or "(no title)" (`_draft_or_post_title`).
+    pub title: String,
+    /// The date in the site's time, as `F j, Y`.
+    pub date: String,
+    /// The date in the site's time, as `c` (ISO 8601), for `<time datetime>`.
+    pub datetime: String,
+    /// The first words of the content, without tags (`wp_trim_words`), or empty.
+    pub excerpt: String,
+}
+
+/// The newest drafts of posts by `author_id`, as `wp_dashboard_recent_drafts` reads them: at
+/// most [`RECENT_DRAFTS`] + 1 (a last one means there are more), newest first by their last
+/// change. See the [module](self).
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn recent_drafts(db: &Database, author_id: i64) -> Result<Vec<RecentDraft>, Error> {
+    let posts: Vec<(i64, String, String, Option<NaiveDateTime>, NaiveDateTime)> = raw::fetch_all(
+        db,
+        "SELECT id, title, content, published_at, modified_at FROM posts WHERE post_type = ? \
+         AND status = ? AND author_id = ? ORDER BY modified_at DESC, id DESC LIMIT ?",
+        &[
+            Sql::from("post"),
+            PostStatus::Draft.into(),
+            author_id.into(),
+            i64::try_from(RECENT_DRAFTS + 1).unwrap_or(4).into(),
+        ],
+    )
+    .await?;
+    if posts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let offset = gmt_offset(db).await?;
+    let shift = Duration::seconds(i64::from(offset.local_minus_utc()));
+    Ok(posts
+        .into_iter()
+        .map(|(id, title, content, published, modified)| {
+            // A draft's date is the one set on it, else its last save (`post_date` of a draft
+            // with no date is the time it was saved).
+            let local = published.unwrap_or(modified) + shift;
+            let title = if title.trim().is_empty() {
+                "(no title)".to_owned()
+            } else {
+                title
+            };
+            RecentDraft {
+                id,
+                title,
+                date: local.format("%B %-d, %Y").to_string(),
+                datetime: format!(
+                    "{}{}",
+                    local.format("%Y-%m-%dT%H:%M:%S"),
+                    offset_text(offset.local_minus_utc())
+                ),
+                excerpt: trim_words(&content, DRAFT_WORDS),
+            }
+        })
+        .collect())
+}
+
+/// An offset in seconds as ISO 8601 writes it (`+00:00`).
+fn offset_text(seconds: i32) -> String {
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let minutes = seconds.unsigned_abs() / 60;
+    format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// WordPress's `wp_trim_words`: the text without tags, its first `words` words, and "…" when
+/// some were left out.
+pub fn trim_words(text: &str, words: usize) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                plain.push(' ');
+            }
+            c if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+    let all: Vec<&str> = plain.split_whitespace().collect();
+    let mut kept = all[..all.len().min(words)].join(" ");
+    if all.len() > words {
+        kept.push('\u{2026}');
+    }
+    kept
+}
 
 /// WordPress's "At a Glance" box, as stat cards. See the [module](self).
 #[derive(Debug, Clone, Copy, Default)]
@@ -326,6 +444,21 @@ mod tests {
             [("status".to_owned(), "draft".to_owned())]
         );
         assert_eq!(widget.get_submit_label(), "Save Draft");
+    }
+
+    #[test]
+    fn draft_excerpts_are_trimmed_as_wp_trim_words() {
+        assert_eq!(
+            trim_words("<p>One two</p><p>three</p>", 10),
+            "One two three"
+        );
+        assert_eq!(
+            trim_words("a b c d e f g h i j k l", 10),
+            "a b c d e f g h i j\u{2026}"
+        );
+        assert_eq!(trim_words("", 10), "");
+        assert_eq!(offset_text(-12_600), "-03:30");
+        assert_eq!(offset_text(0), "+00:00");
     }
 
     #[test]

@@ -141,8 +141,9 @@ fn the_roles_and_the_users_screens() {
             ">Password *<",
             ">Role<",
             ">Generate password</button>",
-            "<option value=\"editor\" >Editor</option>",
-            "<option value=\"subscriber\" >Subscriber</option>",
+            "<option value=\"editor\">Editor</option>",
+            // The New User Default Role (Subscriber) is chosen, with no blank choice.
+            "<option value=\"subscriber\" selected>Subscriber</option>",
         ] {
             assert!(new.contains(expected), "`{expected}` in {new}");
         }

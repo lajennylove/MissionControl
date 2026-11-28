@@ -24,6 +24,12 @@
 //!   the trash goes to the list with WordPress's notice, "1 post moved to the Trash."
 //!   (`edit.php?trashed=1&ids=…`, `$bulk_messages['post']['trashed']`), in place of Ignite's
 //!   "Changes saved.", as WordPress's Move to Trash goes to the list.
+//! - Any other save of a post's edit form stays on the form, with WordPress's "Post updated."
+//!   ("Page updated." on a page): `post.php` answers a save with `post.php?action=edit&message=1`,
+//!   where Ignite's update goes to the list with "Changes saved.".
+//! - A date and time field (`datetime-local`) takes any minute: it gets `step="1"`, as the
+//!   browser's default step counts whole minutes from the stored value's seconds and refused a
+//!   whole minute for a date stored with seconds. A date left as it is keeps its seconds.
 //! - A settings screen's heading and title are its own name ("General Settings", as
 //!   `options-general.php` shows it), not Ignite's "Edit General Settings #1": the screen has one
 //!   record, which is not named. The record screens keep the number.
@@ -143,7 +149,7 @@ impl Fairing for FormViews {
 
     async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
         if request.method() == Method::Post && response.status() == Status::SeeOther {
-            trashed_by_save(request, response).await;
+            after_save(request, response).await;
             return;
         }
         if response.content_type() != Some(ContentType::HTML) {
@@ -182,10 +188,12 @@ impl Fairing for FormViews {
         let slug = match &page {
             FormPage::New(slug) | FormPage::Edit(slug, _) => slug.as_str(),
         };
+        let Ok(html) = response.body_mut().to_string().await else {
+            return;
+        };
+        // Every form's date and time takes any minute (see `with_second_steps`).
+        let mut html = with_second_steps(&html);
         if let (FormPage::Edit(_, id), Some(screen)) = (&page, SettingsScreen::from_slug(slug)) {
-            let Ok(html) = response.body_mut().to_string().await else {
-                return;
-            };
             let html = with_screen_title(&html, screen, *id);
             response.set_sized_body(html.len(), Cursor::new(html));
             return;
@@ -195,7 +203,16 @@ impl Fairing for FormViews {
             .and_then(|resources| resources.post_type(slug));
         let category = slug == CATEGORY_SCREEN;
         if post_type.is_none() && !category {
+            response.set_sized_body(html.len(), Cursor::new(html));
             return;
+        }
+        // A save of the edit form comes back here with WordPress's message (`post.php`'s
+        // `message=1`, see `after_save`).
+        if let FormPage::Edit(..) = page
+            && post_type.is_some()
+            && request.query_value::<i64>("message").and_then(Result::ok) == Some(1)
+        {
+            html = with_notice(&html, updated_message(slug));
         }
         let excluded = match &page {
             FormPage::Edit(slug, id) => {
@@ -213,9 +230,6 @@ impl Fairing for FormViews {
                 }
             }
             FormPage::New(_) => HashSet::new(),
-        };
-        let Ok(mut html) = response.body_mut().to_string().await else {
-            return;
         };
         let new = matches!(page, FormPage::New(_));
         if post_type.is_some() {
@@ -268,10 +282,13 @@ fn list_slug(path: &str) -> Option<String> {
     segments.next().is_none().then(|| slug.to_owned())
 }
 
-/// After a save of a post (`POST <slug>/<id>`) that moved it to the trash: the browser goes to
-/// the list with WordPress's notice (`edit.php?trashed=1&ids=<id>`), and Ignite's "Changes
-/// saved." is dropped. Any other answer is left alone.
-async fn trashed_by_save<'r>(request: &'r Request<'_>, response: &mut Response<'r>) {
+/// After a save of a post (`POST <slug>/<id>`), in place of Ignite's redirect to the list with
+/// "Changes saved.", as `post.php` answers a save: a save that moved the post to the trash goes
+/// to the list with WordPress's notice (`edit.php?trashed=1&ids=<id>`); any other goes back to
+/// the post's edit form with WordPress's "Post updated." (`post.php?action=edit&message=1`),
+/// shown by the form ([`updated_message`]). Ignite's flash is dropped either way. Any other
+/// answer is left alone.
+async fn after_save<'r>(request: &'r Request<'_>, response: &mut Response<'r>) {
     let mut segments = request.uri().path().segments();
     let (Some(ADMIN_SEGMENT), Some(slug), Some(record), None) = (
         segments.next(),
@@ -301,9 +318,6 @@ async fn trashed_by_save<'r>(request: &'r Request<'_>, response: &mut Response<'
             false
         }
     };
-    if !trashed {
-        return;
-    }
     let kept: Vec<String> = response
         .headers()
         .get("Set-Cookie")
@@ -314,10 +328,45 @@ async fn trashed_by_save<'r>(request: &'r Request<'_>, response: &mut Response<'
     for cookie in kept {
         response.adjoin_header(Header::new("Set-Cookie", cookie));
     }
-    response.set_raw_header(
-        "Location",
-        format!("{}/{slug}?trashed=1&ids={id}", super::ADMIN_PATH),
-    );
+    let location = if trashed {
+        format!("{}/{slug}?trashed=1&ids={id}", super::ADMIN_PATH)
+    } else {
+        format!("{}/{slug}/{id}/edit?message=1", super::ADMIN_PATH)
+    };
+    response.set_raw_header("Location", location);
+}
+
+/// WordPress's message after a post is saved (`$messages['post'][1]`, `$messages['page'][1]`):
+/// "Page updated." on a page, "Post updated." on the other post types, as `post_updated_messages`
+/// gives a custom post type the post's messages.
+fn updated_message(slug: &str) -> &'static str {
+    if slug == "page" {
+        "Page updated."
+    } else {
+        "Post updated."
+    }
+}
+
+/// `html` with `step="1"` on each date and time input (`type="datetime-local"`) that has no
+/// step, so any minute is accepted. The browser's default step is a minute counted from the
+/// value's seconds, so a stored date with seconds (`02:43:22`) refused a whole minute
+/// (`10:00`). WordPress's date fields take any minute; a date left as it is keeps its seconds.
+fn with_second_steps(html: &str) -> String {
+    const INPUT: &str = "type=\"datetime-local\"";
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find(INPUT) {
+        let end = at + INPUT.len();
+        let tag_start = rest[..at].rfind('<').unwrap_or(0);
+        let tag_end = rest[at..].find('>').map_or(rest.len(), |close| at + close);
+        out.push_str(&rest[..end]);
+        if !rest[tag_start..tag_end].contains(" step=") {
+            out.push_str(" step=\"1\"");
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// WordPress's notice of posts moved to the trash (`$bulk_messages['post']['trashed']`): "1 post
@@ -430,7 +479,7 @@ fn forgot_path() -> String {
 }
 
 /// The value of `name` in the URL-encoded form `body`, if it has one.
-fn form_value(body: &[u8], name: &str) -> Option<String> {
+pub(crate) fn form_value(body: &[u8], name: &str) -> Option<String> {
     let body = std::str::from_utf8(body).ok()?;
     body.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -489,15 +538,19 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
 
 /// One `<option>` of a select, as Ignite renders it: its value and label as written (escaped).
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SelectOption {
-    value: String,
-    label: String,
-    selected: bool,
+pub(crate) struct SelectOption {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) selected: bool,
 }
 
 /// `html` with the options of its select named `name` changed by `change`; `html` as it is
 /// when it has no such select.
-fn edit_select(html: &str, name: &str, change: impl FnOnce(&mut Vec<SelectOption>)) -> String {
+pub(crate) fn edit_select(
+    html: &str,
+    name: &str,
+    change: impl FnOnce(&mut Vec<SelectOption>),
+) -> String {
     let marker = format!("name=\"{name}\"");
     let Some(open) = html.match_indices("<select").map(|(at, _)| at).find(|at| {
         html[*at..]

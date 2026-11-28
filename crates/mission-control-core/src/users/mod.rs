@@ -33,7 +33,7 @@ pub use capabilities::{
 };
 pub use ignite_roles::{
     IGNITE_SUPER_ADMIN, IgniteUserRoles, ignite_roles_with_cap, mission_control_role,
-    users_with_cap,
+    new_user_default_role, role_choices, users_with_cap,
 };
 pub use meta_cap::{
     Object, PostContext, PostTypeCaps, SitePages, TaxonomyCaps, TermContext, can, map_meta_cap,

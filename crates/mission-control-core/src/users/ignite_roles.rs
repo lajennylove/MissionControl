@@ -71,6 +71,69 @@ pub fn ignite_roles_with_cap(cap: &str) -> Vec<&'static str> {
     .collect()
 }
 
+/// The roles a role dropdown offers (`wp_dropdown_roles`), as `(name, label)`: WordPress's five
+/// in their order, then the others by name, never Ignite's [`IGNITE_SUPER_ADMIN`]; each stored in
+/// Ignite's `roles`. A default role is labelled with its WordPress name, another with its name.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn role_choices(db: &Database) -> Result<Vec<(String, String)>, Error> {
+    // A site whose database has no Ignite tables (the admin runs on MySQL and MariaDB only,
+    // Ruling R119) offers WordPress's five roles.
+    let stored: Vec<String> =
+        match raw::fetch_all::<(String,)>(db, "SELECT name FROM roles ORDER BY name", &[]).await {
+            Ok(rows) => rows.into_iter().map(|(name,)| name).collect(),
+            Err(e) => {
+                log::warn!("The roles could not be read, WordPress's are offered: {e}");
+                super::capabilities::WORDPRESS_ROLES
+                    .iter()
+                    .map(|role| (*role).to_owned())
+                    .collect()
+            }
+        };
+    let mut names: Vec<String> = super::capabilities::WORDPRESS_ROLES
+        .iter()
+        .filter(|role| stored.iter().any(|s| s == *role))
+        .map(|role| (*role).to_owned())
+        .collect();
+    for role in stored {
+        if role != IGNITE_SUPER_ADMIN && !names.contains(&role) {
+            names.push(role);
+        }
+    }
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            let label = default_role(&name).map_or_else(|| name.clone(), |r| r.display_name);
+            (name, label)
+        })
+        .collect())
+}
+
+/// The role a new user gets when none is chosen, as `wp_insert_user` gives the site's
+/// `default_role` option (Settings > General, "New User Default Role"; `subscriber` when it is
+/// unset): the option's role when it is stored in Ignite's `roles`, else Subscriber when it is
+/// stored, else `None`.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn new_user_default_role(db: &Database) -> Result<Option<String>, Error> {
+    let chosen = match crate::content::get_option(db, "default_role").await {
+        Ok(Some(serde_json::Value::String(name))) if !name.trim().is_empty() => name,
+        Ok(_) | Err(crate::content::MetaError::InvalidJson(_)) => SUBSCRIBER.to_owned(),
+        Err(crate::content::MetaError::Database(e)) => return Err(e),
+    };
+    let choices = role_choices(db).await?;
+    for name in [chosen.as_str(), SUBSCRIBER] {
+        if choices.iter().any(|(role, _)| role == name) {
+            return Ok(Some(name.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
 /// Reads a user's roles and each role's capabilities from Ignite's `roles`, `role_user`,
 /// `role_permission` and `permissions` tables. The app's default provider, for the REST API and
 /// the admin's authorization (Ruling R121).

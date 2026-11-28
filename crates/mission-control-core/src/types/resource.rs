@@ -1456,25 +1456,10 @@ impl PostTypeData {
             .filter(|post| post.post_type == self.post_type))
     }
 
-    /// The names of the users among `ids`.
+    /// The names of the users among `ids`, as the Author column shows them: each user's display
+    /// name ("Display name publicly as"), as WordPress's posts list shows `display_name`.
     async fn user_names(&self, db: &Database, ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
-        let mut ids: Vec<i64> = ids.to_vec();
-        ids.sort_unstable();
-        ids.dedup();
-        let mut names = HashMap::new();
-        for chunk in ids.chunks(500) {
-            let rows: Vec<(i64, String)> = raw::fetch_all(
-                db,
-                &format!(
-                    "SELECT id, name FROM users WHERE id IN ({})",
-                    marks(chunk.len())
-                ),
-                &chunk.iter().map(|id| Sql::from(*id)).collect::<Vec<_>>(),
-            )
-            .await?;
-            names.extend(rows);
-        }
-        Ok(names)
+        crate::users::profile::display_names(db, ids).await
     }
 
     /// The terms of the posts `ids` in this type's taxonomies, by post and taxonomy name: each

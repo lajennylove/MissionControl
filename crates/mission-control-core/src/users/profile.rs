@@ -76,10 +76,80 @@ pub const PASSWORDS_DIFFER: &str =
     "Passwords do not match. Please enter the same password in both password fields.";
 /// `edit_user`: a password with a backslash.
 pub const PASSWORD_BACKSLASH: &str = "Passwords may not contain the character \"\\\".";
+/// `edit_user` and `user-new.php`: a username `validate_username` refuses.
+pub const INVALID_USERNAME: &str =
+    "This username is invalid because it uses illegal characters. Please enter a valid username.";
 /// The menu editor's message for a link that is no URL (`nav-menu.js`).
 pub const INVALID_URL: &str = "Please enter a valid URL.";
 /// `wp_insert_user`: a website longer than [`MAX_URL_CHARS`].
 pub const URL_TOO_LONG: &str = "User URL may not be longer than 100 characters.";
+
+/// WordPress's `validate_username`: whether `username` is what `sanitize_user( $username, true )`
+/// leaves of it, and not empty. The strict `sanitize_user` keeps only ASCII letters (either
+/// case, as its pattern has the `i` flag), digits, spaces, `_`, `.`, `-` and `@`, after it takes
+/// out tags, accents, `%` octets and entities (each of which has a character the strict pattern
+/// refuses), trims the name and makes each run of whitespace one space. So a name is valid when
+/// it has only those characters, does not start or end with a space and has no two spaces in a
+/// row.
+pub fn validate_username(username: &str) -> bool {
+    !username.is_empty()
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-' | '@'))
+        && !username.starts_with(' ')
+        && !username.ends_with(' ')
+        && !username.contains("  ")
+}
+
+/// The names users `ids` are shown by, as WordPress shows `display_name` wherever it names a
+/// user (the admin bar's "Howdy", the posts list's Author column): each user's "Display name
+/// publicly as" (the `display_name` user meta), or the username (`users.name`) when it is unset
+/// or blank, as `wp_insert_user` sets a new user's display name to the login. A user that does
+/// not exist is left out.
+///
+/// # Errors
+///
+/// Fails with the database's error.
+pub async fn display_names(
+    db: &Database,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<i64, String>, orbit_orm::Error> {
+    let mut ids: Vec<i64> = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut names = std::collections::HashMap::new();
+    for chunk in ids.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(", ");
+        let binds: Vec<Sql> = chunk.iter().map(|id| Sql::from(*id)).collect();
+        let users: Vec<(i64, String)> = raw::fetch_all(
+            db,
+            &format!("SELECT id, name FROM users WHERE id IN ({marks})"),
+            &binds,
+        )
+        .await?;
+        names.extend(users);
+        let mut meta_binds = binds;
+        meta_binds.push(DISPLAY_NAME.into());
+        let shown: Vec<(i64, String)> = raw::fetch_all(
+            db,
+            &format!(
+                "SELECT user_id, meta_value FROM user_meta WHERE user_id IN ({marks}) \
+                 AND meta_key = ? ORDER BY id"
+            ),
+            &meta_binds,
+        )
+        .await?;
+        for (id, value) in shown {
+            if let Ok(Value::String(name)) = serde_json::from_str::<Value>(&value)
+                && !name.trim().is_empty()
+                && names.contains_key(&id)
+            {
+                names.insert(id, name);
+            }
+        }
+    }
+    Ok(names)
+}
 
 /// A user's profile: what the profile page shows and saves. See the [module](self).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -432,6 +502,27 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         ProfileForm::read(|name| map.get(name).cloned(), &profile())
+    }
+
+    #[test]
+    fn usernames_are_validated_as_validate_username() {
+        for valid in ["ada", "Ada Lovelace", "qa.tester-1_x@example", "a b"] {
+            assert!(validate_username(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "qa tester 1!",
+            " ada",
+            "ada ",
+            "a  b",
+            "ad\u{e9}",
+            "a%20b",
+            "a&amp;b",
+            "<b>ada</b>",
+            "a\tb",
+        ] {
+            assert!(!validate_username(invalid), "{invalid}");
+        }
     }
 
     #[test]

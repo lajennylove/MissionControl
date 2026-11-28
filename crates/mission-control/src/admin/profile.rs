@@ -120,7 +120,7 @@ impl ProfileNotices {
 
 /// The sign-in session of the request: the key of its notices, and the session "Log Out
 /// Everywhere Else" keeps.
-fn session_key(cookies: &CookieJar<'_>, user: &AdminUser) -> String {
+pub(crate) fn session_key(cookies: &CookieJar<'_>, user: &AdminUser) -> String {
     cookies
         .get(SESSION_COOKIE)
         .and_then(|cookie| ignite_session_id(cookie.value()))
