@@ -1033,15 +1033,12 @@ async fn brand_and_sidebar(client: &Client, db: &Database) {
         "{list}"
     );
     assert!(list.contains("body.wp-admin a.ig-btn-primary"), "{list}");
-    // The profile page does not promise a light or dark switch this theme does not have.
+    // The profile page (Ignite's own: the theme's `dark_mode()` is off) does not promise a
+    // light or dark switch this theme does not have.
     let (status, profile) = get(client, "/mc-admin/profile").await;
     assert_eq!(status, Status::Ok, "{profile}");
     assert!(
         !profile.contains("The light or dark mode is the switch in the top bar"),
-        "{profile}"
-    );
-    assert!(
-        profile.contains("WordPress has no light or dark mode, so this theme stays light."),
         "{profile}"
     );
     assert!(profile.contains("<body class=\"wp-admin\">"), "{profile}");
