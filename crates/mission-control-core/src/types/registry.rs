@@ -677,6 +677,18 @@ impl Registry {
         self.all_field_groups().into_iter().find(|d| d.key == key)
     }
 
+    /// The admin's field group with `key` as stored, with its own location rules (not the ones
+    /// [`all_field_groups`](Self::all_field_groups) adds), whether or not a local group
+    /// overrides it.
+    pub fn admin_field_group(&self, key: &str) -> Option<FieldGroupDef> {
+        self.read()
+            .admin
+            .field_groups
+            .iter()
+            .find(|g| g.key == key)
+            .cloned()
+    }
+
     /// Whether the admin definition of `kind` with `key` is stored but not used, because a
     /// definition made in code or by a plugin has the same key.
     pub fn is_overridden(&self, kind: DefinitionKind, key: &str) -> bool {

@@ -1228,6 +1228,11 @@ impl PostTypeResources {
             && self.post_types().iter().any(|def| def.slug == slug)
     }
 
+    /// The page templates of `page`'s Template select: the active theme's.
+    pub fn page_templates(&self) -> &[PageTemplate] {
+        &self.page_templates
+    }
+
     /// The post types whose resource this value has registered, in order.
     pub fn registered(&self) -> Vec<String> {
         self.registered
@@ -1342,6 +1347,7 @@ fn meta_value(kind: &FieldKindDef, value: &Value) -> Value {
             .map_or_else(|_| value.clone(), Value::from),
         FieldKindDef::Link
         | FieldKindDef::Relationship
+        | FieldKindDef::CheckboxList(_)
         | FieldKindDef::Gallery
         | FieldKindDef::Repeater(_)
         | FieldKindDef::Group(_)
@@ -1380,6 +1386,7 @@ fn form_value(kind: &FieldKindDef, stored: Value) -> Value {
         (
             FieldKindDef::Link
             | FieldKindDef::Relationship
+            | FieldKindDef::CheckboxList(_)
             | FieldKindDef::Gallery
             | FieldKindDef::Repeater(_)
             | FieldKindDef::Group(_)

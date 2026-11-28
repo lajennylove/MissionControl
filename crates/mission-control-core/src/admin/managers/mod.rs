@@ -46,14 +46,16 @@ use serde_json::Value;
 use super::terms::TaxonomyScreens;
 use crate::types::{DefinitionError, Origin, PostTypeResources, Registry, RegistryError};
 
+pub mod field_groups;
 pub mod post_types;
 pub mod taxonomies;
 
+pub use field_groups::{FIELD_GROUPS, FieldGroupsData, field_groups_resource};
 pub use post_types::{POST_TYPES, PostTypesData, post_types_resource};
 pub use taxonomies::{TAXONOMIES, TaxonomiesData, taxonomies_resource};
 
-/// The slugs of the managers, in the sidebar's order.
-pub const MANAGERS: [&str; 2] = [POST_TYPES, TAXONOMIES];
+/// The slugs of the three managers, in the sidebar's order.
+pub const MANAGERS: [&str; 3] = [POST_TYPES, TAXONOMIES, FIELD_GROUPS];
 
 /// The capability the managers need, as ACF's admin and the settings screens.
 pub const MANAGE_OPTIONS: &str = "manage_options";
@@ -124,6 +126,7 @@ impl Managers {
         for (slug, resource) in [
             (POST_TYPES, post_types_resource(self.clone())),
             (TAXONOMIES, taxonomies_resource(self.clone())),
+            (FIELD_GROUPS, field_groups_resource(self.clone())),
         ] {
             match ignite_core::register_runtime(resource) {
                 Ok(()) => registered.push(slug),
@@ -268,6 +271,20 @@ pub(crate) fn definition_message(e: &DefinitionError) -> String {
         }
         None => text,
     }
+}
+
+/// A new key's random part: 13 hexadecimal digits, as ACF's `uniqid()` gives `group_` and
+/// `field_` keys.
+pub(crate) fn unique_id() -> String {
+    let mut bytes = [0_u8; 7];
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        bytes.copy_from_slice(&nanos.to_le_bytes()[..7]);
+    }
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    hex[..13].to_owned()
 }
 
 /// Sorts `rows` by the text of `column`, and keeps those whose `searchable` columns contain

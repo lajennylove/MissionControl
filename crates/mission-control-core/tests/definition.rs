@@ -1067,3 +1067,26 @@ fn layouts_are_checked() {
     .unwrap_err();
     assert!(err.to_string().contains("`layout_a`"), "{err}");
 }
+
+/// ACF's `checkbox` (several choices) is Ignite's checkbox list, and round-trips with its
+/// choices in order (design gap M1).
+#[test]
+fn a_checkbox_field_is_a_checkbox_list() {
+    let json = r#"{"key": "group_c", "title": "C", "fields": [{"key": "field_c",
+        "name": "colours", "label": "Colours", "type": "checkbox",
+        "choices": {"red": "Red", "blue": "Blue"}}]}"#;
+    let group = FieldGroupDef::from_json(json, Origin::Admin).unwrap();
+    assert_eq!(
+        group.fields[0].kind,
+        FieldKindDef::CheckboxList(vec![
+            ("red".to_owned(), "Red".to_owned()),
+            ("blue".to_owned(), "Blue".to_owned()),
+        ])
+    );
+    let written = serde_json::to_string(&group).unwrap();
+    assert!(written.contains(r#""type":"checkbox""#), "{written}");
+    assert!(
+        written.contains(r#""choices":{"red":"Red","blue":"Blue"}"#),
+        "{written}"
+    );
+}

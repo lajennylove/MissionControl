@@ -2097,8 +2097,8 @@ const GROUP_KEYS: &[&str] = &[
 ];
 
 /// The ACF field types a definition takes: design 5.3's phase 1, then phase 2. ACF's
-/// `checkbox` (several choices) is not one: Ignite's [`FieldKindDef::Checkbox`] is a yes/no
-/// value, ACF's `true_false`.
+/// `checkbox` (several choices) is Ignite's [`FieldKindDef::CheckboxList`]; its
+/// [`FieldKindDef::Checkbox`] is a yes/no value, ACF's `true_false`.
 pub const FIELD_TYPES: &[&str] = &[
     "text",
     "textarea",
@@ -2107,6 +2107,7 @@ pub const FIELD_TYPES: &[&str] = &[
     "url",
     "password",
     "select",
+    "checkbox",
     "radio",
     "true_false",
     "date_picker",
@@ -2330,7 +2331,9 @@ impl FieldDef {
             });
         }
         match &self.kind {
-            FieldKindDef::Select(choices) | FieldKindDef::Radio(choices) => {
+            FieldKindDef::Select(choices)
+            | FieldKindDef::Radio(choices)
+            | FieldKindDef::CheckboxList(choices) => {
                 check_count("number of choices", choices.len(), MAX_CHOICES)?;
                 for (value, label) in choices {
                     check_len("choice length", value, MAX_TEXT_LEN)?;
@@ -2527,6 +2530,7 @@ impl TryFrom<RawField> for FieldDef {
             "true_false" => FieldKindDef::Checkbox,
             "select" => FieldKindDef::Select(choices.unwrap_or_default()),
             "radio" => FieldKindDef::Radio(choices.unwrap_or_default()),
+            "checkbox" => FieldKindDef::CheckboxList(choices.unwrap_or_default()),
             "date_picker" => FieldKindDef::Date,
             "date_time_picker" => FieldKindDef::DateTime,
             "email" => FieldKindDef::Email,
@@ -2623,9 +2627,9 @@ impl Serialize for FieldDef {
             })
         })?;
         let (choices, step) = match &self.kind {
-            FieldKindDef::Select(choices) | FieldKindDef::Radio(choices) => {
-                (Some(choices.clone()), Value::Null)
-            }
+            FieldKindDef::Select(choices)
+            | FieldKindDef::Radio(choices)
+            | FieldKindDef::CheckboxList(choices) => (Some(choices.clone()), Value::Null),
             FieldKindDef::Decimal(step) => (None, Value::String(step.clone())),
             _ => (None, Value::Null),
         };
