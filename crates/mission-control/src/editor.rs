@@ -45,15 +45,22 @@
 //!   TinyMCE's `cache_suffix`), which changes whenever a file of the bundle changes. A request
 //!   with the current version is cached for a year (`immutable`); any other is sent with
 //!   `no-cache`, so a stale URL is never kept.
-//! - The favicon is also served at `/favicon.ico`, which browsers ask for on every site, cached
-//!   for a day.
+//! - `/favicon.ico`, which browsers ask for on every site, redirects (`302`) to the site icon
+//!   when the site has one, else to the Mission Control favicon, as WordPress's `do_favicon`
+//!   redirects to `get_site_icon_url( 32, ... )`.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+use mission_control_core::content::get_option;
+use mission_control_core::media::get_attachment;
+use mission_control_core::rest::media::UPLOADS_PATH;
+use orbit_orm::Database;
+use serde_json::Value;
 
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::{FromRequest, Outcome};
-use rocket::response::{self, Responder};
-use rocket::{Request, Response, Route};
+use rocket::response::{self, Redirect, Responder};
+use rocket::{Request, Response, Route, State};
 use sha2::{Digest, Sha256};
 
 /// Where the editor's files are served, as WordPress serves `/wp-includes`.
@@ -272,20 +279,67 @@ pub(crate) fn routes() -> Vec<Route> {
     rocket::routes![editor_file, favicon]
 }
 
-/// How long the favicon at `/favicon.ico` is cached: a day. Its URL has no version to change.
-const CACHE_FAVICON: &str = "public, max-age=86400";
+/// The size WordPress asks the site icon for at `/favicon.ico`: 32 by 32 pixels.
+const FAVICON_SIZE: u32 = 32;
 
-/// `/favicon.ico`, which browsers ask for on every site: the Mission Control favicon from
-/// `assets/brand/` (`image/x-icon`), the bundle's `images/favicon.ico`. WordPress answers the
-/// path before it looks a post up (`is_favicon` in `template-loader.php`), and so does this
-/// route, which ranks above the public site's catch-all; no post can have the slug
-/// `favicon.ico` anyway, since `sanitize_title` turns the dot into a hyphen.
+/// `/favicon.ico`, which browsers ask for on every site: a `302` redirect to the site icon, as
+/// WordPress's `do_favicon` answers it (`wp_redirect( get_site_icon_url( 32, ... ) )`), not the
+/// file. The icon is the `site_icon` option's image, at the smallest size that covers 32 by 32
+/// pixels (its original when no sub-size does); without one, or before the site is installed,
+/// the Mission Control favicon ([`crate::admin::FAVICON`]), as WordPress falls back to its own
+/// logo. WordPress answers the path before it looks a post up (`is_favicon` in
+/// `template-loader.php`), and so does this route, which ranks above the public site's
+/// catch-all; no post can have the slug `favicon.ico` anyway, since `sanitize_title` turns the
+/// dot into a hyphen.
 #[rocket::get("/favicon.ico")]
-fn favicon() -> Option<EditorFile> {
-    find(&["images", "favicon.ico"]).map(|asset| EditorFile {
-        asset,
-        cache: CACHE_FAVICON,
-    })
+async fn favicon(db: Option<&State<Arc<Database>>>) -> Redirect {
+    let icon = match db {
+        Some(db) => site_icon_url(db).await,
+        None => None,
+    };
+    Redirect::found(icon.unwrap_or_else(|| crate::admin::FAVICON.to_owned()))
+}
+
+/// The address of the site icon at [`FAVICON_SIZE`], as `get_site_icon_url` gives it; `None`
+/// when the site has no icon, or the option or the image cannot be read (logged).
+async fn site_icon_url(db: &Database) -> Option<String> {
+    let id = match get_option(db, "site_icon").await {
+        Ok(Some(Value::Number(n))) => n.as_i64().unwrap_or(0),
+        Ok(Some(Value::String(s))) => s.trim().parse().unwrap_or(0),
+        Ok(_) => 0,
+        Err(e) => {
+            log::warn!("Could not read the site_icon option for /favicon.ico: {e}");
+            return None;
+        }
+    };
+    if id <= 0 {
+        return None;
+    }
+    let attachment = match get_attachment(db, id).await {
+        Ok(Some(attachment)) if !attachment.file.is_empty() => attachment,
+        Ok(_) => return None,
+        Err(e) => {
+            log::warn!("Could not read the site icon {id} for /favicon.ico: {e}");
+            return None;
+        }
+    };
+    let file = attachment
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            let folder = attachment
+                .file
+                .rsplit_once('/')
+                .map_or(String::new(), |(folder, _)| format!("{folder}/"));
+            metadata
+                .sizes
+                .values()
+                .filter(|size| size.width >= FAVICON_SIZE && size.height >= FAVICON_SIZE)
+                .min_by_key(|size| u64::from(size.width) * u64::from(size.height))
+                .map(|size| format!("{folder}{}", size.file))
+        })
+        .unwrap_or_else(|| attachment.file.clone());
+    Some(format!("{UPLOADS_PATH}/{file}"))
 }
 
 /// A file of the editor's bundle.

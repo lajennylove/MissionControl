@@ -5,7 +5,9 @@
 //! - A repeated install on an installed site answers WordPress's "Already Installed" page with
 //!   a `200` (`install.php` checks `is_blog_installed()` first, for every step), not the admin's
 //!   503 page.
-//! - `/favicon.ico` serves the Mission Control favicon, also when a page was given that slug.
+//! - `/favicon.ico` redirects (`302`) to the site's favicon, as WordPress's `do_favicon`
+//!   redirects to the site icon, also when a page was given that slug; a site with no icon gets
+//!   the Mission Control favicon.
 //!
 //! Each test runs the wizard on SQLite in its own folder, then starts the installed app from the
 //! `.env` it wrote. On SQLite the admin is not mounted (Ruling R119), so the Already Installed
@@ -18,7 +20,9 @@ use mission_control_app::install::wizard::TOKEN_FIELD;
 use mission_control_app::restart::RestartHandle;
 use mission_control_app::setup::{INSTALL_PATH, Mode, setup_rocket_with_restart};
 use mission_control_core::config::Config;
-use mission_control_core::content::{NewPost, Post, PostStatus, get_option};
+use mission_control_core::content::{
+    NewPost, Post, PostStatus, get_option, set_option, set_post_meta,
+};
 use mission_control_testing::unique_email;
 use orbit_orm::{Database, raw};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -34,8 +38,9 @@ const ADMIN_PASSWORD: &str = "admin-pw-Install-Fix-5519";
 const ALREADY_INSTALLED: &str = "You appear to have already installed Mission Control. To \
                                  reinstall please clear your old database tables first.";
 
-/// The favicon the site serves, from `assets/brand/`.
-const FAVICON: &[u8] = include_bytes!("../../../assets/brand/favicon.ico");
+/// Where `/favicon.ico` redirects a site with no site icon: the Mission Control favicon, as
+/// WordPress's `do_favicon` falls back to its own logo.
+const FAVICON: &str = "/mc-includes/images/favicon-32.png";
 
 fn form(fields: &[(&str, &str)]) -> String {
     fields
@@ -182,7 +187,7 @@ async fn a_repeated_install_answers_already_installed() {
 }
 
 #[rocket::async_test]
-async fn the_favicon_is_served_ahead_of_a_page_with_its_slug() {
+async fn the_favicon_redirects_ahead_of_a_page_with_its_slug() {
     let dir = tempfile::tempdir().unwrap();
     let (_, config) = install(dir.path(), "Favicon Site").await;
     let db = Database::connect(&config.database_url).await.unwrap();
@@ -213,16 +218,81 @@ async fn the_favicon_is_served_ahead_of_a_page_with_its_slug() {
     db.close().await;
 
     let client = installed_app(config).await;
+    // WordPress answers `/favicon.ico` with a redirect, not the file (`do_favicon`).
     let response = client.get("/favicon.ico").dispatch().await;
+    assert_eq!(response.status(), Status::Found);
+    assert_eq!(response.headers().get_one("Location"), Some(FAVICON));
+    // The redirect's target is the favicon itself.
+    let response = client.get(FAVICON).dispatch().await;
     assert_eq!(response.status(), Status::Ok);
-    assert_eq!(response.content_type(), Some(ContentType::Icon));
-    assert_eq!(
-        response.headers().get_one("X-Content-Type-Options"),
-        Some("nosniff")
-    );
-    assert_eq!(response.into_bytes().await.unwrap_or_default(), FAVICON);
+    assert_eq!(response.content_type(), Some(ContentType::PNG));
     // The page is still reachable at its own address.
     let (status, body) = get(&client, &format!("/?page_id={}", page.id)).await;
     assert_eq!(status, Status::Ok, "{body}");
     assert!(body.contains("A page named after the favicon."), "{body}");
+}
+
+#[rocket::async_test]
+async fn the_favicon_redirects_to_the_site_icon() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, config) = install(dir.path(), "Icon Site").await;
+    let db = Database::connect(&config.database_url).await.unwrap();
+    raw::execute(
+        &db,
+        "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+        &["Ann".into(), unique_email("ann").into(), "hash".into()],
+    )
+    .await
+    .expect("inserts the author");
+    let author: i64 = raw::fetch_scalar(&db, "SELECT MAX(id) FROM users", &[])
+        .await
+        .expect("reads the author id");
+    let icon = Post::create(
+        &db,
+        NewPost {
+            status: PostStatus::Inherit,
+            title: "icon".to_owned(),
+            mime_type: "image/png".to_owned(),
+            ..NewPost::new(author, "attachment")
+        },
+    )
+    .await
+    .expect("creates the attachment");
+    set_post_meta(
+        &db,
+        icon.id,
+        "_wp_attached_file",
+        &json!("2026/11/icon.png"),
+    )
+    .await
+    .expect("stores the file");
+    // As WordPress's `get_site_icon_url( 32 )`: the smallest size that covers 32 by 32.
+    set_post_meta(
+        &db,
+        icon.id,
+        "_wp_attachment_metadata",
+        &json!({
+            "width": 512, "height": 512, "file": "2026/11/icon.png", "filesize": 1000,
+            "sizes": {
+                "thumbnail": {"file": "icon-150x150.png", "width": 150, "height": 150,
+                              "mime-type": "image/png", "filesize": 100},
+                "tiny": {"file": "icon-16x16.png", "width": 16, "height": 16,
+                         "mime-type": "image/png", "filesize": 10},
+            },
+        }),
+    )
+    .await
+    .expect("stores the metadata");
+    set_option(&db, "site_icon", &json!(icon.id))
+        .await
+        .expect("sets the site icon");
+    db.close().await;
+
+    let client = installed_app(config).await;
+    let response = client.get("/favicon.ico").dispatch().await;
+    assert_eq!(response.status(), Status::Found);
+    assert_eq!(
+        response.headers().get_one("Location"),
+        Some("/mc-content/uploads/2026/11/icon-150x150.png")
+    );
 }
