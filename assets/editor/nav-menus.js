@@ -1,9 +1,9 @@
 /**
  * Mission Control's menu builder: WordPress's Menus screen (`wp-admin/nav-menus.php` and
  * `nav-menu.js`) on top of Ignite's form of the Menus screen. The page carries the
- * "Add menu items" column (`#mc-menu-builder`, hidden) and the form's `items` field, a textarea
- * of JSON rows (`id`, `title`, `type`, `object_id`, `url`, `parent`, `classes`, `new_tab`,
- * `attr_title`, `xfn`, `description`).
+ * "Add menu items" column (`#mc-menu-builder`, hidden) and the form's `items` field, the
+ * builder's hidden input of JSON rows (`id`, `title`, `type`, `object_id`, `url`, `parent`,
+ * `classes`, `new_tab`, `attr_title`, `xfn`, `description`), which the server reads.
  *
  * - The column shows beside the form: one box per post type (its published items, with a
  *   search and "Load more"), Custom Links (a URL and its text), one box per taxonomy. Each box
@@ -19,18 +19,19 @@
  *   item), Out from under (the parent: the item and its sub items come after the parent's) and
  *   To the top. An item moves with its sub items.
  *
- * Every change is written back into the textarea, which the form saves as before; nothing is
+ * Every change is written back into the hidden field, which the form saves as before; nothing is
  * written until the user changes something, so the panel's unsaved changes alert stays quiet on
  * an unchanged form. A row's parent is the parent's `id` and its row number (`parent_row`), so
- * an item can be under a new item. Without this script the column stays hidden and the
- * textarea edits the menu.
+ * an item can be under a new item. Without this script the column stays hidden, and a save
+ * keeps the items as they are.
  */
 (function () {
   'use strict';
 
   var builder = document.getElementById('mc-menu-builder');
   var field = document.querySelector('[data-ignite-field="items"]');
-  var textarea = field && field.querySelector('textarea[name="items"]');
+  // The builder's hidden input (a textarea when the page was not given the builder's field).
+  var textarea = field && field.querySelector('input[name="items"], textarea[name="items"]');
   var form = textarea && textarea.form;
   if (!builder || !textarea || !form || builder.getAttribute('data-started')) {
     return;
@@ -40,7 +41,7 @@
   try {
     rows = textarea.value.trim() ? JSON.parse(textarea.value) : [];
   } catch (e) {
-    // Text that is not JSON stays the user's to fix in the plain field.
+    // Text that is not JSON is left as it is: the save refuses it with its message.
     return;
   }
   if (!Array.isArray(rows)) {
@@ -913,7 +914,8 @@
     });
   }
 
-  // The textarea, its label and its hint give way to the structure; an error stays.
+  // The field (its label and hint, when it shows them) gives way to the structure; an error
+  // stays.
   var label = field.querySelector('label[for="items"]');
   var hint = textarea.nextElementSibling;
   textarea.hidden = true;

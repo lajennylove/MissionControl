@@ -142,13 +142,19 @@ async fn page(db: &Database, author: i64, title: &str, status: PostStatus) -> Po
     .expect("creates a page")
 }
 
-/// The JSON the items field holds on a form page (HTML-escaped in the textarea).
+/// The JSON the items field holds on a form page: the builder's hidden input (HTML-escaped in
+/// its value). The page has no JSON textarea.
 fn items_field(html: &str) -> Vec<Value> {
+    assert!(
+        !html.contains("<textarea"),
+        "no textarea for the items: {html}"
+    );
+    let marker = "<input type=\"hidden\" id=\"items\" name=\"items\" value=\"";
     let start = html
-        .find("name=\"items\"")
-        .and_then(|at| html[at..].find('>').map(|end| at + end + 1))
+        .find(marker)
+        .map(|at| at + marker.len())
         .unwrap_or_else(|| panic!("the items field in: {html}"));
-    let end = html[start..].find("</textarea>").unwrap() + start;
+    let end = html[start..].find('"').unwrap() + start;
     let text = html[start..end]
         .replace("&quot;", "\"")
         .replace("&#x27;", "'")
@@ -262,8 +268,8 @@ async fn flow(scratch: &ScratchDatabase) {
 }
 
 /// The New form: the "Add menu items" column (hidden until the script shows it), in WordPress's
-/// order, the script and its stylesheet, the items field kept for the form without the script,
-/// and the Menu Settings.
+/// order, the script and its stylesheet, the items field as the builder's hidden value (no raw
+/// JSON textarea, nor Ignite 0.6.7's repeater sub-fields), and the Menu Settings.
 async fn builder_page(client: &Client) {
     let (status, html) = get(client, "/mc-admin/nav-menus/new").await;
     assert_eq!(status, Status::Ok);
@@ -293,13 +299,16 @@ async fn builder_page(client: &Client) {
         "Load more",
         "/mc-includes/js/nav-menus.js?ver=",
         "/mc-includes/css/nav-menus.css?ver=",
-        "name=\"items\"",
+        "<input type=\"hidden\" id=\"items\" name=\"items\" value=\"\">",
         "Automatically add new top-level pages to this menu",
         "loc_primary",
     ] {
         assert!(html.contains(text), "{text}: {html}");
     }
     assert!(!html.contains("Delete Menu"), "{html}");
+    assert!(!html.contains("<textarea"), "{html}");
+    assert!(!html.contains("items[0]"), "{html}");
+    assert!(!html.contains("for=\"items\""), "{html}");
     // The script and the stylesheet are served.
     let script = html
         .split("src=\"")

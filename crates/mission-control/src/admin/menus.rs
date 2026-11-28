@@ -7,10 +7,12 @@
 //! - The script (`assets/editor/nav-menus.js`) and its stylesheet (`assets/editor/nav-menus.css`),
 //!   served at `/mc-includes/js/nav-menus.js` and `/mc-includes/css/nav-menus.css` with a `?ver=`
 //!   of their own (cached for a year with the current version, as the editor's bundle). The
-//!   script shows the column beside the form, and the items field (Ignite's JSON rows) as
-//!   WordPress's Menu Structure: a nested list whose items open with their settings. It writes
-//!   the rows back into the field, so the form saves through Ignite as before; without the
-//!   script, the column stays hidden and the form's own fields edit the menu.
+//!   script shows the column beside the form, and the items field as WordPress's Menu
+//!   Structure: a nested list whose items open with their settings. The items field is the
+//!   builder's own value: Ignite's field of JSON rows becomes a hidden input (no raw JSON
+//!   textarea on the page, as WordPress's `nav-menus.php` keeps its items in the structure's
+//!   hidden inputs), which the script reads and writes back, so the form saves through Ignite
+//!   as before. Without the script, the column stays hidden, and a save keeps the items.
 //! - A fairing adds them to Ignite's New and edit forms of the screen and to the form a refused
 //!   save answers (422).
 //! - `GET /mc-admin/nav-menus/quick-search` lists a box's items (published posts of a post
@@ -422,10 +424,13 @@ fn with_switcher(html: &str, top: &str) -> String {
     out
 }
 
-/// Ignite's form page `html` with the builder: its stylesheet in the head, the Delete Menu form
+/// Ignite's form page `html` with the builder: the items field as its hidden value
+/// ([`items_as_hidden`]), its stylesheet in the head, the Delete Menu form
 /// after the menu's form (for menu `id`), and the "Add menu items" column and the script before
 /// the end of the body. A page without the menu's form is returned as it is.
 fn with_builder(html: &str, sources: &MenuSources, id: Option<i64>, token: &str) -> String {
+    let html = items_as_hidden(html);
+    let html = html.as_str();
     let action = format!("action=\"{ADMIN_PATH}/{NAV_MENUS}");
     let Some(form_end) = html.find(&action).and_then(|at| {
         html[at..]
@@ -469,6 +474,49 @@ fn with_builder(html: &str, sources: &MenuSources, id: Option<i64>, token: &str)
     );
     out.replacen("</head>", &head, 1)
         .replacen("</body>", &body, 1)
+}
+
+/// `html` with Ignite's items field (its label and its textarea of JSON rows) as the builder's
+/// hidden value: `<input type="hidden" name="items">` holding the same JSON. An error under the
+/// field stays. A page without the field is returned as it is.
+fn items_as_hidden(html: &str) -> String {
+    let Some(open) = html
+        .match_indices("<textarea")
+        .map(|(at, _)| at)
+        .find(|at| {
+            html[*at..]
+                .find('>')
+                .is_some_and(|end| html[*at..*at + end].contains(" name=\"items\""))
+        })
+    else {
+        return html.to_owned();
+    };
+    let Some(content) = html[open..].find('>').map(|end| open + end + 1) else {
+        return html.to_owned();
+    };
+    let Some(close) = html[content..].find("</textarea>").map(|end| content + end) else {
+        return html.to_owned();
+    };
+    // The textarea's text is escaped; a quote is escaped again for the attribute (the same
+    // value), and the newline after the opening tag is not part of it.
+    let value = html[content..close]
+        .strip_prefix('\n')
+        .unwrap_or(&html[content..close])
+        .replace('"', "&quot;");
+    let input = format!("<input type=\"hidden\" id=\"items\" name=\"items\" value=\"{value}\">");
+    let mut start = open;
+    // The field's label goes with it.
+    if let Some(label) = html[..open].rfind("<label")
+        && let Some(label_end) = html[label..open].find("</label>")
+        && html[label..label + label_end].contains("for=\"items\"")
+    {
+        start = label;
+    }
+    let mut out = String::with_capacity(html.len());
+    out.push_str(&html[..start]);
+    out.push_str(&input);
+    out.push_str(&html[close + "</textarea>".len()..]);
+    out
 }
 
 /// Adds the builder to the Menus screen's forms; see the [module](self).
@@ -629,6 +677,31 @@ mod tests {
         // New: no Delete Menu.
         let page = with_builder(PAGE, &sources(), None, "t");
         assert!(!page.contains("/delete"), "{page}");
+    }
+
+    #[test]
+    fn the_items_field_is_the_builders_hidden_value() {
+        let page = "<form action=\"/mc-admin/nav-menus/7\"><div data-ignite-field=\"items\">\
+            <label class=\"ig-label\" for=\"items\">Menu items</label>\n  \
+            <textarea class=\"ig-input\" id=\"items\" name=\"items\">[{&quot;title&quot;:\
+            &quot;A &lt;b&gt;&quot;}]</textarea><p class=\"ig-error\">Bad</p></div></form>";
+        let out = items_as_hidden(page);
+        assert!(!out.contains("<textarea"), "{out}");
+        assert!(!out.contains("<label"), "{out}");
+        assert!(
+            out.contains(
+                "<input type=\"hidden\" id=\"items\" name=\"items\" \
+                 value=\"[{&quot;title&quot;:&quot;A &lt;b&gt;&quot;}]\">"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("<p class=\"ig-error\">Bad</p>"), "{out}");
+        let page = with_builder(PAGE, &sources(), Some(7), "t");
+        assert!(
+            page.contains("type=\"hidden\" id=\"items\" name=\"items\" value=\"\""),
+            "{page}"
+        );
+        assert_eq!(items_as_hidden("<p>none</p>"), "<p>none</p>");
     }
 
     #[test]

@@ -192,9 +192,11 @@ pub fn nav_menus_resource(theme: &Theme, types: Vec<(MenuObjectType, String)>) -
         ));
     }
     // The items as a JSON list of rows (`id`, `title`, `type`, `object_id`, `url`, `parent`,
-    // `parent_row`, `classes`, `new_tab`, `attr_title`, `xfn`, `description`) in a textarea,
-    // which the menu builder edits as WordPress's Menu Structure (Ignite 0.6.7 edits a
-    // repeater as rows, which the builder does not read). A row's `type` is text, not a
+    // `parent_row`, `classes`, `new_tab`, `attr_title`, `xfn`, `description`): the menu
+    // builder's own value, which the `mission-control` crate shows as a hidden input and the
+    // builder edits as WordPress's Menu Structure. Not a repeater: Ignite 0.6.7 shows a
+    // repeater's rows as sub-fields (`items[0][title]`), which is not the builder's list, and
+    // the stored format and the REST API stay as they are. A row's `type` is text, not a
     // choice: a stored item of a type the screen no longer offers (a custom type registered
     // without `show_in_nav_menus`, or removed) must still save unchanged, as WordPress keeps
     // such items. The data layer checks each row (see `item_inputs`).
